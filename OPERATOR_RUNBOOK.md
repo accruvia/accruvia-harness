@@ -29,9 +29,12 @@ PYTHONPATH=src python3 -m accruvia_harness task-report <task_id>
 PYTHONPATH=src python3 -m accruvia_harness events
 ```
 
-## GitLab Intake And Reporting
+## Issue Intake And Reporting
 
 ```bash
+PYTHONPATH=src python3 -m accruvia_harness sync-github-open <project_id> <repo>
+PYTHONPATH=src python3 -m accruvia_harness report-github <task_id> <repo> --comment "..." --close
+PYTHONPATH=src python3 -m accruvia_harness sync-github-state <task_id> <repo>
 PYTHONPATH=src python3 -m accruvia_harness sync-gitlab-open <project_id> <repo>
 PYTHONPATH=src python3 -m accruvia_harness process-next --worker-id worker-a --lease-seconds 300
 PYTHONPATH=src python3 -m accruvia_harness report-gitlab <task_id> <repo> --comment "..." --close
@@ -70,4 +73,5 @@ PYTHONPATH=src python3 -m accruvia_harness init-db
 2. Inspect `.accruvia-harness/harness.log`.
 3. Inspect task and run events with `events`.
 4. Confirm schema version with `init-db` or `status`.
-5. If GitLab integration is involved, confirm `glab` authentication separately.
+5. If GitHub integration is involved, confirm `gh auth status`.
+6. If GitLab integration is involved, confirm `glab` authentication separately.

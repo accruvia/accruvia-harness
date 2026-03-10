@@ -2,6 +2,7 @@
 
 from .config import HarnessConfig
 from .engine import HarnessEngine
+from .github import GitHubCLI
 from .gitlab import GitLabCLI
 from .interrogation import HarnessQueryService
 from .logging_utils import HarnessLogger
@@ -15,6 +16,7 @@ __all__ = [
     "DefaultAnalyzer",
     "DefaultDecider",
     "DefaultPlanner",
+    "GitHubCLI",
     "GitLabCLI",
     "HarnessConfig",
     "HarnessEngine",

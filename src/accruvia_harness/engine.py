@@ -2,9 +2,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .gitlab import GitLabCLI, GitLabIssue
+from .github import GitHubCLI
+from .gitlab import GitLabCLI
 from .policy import DefaultAnalyzer, DefaultDecider, DefaultPlanner
-from .services import GitLabTaskService, PromotionService, QueueService, RunService, TaskService
+from .services import (
+    GitHubTaskService,
+    GitLabTaskService,
+    PromotionService,
+    QueueService,
+    RunService,
+    TaskService,
+)
 from .store import SQLiteHarnessStore
 from .workers import LocalArtifactWorker, WorkerBackend
 
@@ -40,6 +48,7 @@ class HarnessEngine:
             decider=self.decider,
         )
         self.queue = QueueService(self.store, self.runs)
+        self.github_tasks = GitHubTaskService(self.tasks, self.store)
         self.gitlab_tasks = GitLabTaskService(self.tasks, self.store)
         self.promotions = PromotionService(self.store, self.tasks)
 
@@ -151,13 +160,32 @@ class HarnessEngine:
         self,
         project_id: str,
         repo: str,
-        issue: GitLabIssue,
+        issue,
         priority: int = 100,
         strategy: str = "default",
         max_attempts: int = 3,
         required_artifacts: list[str] | None = None,
     ):
         return self.gitlab_tasks.import_gitlab_issue(
+            project_id=project_id,
+            issue=issue,
+            priority=priority,
+            strategy=strategy,
+            max_attempts=max_attempts,
+            required_artifacts=required_artifacts,
+        )
+
+    def import_github_issue(
+        self,
+        project_id: str,
+        repo: str,
+        issue,
+        priority: int = 100,
+        strategy: str = "default",
+        max_attempts: int = 3,
+        required_artifacts: list[str] | None = None,
+    ):
+        return self.github_tasks.import_github_issue(
             project_id=project_id,
             issue=issue,
             priority=priority,
@@ -203,6 +231,52 @@ class HarnessEngine:
             comment=comment,
             close=close,
         )
+
+    def sync_github_open_issues(
+        self,
+        project_id: str,
+        repo: str,
+        github: GitHubCLI,
+        limit: int,
+        priority: int = 100,
+        strategy: str = "default",
+        max_attempts: int = 3,
+        required_artifacts: list[str] | None = None,
+    ):
+        return self.github_tasks.sync_github_open_issues(
+            project_id=project_id,
+            repo=repo,
+            github=github,
+            limit=limit,
+            priority=priority,
+            strategy=strategy,
+            max_attempts=max_attempts,
+            required_artifacts=required_artifacts,
+        )
+
+    def report_task_to_github(
+        self,
+        task_id: str,
+        repo: str,
+        github: GitHubCLI,
+        comment: str,
+        close: bool = False,
+    ):
+        return self.github_tasks.report_task_to_github(
+            task_id=task_id,
+            repo=repo,
+            github=github,
+            comment=comment,
+            close=close,
+        )
+
+    def sync_github_issue_state(
+        self,
+        task_id: str,
+        repo: str,
+        github: GitHubCLI,
+    ):
+        return self.github_tasks.sync_github_issue_state(task_id=task_id, repo=repo, github=github)
 
     def create_follow_on_task(
         self,

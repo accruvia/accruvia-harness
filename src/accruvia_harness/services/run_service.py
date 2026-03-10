@@ -76,6 +76,18 @@ class RunService:
         run = self.store.mark_run(run, RunStatus.WORKING, plan.summary)
 
         work = self.worker.work(task, run, self.workspace_root)
+        self.store.create_event(
+            Event(
+                id=new_id("event"),
+                entity_type="run",
+                entity_id=run.id,
+                event_type="worker_completed",
+                payload={
+                    "outcome": work.outcome,
+                    "diagnostics": work.diagnostics or {},
+                },
+            )
+        )
         for kind, path, summary in work.artifacts:
             artifact = Artifact(id=new_id("artifact"), run_id=run.id, kind=kind, path=path, summary=summary)
             self.store.create_artifact(artifact)

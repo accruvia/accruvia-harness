@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from accruvia_harness.domain import Run, RunStatus, Task, new_id
-from accruvia_harness.workers import LocalArtifactWorker, ShellCommandWorker, build_worker
+from accruvia_harness.workers import AgentCommandWorker, LocalArtifactWorker, ShellCommandWorker, build_worker
 
 
 class WorkerTests(unittest.TestCase):
@@ -38,8 +38,21 @@ class WorkerTests(unittest.TestCase):
         result = worker.work(self.task, self.run, self.base)
         kinds = sorted(kind for kind, _, _ in result.artifacts)
         self.assertEqual(["report", "worker_stderr", "worker_stdout"], kinds)
+        self.assertEqual("success", result.outcome)
         self.assertTrue((self.base / "runs" / self.run.id / "output.txt").exists())
+
+    def test_agent_worker_captures_failure_without_raising(self) -> None:
+        worker = AgentCommandWorker("printf 'boom' >&2; exit 7")
+        result = worker.work(self.task, self.run, self.base)
+
+        self.assertEqual("failed", result.outcome)
+        self.assertEqual(7, result.diagnostics["returncode"])
+        self.assertTrue((self.base / "runs" / self.run.id / "worker.stderr.txt").exists())
 
     def test_build_worker_requires_command_for_shell_backend(self) -> None:
         with self.assertRaises(ValueError):
             build_worker("shell")
+
+    def test_build_worker_requires_command_for_agent_backend(self) -> None:
+        with self.assertRaises(ValueError):
+            build_worker("agent")

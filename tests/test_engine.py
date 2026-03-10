@@ -155,7 +155,7 @@ class HarnessEngineTests(unittest.TestCase):
         self.assertEqual("gitlab_issue", task_events[0].payload["external_ref_type"])
         self.assertEqual("458", task_events[0].payload["external_ref_id"])
         self.assertEqual(
-            ["run_created", "planned"],
+            ["run_created", "planned", "worker_completed"],
             [event.event_type for event in run_events],
         )
 

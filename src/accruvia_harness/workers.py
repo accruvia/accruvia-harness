@@ -49,12 +49,15 @@ class LocalArtifactWorker:
                 ("plan", str(plan_path), "Run planning artifact"),
                 ("report", str(report_path), "Structured run report"),
             ],
+            outcome="success",
+            diagnostics={"worker_backend": "local"},
         )
 
 
-class ShellCommandWorker:
-    def __init__(self, command: str) -> None:
+class CommandWorker:
+    def __init__(self, command: str, backend_name: str) -> None:
         self.command = command
+        self.backend_name = backend_name
 
     def work(self, task: Task, run: Run, workspace_root: Path) -> WorkResult:
         run_dir = workspace_root / "runs" / run.id
@@ -68,7 +71,7 @@ class ShellCommandWorker:
         completed = subprocess.run(
             self.command,
             shell=True,
-            check=True,
+            check=False,
             cwd=run_dir,
             capture_output=True,
             text=True,
@@ -87,22 +90,40 @@ class ShellCommandWorker:
                     "attempt": run.attempt,
                     "strategy": task.strategy,
                     "objective": task.objective,
-                    "worker_backend": "shell",
+                    "worker_backend": self.backend_name,
                     "command": self.command,
+                    "returncode": completed.returncode,
                 },
                 indent=2,
                 sort_keys=True,
             ),
             encoding="utf-8",
         )
+        outcome = "success" if completed.returncode == 0 else "failed"
         return WorkResult(
-            summary="Executed shell worker command and captured output.",
+            summary=f"Executed {self.backend_name} worker command and captured output.",
             artifacts=[
                 ("worker_stdout", str(stdout_path), "Captured shell worker stdout"),
                 ("worker_stderr", str(stderr_path), "Captured shell worker stderr"),
                 ("report", str(report_path), "Structured run report"),
             ],
+            outcome=outcome,
+            diagnostics={
+                "worker_backend": self.backend_name,
+                "command": self.command,
+                "returncode": completed.returncode,
+            },
         )
+
+
+class ShellCommandWorker(CommandWorker):
+    def __init__(self, command: str) -> None:
+        super().__init__(command=command, backend_name="shell")
+
+
+class AgentCommandWorker(CommandWorker):
+    def __init__(self, command: str) -> None:
+        super().__init__(command=command, backend_name="agent")
 
 
 def build_worker(backend: str, shell_command: str | None = None) -> WorkerBackend:
@@ -112,4 +133,8 @@ def build_worker(backend: str, shell_command: str | None = None) -> WorkerBacken
         if not shell_command:
             raise ValueError("Shell worker backend requires ACCRUVIA_WORKER_COMMAND")
         return ShellCommandWorker(shell_command)
+    if backend == "agent":
+        if not shell_command:
+            raise ValueError("Agent worker backend requires ACCRUVIA_WORKER_COMMAND")
+        return AgentCommandWorker(shell_command)
     raise ValueError(f"Unsupported worker backend: {backend}")

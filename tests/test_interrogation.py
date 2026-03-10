@@ -7,7 +7,23 @@ from pathlib import Path
 from accruvia_harness.domain import Project, new_id
 from accruvia_harness.engine import HarnessEngine
 from accruvia_harness.interrogation import HarnessQueryService
+from accruvia_harness.policy import WorkResult
 from accruvia_harness.store import SQLiteHarnessStore
+from accruvia_harness.workers import LocalArtifactWorker
+
+
+class MissingArtifactWorker(LocalArtifactWorker):
+    def work(self, task, run, workspace_root: Path) -> WorkResult:  # type: ignore[override]
+        run_dir = workspace_root / "runs" / run.id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        plan_path = run_dir / "plan.txt"
+        plan_path.write_text("plan only\n", encoding="utf-8")
+        return WorkResult(
+            summary="Recorded partial artifacts.",
+            artifacts=[("plan", str(plan_path), "Plan only")],
+            outcome="failed",
+            diagnostics={"reason": "missing_report"},
+        )
 
 
 class HarnessQueryServiceTests(unittest.TestCase):
@@ -61,3 +77,33 @@ class HarnessQueryServiceTests(unittest.TestCase):
         self.assertEqual(task.id, report["task"]["id"])
         self.assertEqual(1, len(report["runs"]))
         self.assertGreaterEqual(len(report["events"]), 3)
+
+    def test_portfolio_summary_includes_retry_and_follow_on_metrics(self) -> None:
+        failing_engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-retries",
+            worker=MissingArtifactWorker(),
+        )
+        task = failing_engine.import_issue_task(
+            project_id=self.project.id,
+            issue_id="502",
+            title="Retry task",
+            objective="Cause retries",
+            priority=100,
+            strategy="baseline",
+            max_attempts=2,
+            required_artifacts=["plan", "report"],
+        )
+        runs = failing_engine.run_until_stable(task.id)
+        failing_engine.create_follow_on_task(
+            parent_task_id=task.id,
+            source_run_id=runs[-1].id,
+            title="Follow-on",
+            objective="Handle failure",
+        )
+
+        summary = self.query.portfolio_summary()
+        metrics = summary["global_metrics"]
+
+        self.assertGreater(metrics["retry_rate"], 0.0)
+        self.assertEqual(1, metrics["follow_on_task_count"])

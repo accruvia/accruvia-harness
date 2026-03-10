@@ -60,7 +60,7 @@ The main lessons learned were:
 - `evaluation`
 - `decision`
 
-Tasks may optionally carry external references such as `gitlab_issue:#456`. Those references are intake and reporting links, not the execution control plane.
+Tasks may optionally carry external references such as `github_issue:#456`. Those references are intake and reporting links, not the execution control plane.
 
 ## V1 Golden Path
 
@@ -89,11 +89,11 @@ OpenClaw may still be useful as an observer and interrogator over harness state,
 
 The harness keeps execution truth internally.
 
-- GitLab issues and other external systems are intake and reporting surfaces
+- GitHub issues and other external systems are intake and reporting surfaces
 - the harness database and event history are the canonical source of truth for task execution
 - retries, runs, evaluations, decisions, and artifacts are governed by the harness, not the issue tracker
 
-This means a task may link to `gitlab_issue:#456`, but the issue itself is not the workflow control plane.
+This means a task may link to `github_issue:#456`, but the issue itself is not the workflow control plane.
 
 ## Current Implementation
 
@@ -111,7 +111,8 @@ This repo now contains a minimal durable harness foundation:
 - queue selection for pending tasks by priority
 - task leasing for safe queue arbitration
 - task lineage via `parent_task_id` and `source_run_id`
-- a GitLab adapter for importing issues and reporting results back out
+- a GitHub adapter for importing issues and reporting results back out
+- worker backends for `local`, `shell`, and `agent`
 - a read-only interrogation surface for summaries, context packets, and task reports
 - a small CLI for creating projects, syncing issue-backed tasks, running cycles, and inspecting status
 
@@ -125,17 +126,18 @@ PYTHONPATH=src python3 -m accruvia_harness config
 PYTHONPATH=src python3 -m accruvia_harness runtime-info
 PYTHONPATH=src python3 -m accruvia_harness run-temporal-worker
 PYTHONPATH=src python3 -m accruvia_harness create-project accruvia "Accruvia harness work"
-PYTHONPATH=src python3 -m accruvia_harness create-task <project_id> "First task" "Build the first durable loop" --priority 200 --external-ref-type gitlab_issue --external-ref-id 456 --strategy baseline --required-artifact plan --required-artifact report
+PYTHONPATH=src python3 -m accruvia_harness create-task <project_id> "First task" "Build the first durable loop" --priority 200 --external-ref-type github_issue --external-ref-id 456 --strategy baseline --required-artifact plan --required-artifact report
 PYTHONPATH=src python3 -m accruvia_harness import-issue <project_id> 456 "First task" "Build the first durable loop" --priority 200 --strategy baseline --required-artifact plan --required-artifact report
-PYTHONPATH=src python3 -m accruvia_harness import-gitlab-issue <project_id> soverton/accruvia 456 --priority 200 --strategy baseline --required-artifact plan --required-artifact report
-PYTHONPATH=src python3 -m accruvia_harness sync-gitlab-open <project_id> soverton/accruvia --limit 20 --priority 200 --strategy baseline --required-artifact plan --required-artifact report
+PYTHONPATH=src python3 -m accruvia_harness import-github-issue <project_id> accruvia/accruvia 456 --priority 200 --strategy baseline --required-artifact plan --required-artifact report
+PYTHONPATH=src python3 -m accruvia_harness sync-github-open <project_id> accruvia/accruvia --limit 20 --priority 200 --strategy baseline --required-artifact plan --required-artifact report
+PYTHONPATH=src python3 -m accruvia_harness report-github <task_id> accruvia/accruvia --comment "Harness completed this task." --close
+PYTHONPATH=src python3 -m accruvia_harness sync-github-state <task_id> accruvia/accruvia
 PYTHONPATH=src python3 -m accruvia_harness run-once <task_id>
 PYTHONPATH=src python3 -m accruvia_harness run-runtime <task_id>
 PYTHONPATH=src python3 -m accruvia_harness run-until-stable <task_id>
 PYTHONPATH=src python3 -m accruvia_harness process-next --worker-id worker-a --lease-seconds 300
 PYTHONPATH=src python3 -m accruvia_harness process-next-runtime --worker-id worker-a --lease-seconds 300
 PYTHONPATH=src python3 -m accruvia_harness process-queue 5 --worker-id worker-a --lease-seconds 300
-PYTHONPATH=src python3 -m accruvia_harness report-gitlab <task_id> soverton/accruvia --comment "Harness completed this task." --close
 PYTHONPATH=src python3 -m accruvia_harness smoke-test
 PYTHONPATH=src python3 -m accruvia_harness status
 PYTHONPATH=src python3 -m accruvia_harness summary
@@ -174,14 +176,19 @@ The repo now has meaningful slices of the later phases in place:
 - Phase 4: evaluation and promotion baseline
   - explicit evaluation records
   - bounded retry, fail, and promote decisions
+  - explicit promotion review records and follow-on task generation
   - follow-on task lineage support
-- Phase 5: GitLab workflow integration
-  - import, sync, report, and close flows
+- Phase 5: GitHub workflow integration
+  - import, sync, report, close, and state-sync flows
+- real worker backends
+  - `local`
+  - `shell`
+  - `agent`
 - Phase 6: parallel execution baseline
   - task leasing and worker-aware queue arbitration
 - Phase 7: observability and analytics baseline
   - structured JSONL logs
-  - metrics snapshots over tasks, runs, and leases
+  - metrics snapshots over tasks, runs, leases, retries, promotions, and follow-on work
 - Phase 8: interrogation layer baseline
   - `summary`
   - `context-packet`

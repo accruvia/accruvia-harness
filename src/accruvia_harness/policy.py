@@ -14,6 +14,8 @@ class PlanResult:
 class WorkResult:
     summary: str
     artifacts: list[tuple[str, str, str]]
+    outcome: str = "success"
+    diagnostics: dict[str, object] | None = None
 
 
 @dataclass(slots=True)

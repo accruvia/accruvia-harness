@@ -1,32 +1,10 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
 
-from .domain import Artifact, Task
-
-
-@dataclass(slots=True)
-class ValidationIssue:
-    code: str
-    summary: str
-    details: dict[str, object]
-    follow_on_title: str | None = None
-    follow_on_objective: str | None = None
-
-
-@dataclass(slots=True)
-class ValidationResult:
-    validator: str
-    ok: bool
-    summary: str
-    issues: list[ValidationIssue]
-
-
-class PromotionValidator(Protocol):
-    def validate(self, task: Task, artifacts: list[Artifact]) -> ValidationResult: ...
+from ..domain import Artifact, Task
+from .base import PromotionValidator, ValidationIssue, ValidationResult
 
 
 class RequiredArtifactsValidator:
@@ -34,17 +12,12 @@ class RequiredArtifactsValidator:
         kinds = {artifact.kind for artifact in artifacts}
         missing = sorted(set(task.required_artifacts) - kinds)
         if not missing:
-            return ValidationResult(
-                validator="required_artifacts",
-                ok=True,
-                summary="Required artifacts are present.",
-                issues=[],
-            )
+            return ValidationResult("required_artifacts", True, "Required artifacts are present.", [])
         return ValidationResult(
-            validator="required_artifacts",
-            ok=False,
-            summary="Required artifacts are missing.",
-            issues=[
+            "required_artifacts",
+            False,
+            "Required artifacts are missing.",
+            [
                 ValidationIssue(
                     code="missing_required_artifacts",
                     summary="Promotion candidate is missing required artifacts.",
@@ -58,22 +31,14 @@ class RequiredArtifactsValidator:
 
 class ArtifactPathValidator:
     def validate(self, task: Task, artifacts: list[Artifact]) -> ValidationResult:
-        missing_paths: list[str] = []
-        for artifact in artifacts:
-            if not Path(artifact.path).exists():
-                missing_paths.append(artifact.path)
+        missing_paths = [artifact.path for artifact in artifacts if not Path(artifact.path).exists()]
         if not missing_paths:
-            return ValidationResult(
-                validator="artifact_paths",
-                ok=True,
-                summary="Artifact files exist on disk.",
-                issues=[],
-            )
+            return ValidationResult("artifact_paths", True, "Artifact files exist on disk.", [])
         return ValidationResult(
-            validator="artifact_paths",
-            ok=False,
-            summary="Artifact files are missing on disk.",
-            issues=[
+            "artifact_paths",
+            False,
+            "Artifact files are missing on disk.",
+            [
                 ValidationIssue(
                     code="artifact_path_missing",
                     summary="Stored artifact path no longer exists.",
@@ -89,13 +54,7 @@ class ReportArtifactValidator:
     def validate(self, task: Task, artifacts: list[Artifact]) -> ValidationResult:
         reports = [artifact for artifact in artifacts if artifact.kind == "report"]
         if not reports:
-            return ValidationResult(
-                validator="report_artifact",
-                ok=True,
-                summary="No report artifact available for structured validation.",
-                issues=[],
-            )
-
+            return ValidationResult("report_artifact", True, "No report artifact available for structured validation.", [])
         issues: list[ValidationIssue] = []
         for artifact in reports:
             report_path = Path(artifact.path)
@@ -123,20 +82,9 @@ class ReportArtifactValidator:
                         or "Address the blocker recorded in the report artifact and regenerate the candidate.",
                     )
                 )
-
         if not issues:
-            return ValidationResult(
-                validator="report_artifact",
-                ok=True,
-                summary="Report artifacts passed structured validation.",
-                issues=[],
-            )
-        return ValidationResult(
-            validator="report_artifact",
-            ok=False,
-            summary="Report artifacts failed structured validation.",
-            issues=issues,
-        )
+            return ValidationResult("report_artifact", True, "Report artifacts passed structured validation.", [])
+        return ValidationResult("report_artifact", False, "Report artifacts failed structured validation.", issues)
 
 
 def default_promotion_validators() -> list[PromotionValidator]:
