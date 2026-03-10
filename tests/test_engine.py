@@ -34,6 +34,10 @@ class PromotionBlockedWorker(LocalArtifactWorker):
         report_path.write_text(
             json.dumps(
                 {
+                    "changed_files": ["src/accruvia_client/runner.py"],
+                    "test_files": [],
+                    "compile_check": {"passed": True},
+                    "test_check": {"passed": False},
                     "promotion_blocked": True,
                     "promotion_block_reason": "Generated candidate lacks required test coverage.",
                     "follow_on_title": "Add missing test coverage",
@@ -350,3 +354,56 @@ class HarnessEngineTests(unittest.TestCase):
         second = engine.review_promotion(task.id, run.id)
 
         self.assertEqual(first.follow_on_task_id, second.follow_on_task_id)
+
+    def test_review_promotion_rejects_when_deterministic_test_evidence_is_missing(self) -> None:
+        class NoTestEvidenceWorker(LocalArtifactWorker):
+            def work(self, task, run, workspace_root: Path) -> WorkResult:  # type: ignore[override]
+                run_dir = workspace_root / "runs" / run.id
+                run_dir.mkdir(parents=True, exist_ok=True)
+                plan_path = run_dir / "plan.txt"
+                plan_path.write_text("plan\n", encoding="utf-8")
+                report_path = run_dir / "report.json"
+                report_path.write_text(
+                    json.dumps(
+                        {
+                            "changed_files": ["src/example.py"],
+                            "compile_check": {"passed": True},
+                            "test_files": [],
+                            "test_check": {"passed": False},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return WorkResult(
+                    summary="Recorded candidate without test evidence.",
+                    artifacts=[
+                        ("plan", str(plan_path), "Plan artifact"),
+                        ("report", str(report_path), "Candidate report artifact"),
+                    ],
+                )
+
+        engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-no-tests",
+            worker=NoTestEvidenceWorker(),
+        )
+        task = engine.create_task_with_policy(
+            project_id=self.project_id,
+            title="Missing test evidence",
+            objective="Exercise deterministic validator rejection",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+        run = engine.run_once(task.id)
+
+        result = engine.review_promotion(task.id, run.id)
+
+        self.assertEqual("rejected", result.promotion.status.value)
+        validator_names = [entry["validator"] for entry in result.promotion.details["validators"]]
+        self.assertIn("test_evidence", validator_names)

@@ -199,6 +199,7 @@ The repo now has meaningful slices of the later phases in place:
   - bounded retry, fail, and promote decisions
   - explicit promotion review records and follow-on task generation
   - follow-on task lineage support
+  - deterministic promotion gates for changed files, compile success, passing tests, and required artifacts
 - Phase 5: GitHub workflow integration
   - import, sync, report, close, and state-sync flows
 - real worker backends
@@ -217,6 +218,19 @@ The repo now has meaningful slices of the later phases in place:
   - `task-report`
 
 The remaining work is depth and hardening, not whether these concerns exist at all.
+
+## Deterministic Promotion Gates
+
+Promotion is no longer based only on artifact presence.
+
+The baseline deterministic validators now require structured evidence for:
+
+- required artifacts existing on disk
+- changed files being recorded
+- a passing compile check
+- named test files plus a passing deterministic test run
+
+These checks run before any higher-order LLM affirmation layer. The LLM reviewer should interpret evidence, not replace it.
 
 ## Temporal Dev Stack
 

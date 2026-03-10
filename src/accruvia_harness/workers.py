@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import py_compile
 import subprocess
+import sys
 from pathlib import Path
 from typing import Protocol
 
@@ -29,6 +31,38 @@ class LocalArtifactWorker:
             f"task={task.id}\nrun={run.id}\nattempt={run.attempt}\nobjective={task.objective}\n",
             encoding="utf-8",
         )
+        module_path = run_dir / "generated_module.py"
+        module_path.write_text(
+            "def generated_value() -> int:\n"
+            "    return 2\n",
+            encoding="utf-8",
+        )
+        test_path = run_dir / "test_generated_module.py"
+        test_path.write_text(
+            "import unittest\n\n"
+            "from generated_module import generated_value\n\n"
+            "class GeneratedModuleTests(unittest.TestCase):\n"
+            "    def test_generated_value(self) -> None:\n"
+            "        self.assertEqual(2, generated_value())\n\n"
+            "if __name__ == '__main__':\n"
+            "    unittest.main()\n",
+            encoding="utf-8",
+        )
+        compile_targets = [str(module_path), str(test_path)]
+        for target in compile_targets:
+            py_compile.compile(target, doraise=True)
+        test_completed = subprocess.run(
+            [sys.executable, "-m", "unittest", "discover", "-s", str(run_dir), "-p", "test_generated_module.py"],
+            check=False,
+            cwd=run_dir,
+            capture_output=True,
+            text=True,
+        )
+        test_output_path = run_dir / "test_output.txt"
+        test_output_path.write_text(
+            f"{test_completed.stdout}\n{test_completed.stderr}".strip(),
+            encoding="utf-8",
+        )
         report_path = run_dir / "report.json"
         report_path.write_text(
             json.dumps(
@@ -39,6 +73,24 @@ class LocalArtifactWorker:
                     "strategy": task.strategy,
                     "objective": task.objective,
                     "worker_backend": "local",
+                    "changed_files": [str(module_path), str(test_path)],
+                    "test_files": [str(test_path)],
+                    "compile_check": {"passed": True, "targets": compile_targets},
+                    "test_check": {
+                        "passed": test_completed.returncode == 0,
+                        "framework": "unittest",
+                        "command": [
+                            sys.executable,
+                            "-m",
+                            "unittest",
+                            "discover",
+                            "-s",
+                            str(run_dir),
+                            "-p",
+                            "test_generated_module.py",
+                        ],
+                        "output_path": str(test_output_path),
+                    },
                 },
                 indent=2,
                 sort_keys=True,
@@ -51,8 +103,13 @@ class LocalArtifactWorker:
                 ("plan", str(plan_path), "Run planning artifact"),
                 ("report", str(report_path), "Structured run report"),
             ],
-            outcome="success",
-            diagnostics={"worker_backend": "local"},
+            outcome="success" if test_completed.returncode == 0 else "failed",
+            diagnostics={
+                "worker_backend": "local",
+                "compile_targets": compile_targets,
+                "test_output_path": str(test_output_path),
+                "test_returncode": test_completed.returncode,
+            },
         )
 
 
@@ -84,9 +141,16 @@ class CommandWorker:
         stderr_path = run_dir / "worker.stderr.txt"
         stderr_path.write_text(completed.stderr, encoding="utf-8")
         report_path = run_dir / "report.json"
+        payload: dict[str, object] = {}
+        if report_path.exists():
+            try:
+                payload = json.loads(report_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                payload = {}
         report_path.write_text(
             json.dumps(
                 {
+                    **payload,
                     "task_id": task.id,
                     "run_id": run.id,
                     "attempt": run.attempt,
@@ -189,9 +253,16 @@ class LLMTaskWorker:
             )
 
         report_path = run_dir / "report.json"
+        payload: dict[str, object] = {}
+        if report_path.exists():
+            try:
+                payload = json.loads(report_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                payload = {}
         report_path.write_text(
             json.dumps(
                 {
+                    **payload,
                     "task_id": task.id,
                     "run_id": run.id,
                     "attempt": run.attempt,
