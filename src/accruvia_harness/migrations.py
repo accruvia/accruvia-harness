@@ -130,6 +130,13 @@ MIGRATIONS: list[Migration] = [
         );
         """,
     ),
+    Migration(
+        version=4,
+        name="task_validation_profiles",
+        sql="""
+        ALTER TABLE tasks ADD COLUMN validation_profile TEXT NOT NULL DEFAULT 'generic';
+        """,
+    ),
 ]
 
 

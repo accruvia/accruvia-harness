@@ -35,6 +35,7 @@ def task_from_row(row: sqlite3.Row) -> Task:
         source_run_id=row["source_run_id"],
         external_ref_type=row["external_ref_type"],
         external_ref_id=row["external_ref_id"],
+        validation_profile=row["validation_profile"],
         strategy=row["strategy"],
         max_attempts=int(row["max_attempts"]),
         required_artifacts=json.loads(row["required_artifacts_json"]),

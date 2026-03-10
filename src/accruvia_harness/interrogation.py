@@ -87,3 +87,22 @@ class HarnessQueryService:
             "focus_tasks": focus_tasks,
             "leases": [asdict(lease) | {"lease_expires_at": lease.lease_expires_at.isoformat(), "created_at": lease.created_at.isoformat()} for lease in self.store.list_task_leases()],
         }
+
+    def operations_report(self, project_id: str | None = None) -> dict[str, object]:
+        metrics = self.store.metrics_snapshot(project_id)
+        tasks = self.store.list_tasks(project_id)
+        pending_affirmations = []
+        for task in tasks:
+            promotion = self.store.latest_promotion(task.id)
+            if promotion and promotion.status.value == "pending":
+                pending_affirmations.append(
+                    {
+                        "task": serialize_dataclass(task),
+                        "promotion": serialize_dataclass(promotion),
+                    }
+                )
+        return {
+            "project_id": project_id,
+            "metrics": metrics,
+            "pending_affirmations": pending_affirmations,
+        }

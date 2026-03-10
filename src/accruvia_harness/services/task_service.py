@@ -41,9 +41,10 @@ class TaskService:
         source_run_id: str | None,
         external_ref_type: str | None,
         external_ref_id: str | None,
-        strategy: str,
-        max_attempts: int,
-        required_artifacts: list[str],
+        validation_profile: str = "generic",
+        strategy: str = "default",
+        max_attempts: int = 3,
+        required_artifacts: list[str] | None = None,
     ) -> Task:
         return self.create_task(
             Task(
@@ -56,9 +57,10 @@ class TaskService:
                 source_run_id=source_run_id,
                 external_ref_type=external_ref_type,
                 external_ref_id=external_ref_id,
+                validation_profile=validation_profile,
                 strategy=strategy,
                 max_attempts=max_attempts,
-                required_artifacts=required_artifacts,
+                required_artifacts=required_artifacts or ["plan", "report"],
             )
         )
 
@@ -85,6 +87,7 @@ class TaskService:
             source_run_id=source_run_id,
             external_ref_type=parent.external_ref_type,
             external_ref_id=parent.external_ref_id,
+            validation_profile=parent.validation_profile,
             strategy=strategy or parent.strategy,
             max_attempts=max_attempts if max_attempts is not None else parent.max_attempts,
             required_artifacts=required_artifacts or list(parent.required_artifacts),

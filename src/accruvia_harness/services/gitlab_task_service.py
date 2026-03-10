@@ -18,6 +18,7 @@ class GitLabTaskService(IssueTaskService):
         title: str,
         objective: str,
         priority: int = 100,
+        validation_profile: str = "generic",
         strategy: str = "default",
         max_attempts: int = 3,
         required_artifacts: list[str] | None = None,
@@ -27,6 +28,7 @@ class GitLabTaskService(IssueTaskService):
             project_id=project_id,
             issue=issue,
             priority=priority,
+            validation_profile=validation_profile,
             strategy=strategy,
             max_attempts=max_attempts,
             required_artifacts=required_artifacts,
@@ -37,6 +39,7 @@ class GitLabTaskService(IssueTaskService):
         project_id: str,
         issue,
         priority: int = 100,
+        validation_profile: str = "generic",
         strategy: str = "default",
         max_attempts: int = 3,
         required_artifacts: list[str] | None = None,
@@ -45,6 +48,7 @@ class GitLabTaskService(IssueTaskService):
             project_id=project_id,
             issue=issue,
             priority=priority,
+            validation_profile=validation_profile,
             strategy=strategy,
             max_attempts=max_attempts,
             required_artifacts=required_artifacts,
@@ -57,11 +61,14 @@ class GitLabTaskService(IssueTaskService):
         gitlab: GitLabCLI,
         limit: int,
         priority: int = 100,
+        validation_profile: str = "generic",
         strategy: str = "default",
         max_attempts: int = 3,
         required_artifacts: list[str] | None = None,
     ) -> list[Task]:
-        return self.sync_open_issues(project_id, repo, gitlab, limit, priority, strategy, max_attempts, required_artifacts)
+        return self.sync_open_issues(
+            project_id, repo, gitlab, limit, priority, validation_profile, strategy, max_attempts, required_artifacts
+        )
 
     def report_task_to_gitlab(
         self,

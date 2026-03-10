@@ -30,6 +30,7 @@ class SQLiteHarnessStoreTests(unittest.TestCase):
             source_run_id="run_source",
             external_ref_type="gitlab_issue",
             external_ref_id="456",
+            validation_profile="python",
             strategy="baseline",
             max_attempts=5,
             required_artifacts=["plan", "report", "diff"],
@@ -44,6 +45,7 @@ class SQLiteHarnessStoreTests(unittest.TestCase):
         self.assertEqual("run_source", loaded.source_run_id)
         self.assertEqual("gitlab_issue", loaded.external_ref_type)
         self.assertEqual("456", loaded.external_ref_id)
+        self.assertEqual("python", loaded.validation_profile)
         self.assertEqual("baseline", loaded.strategy)
         self.assertEqual(5, loaded.max_attempts)
         self.assertEqual(["plan", "report", "diff"], loaded.required_artifacts)

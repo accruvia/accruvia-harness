@@ -194,12 +194,95 @@ class TestEvidenceValidator:
         )
 
 
-def default_promotion_validators() -> list[PromotionValidator]:
-    return [
+class ValidationProfileEvidenceValidator:
+    def validate(self, task: Task, artifacts: list[Artifact]) -> ValidationResult:
+        payloads, issues = _report_payloads(artifacts)
+        if issues:
+            return ValidationResult(
+                "validation_profile",
+                False,
+                "Unable to read report artifacts for validation-profile checks.",
+                issues,
+            )
+        profile_values = {
+            str(payload.get("validation_profile"))
+            for payload in payloads
+            if payload.get("validation_profile") is not None
+        }
+        if not profile_values:
+            return ValidationResult(
+                "validation_profile",
+                True,
+                "No report-level validation profile was declared; using task profile as authoritative.",
+                [],
+            )
+        if task.validation_profile in profile_values:
+            return ValidationResult(
+                "validation_profile",
+                True,
+                "Structured report matches the task validation profile.",
+                [],
+            )
+        return ValidationResult(
+            "validation_profile",
+            False,
+            "Structured report does not match the task validation profile.",
+            [
+                ValidationIssue(
+                    code="validation_profile_mismatch",
+                    summary="The report-level validation profile does not match the task profile.",
+                    details={"task_validation_profile": task.validation_profile, "report_profiles": sorted(profile_values)},
+                    follow_on_title=f"Align validation profile for {task.title}",
+                    follow_on_objective="Regenerate the candidate using the correct validation profile and evidence contract.",
+                )
+            ],
+        )
+
+
+class PythonTestFileValidator:
+    def validate(self, task: Task, artifacts: list[Artifact]) -> ValidationResult:
+        if task.validation_profile != "python":
+            return ValidationResult("python_test_files", True, "Task is not using the python profile.", [])
+        payloads, issues = _report_payloads(artifacts)
+        if issues:
+            return ValidationResult("python_test_files", False, "Unable to read report artifacts for python test validation.", issues)
+        test_files: list[str] = []
+        for payload in payloads:
+            candidate_files = payload.get("test_files")
+            if isinstance(candidate_files, list):
+                test_files.extend(str(item) for item in candidate_files if item)
+        if test_files and all(path.endswith(".py") for path in test_files):
+            return ValidationResult("python_test_files", True, "Python profile test files look correct.", [])
+        return ValidationResult(
+            "python_test_files",
+            False,
+            "Python profile requires .py test files.",
+            [
+                ValidationIssue(
+                    code="python_test_file_mismatch",
+                    summary="Python validation profile requires Python test files.",
+                    details={"test_files": test_files},
+                    follow_on_title=f"Add Python test evidence for {task.title}",
+                    follow_on_objective="Regenerate the candidate with Python test files that match the python validation profile.",
+                )
+            ],
+        )
+
+
+def validators_for_profile(profile: str) -> list[PromotionValidator]:
+    validators: list[PromotionValidator] = [
         RequiredArtifactsValidator(),
         ArtifactPathValidator(),
+        ValidationProfileEvidenceValidator(),
         ChangedFilesValidator(),
         CompileCheckValidator(),
         TestEvidenceValidator(),
         ReportArtifactValidator(),
     ]
+    if profile == "python":
+        validators.append(PythonTestFileValidator())
+    return validators
+
+
+def default_promotion_validators(profile: str = "generic") -> list[PromotionValidator]:
+    return validators_for_profile(profile)

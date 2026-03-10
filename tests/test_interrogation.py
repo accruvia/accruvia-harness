@@ -107,3 +107,27 @@ class HarnessQueryServiceTests(unittest.TestCase):
 
         self.assertGreater(metrics["retry_rate"], 0.0)
         self.assertEqual(1, metrics["follow_on_task_count"])
+
+    def test_operations_report_includes_profile_metrics_and_pending_affirmations(self) -> None:
+        task = self.engine.create_task_with_policy(
+            project_id=self.project.id,
+            title="Ops report",
+            objective="Exercise ops report output",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            validation_profile="python",
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+        run = self.engine.run_once(task.id)
+        self.engine.review_promotion(task.id, run.id)
+
+        report = self.query.operations_report(self.project.id)
+
+        self.assertEqual(1, report["metrics"]["pending_promotions"])
+        self.assertEqual(1, report["metrics"]["tasks_by_validation_profile"]["python"])
+        self.assertEqual(1, len(report["pending_affirmations"]))

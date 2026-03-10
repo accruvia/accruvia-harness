@@ -37,7 +37,20 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
         return True
     if args.command == "create-task":
         required_artifacts = args.required_artifacts or ["plan", "report"]
-        task = engine.create_task_with_policy(args.project_id, args.title, args.objective, args.priority, None, None, args.external_ref_type, args.external_ref_id, args.strategy, args.max_attempts, required_artifacts)
+        task = engine.create_task_with_policy(
+            args.project_id,
+            args.title,
+            args.objective,
+            args.priority,
+            None,
+            None,
+            args.external_ref_type,
+            args.external_ref_id,
+            args.validation_profile,
+            args.strategy,
+            args.max_attempts,
+            required_artifacts,
+        )
         emit({"task": serialize_dataclass(task)})
         return True
     if args.command == "run-once":
@@ -71,7 +84,9 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
         return True
     if args.command == "smoke-test":
         project = engine.create_project(args.project_name, "Local smoke-test project")
-        task = engine.create_task_with_policy(project.id, args.task_title, args.objective, 100, None, None, None, None, "smoke", 2, ["plan", "report"])
+        task = engine.create_task_with_policy(
+            project.id, args.task_title, args.objective, 100, None, None, None, None, "generic", "smoke", 2, ["plan", "report"]
+        )
         runs = engine.run_until_stable(task.id)
         emit({"project": serialize_dataclass(project), "task": serialize_dataclass(store.get_task(task.id)), "runs": [serialize_dataclass(r) for r in runs], "events": [serialize_dataclass(i) for i in store.list_events("task", task.id)]})
         return True

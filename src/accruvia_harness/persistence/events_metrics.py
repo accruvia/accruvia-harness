@@ -49,6 +49,13 @@ class EventsMetricsStoreMixin:
                 f"SELECT status, COUNT(*) AS count FROM tasks {task_filter} GROUP BY status",
                 tuple(params),
             ).fetchall()
+            profile_query = "SELECT validation_profile, COUNT(*) AS count FROM tasks"
+            profile_params: tuple[str, ...] = ()
+            if project_id:
+                profile_query += " WHERE project_id = ?"
+                profile_params = (project_id,)
+            profile_query += " GROUP BY validation_profile"
+            profile_rows = connection.execute(profile_query, profile_params).fetchall()
             run_query = """
                 SELECT COUNT(*) AS total_runs,
                        COALESCE(AVG(attempt), 0) AS avg_attempt,
@@ -81,20 +88,24 @@ class EventsMetricsStoreMixin:
             run_row = connection.execute(run_query, run_params).fetchone()
             promotion_rows = connection.execute(promotion_query, promotion_params).fetchall()
         tasks_by_status = {row["status"]: int(row["count"]) for row in task_rows}
+        tasks_by_validation_profile = {row["validation_profile"]: int(row["count"]) for row in profile_rows}
         promotions_by_status = {row["status"]: int(row["count"]) for row in promotion_rows}
         total_runs = int(run_row["total_runs"])
         retried_runs = int(run_row["retried_runs"])
         approved = promotions_by_status.get("approved", 0)
         rejected = promotions_by_status.get("rejected", 0)
+        pending = promotions_by_status.get("pending", 0)
         total_promotions = approved + rejected
         follow_on_count = len([task for task in self.list_tasks(project_id) if task.parent_task_id is not None])
         return {
             "project_id": project_id,
             "tasks_by_status": tasks_by_status,
+            "tasks_by_validation_profile": tasks_by_validation_profile,
             "total_runs": total_runs,
             "average_attempt": float(run_row["avg_attempt"]),
             "active_leases": len(self.list_task_leases()),
             "promotions_by_status": promotions_by_status,
+            "pending_promotions": pending,
             "retry_rate": (retried_runs / total_runs) if total_runs else 0.0,
             "promotion_approval_rate": (approved / total_promotions) if total_promotions else 0.0,
             "follow_on_task_count": follow_on_count,

@@ -52,6 +52,24 @@ class CLITests(unittest.TestCase):
         self.assertEqual(task["id"], task_report["task"]["id"])
         self.assertEqual(1, len(task_report["runs"]))
 
+    def test_ops_report_includes_validation_profile_metrics(self) -> None:
+        project = self.run_cli("create-project", "ops", "ops project")["project"]
+        task = self.run_cli(
+            "create-task",
+            project["id"],
+            "Task Ops",
+            "Objective Ops",
+            "--validation-profile",
+            "python",
+        )["task"]
+        self.run_cli("run-once", task["id"])
+        self.run_cli("review-promotion", task["id"])
+
+        ops = self.run_cli("ops-report", "--project-id", project["id"])
+
+        self.assertEqual(1, ops["metrics"]["pending_promotions"])
+        self.assertEqual(1, ops["metrics"]["tasks_by_validation_profile"]["python"])
+
     def test_review_then_affirm_promotion_commands_record_final_approval(self) -> None:
         project = self.run_cli("create-project", "promotion", "promotion project")["project"]
         task = self.run_cli(

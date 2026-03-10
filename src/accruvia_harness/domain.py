@@ -63,6 +63,7 @@ class Task:
     source_run_id: str | None = None
     external_ref_type: str | None = None
     external_ref_id: str | None = None
+    validation_profile: str = "generic"
     strategy: str = "default"
     max_attempts: int = 3
     required_artifacts: list[str] = field(default_factory=lambda: ["plan", "report"])

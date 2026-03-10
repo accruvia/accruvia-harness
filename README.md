@@ -102,6 +102,7 @@ This repo now contains a minimal durable harness foundation:
 - a Python package in `src/accruvia_harness`
 - a SQLite-backed system of record
 - core records for `project`, `task`, `run`, `artifact`, `evaluation`, and `decision`
+- explicit task validation profiles so language- or workload-specific evidence rules can be selected
 - an append-only event log for auditable state transitions
 - a migration-managed schema bootstrap
 - an explicit configuration model
@@ -115,6 +116,7 @@ This repo now contains a minimal durable harness foundation:
 - worker backends for `local`, `shell`, `agent`, and routed `llm`
 - an LLM executor/router layer that can choose local CLI tools or `accruvia-client`
 - a read-only interrogation surface for summaries, context packets, and task reports
+- an operational report for pending affirmations and profile-aware workload metrics
 - a small CLI for creating projects, syncing issue-backed tasks, running cycles, and inspecting status
 
 This is intentionally narrow. It proves the control shape before adding deeper Temporal, LangGraph, and distributed execution hardening.
@@ -127,10 +129,10 @@ PYTHONPATH=src python3 -m accruvia_harness config
 PYTHONPATH=src python3 -m accruvia_harness runtime-info
 PYTHONPATH=src python3 -m accruvia_harness run-temporal-worker
 PYTHONPATH=src python3 -m accruvia_harness create-project accruvia "Accruvia harness work"
-PYTHONPATH=src python3 -m accruvia_harness create-task <project_id> "First task" "Build the first durable loop" --priority 200 --external-ref-type github_issue --external-ref-id 456 --strategy baseline --required-artifact plan --required-artifact report
-PYTHONPATH=src python3 -m accruvia_harness import-issue <project_id> 456 "First task" "Build the first durable loop" --priority 200 --strategy baseline --required-artifact plan --required-artifact report
-PYTHONPATH=src python3 -m accruvia_harness import-github-issue <project_id> accruvia/accruvia 456 --priority 200 --strategy baseline --required-artifact plan --required-artifact report
-PYTHONPATH=src python3 -m accruvia_harness sync-github-open <project_id> accruvia/accruvia --limit 20 --priority 200 --strategy baseline --required-artifact plan --required-artifact report
+PYTHONPATH=src python3 -m accruvia_harness create-task <project_id> "First task" "Build the first durable loop" --priority 200 --validation-profile generic --external-ref-type github_issue --external-ref-id 456 --strategy baseline --required-artifact plan --required-artifact report
+PYTHONPATH=src python3 -m accruvia_harness import-issue <project_id> 456 "First task" "Build the first durable loop" --priority 200 --validation-profile generic --strategy baseline --required-artifact plan --required-artifact report
+PYTHONPATH=src python3 -m accruvia_harness import-github-issue <project_id> accruvia/accruvia 456 --priority 200 --validation-profile generic --strategy baseline --required-artifact plan --required-artifact report
+PYTHONPATH=src python3 -m accruvia_harness sync-github-open <project_id> accruvia/accruvia --limit 20 --priority 200 --validation-profile generic --strategy baseline --required-artifact plan --required-artifact report
 PYTHONPATH=src python3 -m accruvia_harness report-github <task_id> accruvia/accruvia --comment "Harness completed this task." --close
 PYTHONPATH=src python3 -m accruvia_harness sync-github-state <task_id> accruvia/accruvia
 PYTHONPATH=src python3 -m accruvia_harness run-once <task_id>
@@ -143,6 +145,7 @@ PYTHONPATH=src python3 -m accruvia_harness smoke-test
 PYTHONPATH=src python3 -m accruvia_harness status
 PYTHONPATH=src python3 -m accruvia_harness summary
 PYTHONPATH=src python3 -m accruvia_harness context-packet
+PYTHONPATH=src python3 -m accruvia_harness ops-report
 PYTHONPATH=src python3 -m accruvia_harness task-report <task_id>
 PYTHONPATH=src python3 -m accruvia_harness events
 ```
@@ -231,6 +234,35 @@ The baseline deterministic validators now require structured evidence for:
 - named test files plus a passing deterministic test run
 
 These checks run before any higher-order LLM affirmation layer. The LLM reviewer should interpret evidence, not replace it.
+
+## Validation Profiles
+
+The harness no longer assumes every task is Python work.
+
+- each task carries a `validation_profile`
+- the core harness stays language-agnostic
+- deterministic validators are selected by profile
+- worker reports should declare the same profile they are generating evidence for
+
+Current baseline profiles:
+
+- `generic`: general changed-file, build/compile, test, and artifact evidence
+- `python`: the generic gates plus Python-oriented test-file expectations
+
+This is intended to grow into project- or task-class-specific validator bundles without changing the control plane.
+
+## Promotion Flow
+
+Promotion is now a durable two-step process:
+
+1. `review-promotion`
+   - runs deterministic gates
+   - records a `pending` promotion if the hard gates pass
+2. `affirm-promotion`
+   - routes to an LLM executor
+   - records final `approved` or `rejected` state with rationale
+
+This avoids treating a transient in-memory judgment as the full promotion decision.
 
 ## Temporal Dev Stack
 
