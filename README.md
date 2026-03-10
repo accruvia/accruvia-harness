@@ -112,11 +112,12 @@ This repo now contains a minimal durable harness foundation:
 - task leasing for safe queue arbitration
 - task lineage via `parent_task_id` and `source_run_id`
 - a GitHub adapter for importing issues and reporting results back out
-- worker backends for `local`, `shell`, and `agent`
+- worker backends for `local`, `shell`, `agent`, and routed `llm`
+- an LLM executor/router layer that can choose local CLI tools or `accruvia-client`
 - a read-only interrogation surface for summaries, context packets, and task reports
 - a small CLI for creating projects, syncing issue-backed tasks, running cycles, and inspecting status
 
-This is intentionally narrow. It proves the control shape before adding Temporal, LangGraph, distributed execution, or real LLM workers.
+This is intentionally narrow. It proves the control shape before adding deeper Temporal, LangGraph, and distributed execution hardening.
 
 ## Quick Start
 
@@ -145,6 +146,26 @@ PYTHONPATH=src python3 -m accruvia_harness context-packet
 PYTHONPATH=src python3 -m accruvia_harness task-report <task_id>
 PYTHONPATH=src python3 -m accruvia_harness events
 ```
+
+### Routed LLM Execution
+
+The `llm` worker backend is designed to keep model invocation separate from workflow control.
+
+- local development can route to a CLI such as Codex or Claude Code
+- CI can route to `accruvia-client` or another centrally managed path
+- the harness chooses an executor explicitly or via `ACCRUVIA_LLM_BACKEND=auto`
+
+Example:
+
+```bash
+export ACCRUVIA_WORKER_BACKEND=llm
+export ACCRUVIA_LLM_BACKEND=auto
+export ACCRUVIA_LLM_CODEX_COMMAND='codex exec < "$ACCRUVIA_LLM_PROMPT_PATH" > "$ACCRUVIA_LLM_RESPONSE_PATH"'
+export ACCRUVIA_LLM_ACCRUVIA_CLIENT_COMMAND='accruvia-client llm run --prompt-file "$ACCRUVIA_LLM_PROMPT_PATH" --output-file "$ACCRUVIA_LLM_RESPONSE_PATH"'
+PYTHONPATH=src python3 -m accruvia_harness process-next --worker-id worker-a --lease-seconds 300
+```
+
+On GitHub Actions, `auto` prefers `accruvia-client` when configured. Outside CI, it prefers a local CLI executor such as Codex first, then Claude, then `accruvia-client`, then a generic command executor.
 
 ## Phase 1 Status
 
@@ -184,6 +205,7 @@ The repo now has meaningful slices of the later phases in place:
   - `local`
   - `shell`
   - `agent`
+  - routed `llm`
 - Phase 6: parallel execution baseline
   - task leasing and worker-aware queue arbitration
 - Phase 7: observability and analytics baseline

@@ -6,7 +6,9 @@ import subprocess
 from pathlib import Path
 from typing import Protocol
 
+from .config import HarnessConfig
 from .domain import Run, Task
+from .llm import LLMExecutionError, LLMInvocation, LLMRouter, build_llm_router
 from .policy import WorkResult
 
 
@@ -126,6 +128,110 @@ class AgentCommandWorker(CommandWorker):
         super().__init__(command=command, backend_name="agent")
 
 
+class LLMTaskWorker:
+    def __init__(self, router: LLMRouter, model: str | None = None) -> None:
+        self.router = router
+        self.model = model
+
+    def work(self, task: Task, run: Run, workspace_root: Path) -> WorkResult:
+        run_dir = workspace_root / "runs" / run.id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        prompt = self._build_prompt(task, run)
+        executor, routed_backend = self.router.resolve()
+        try:
+            result = executor.execute(
+                invocation=LLMInvocation(
+                    task=task, run=run, prompt=prompt, run_dir=run_dir, model=self.model
+                )
+            )
+            outcome = "success"
+            summary = f"Executed routed LLM worker via {routed_backend}."
+            diagnostics = {
+                **result.diagnostics,
+                "worker_backend": "llm",
+                "llm_backend": result.backend,
+                "llm_model": self.model,
+            }
+        except LLMExecutionError as exc:
+            error_path = run_dir / "llm_error.txt"
+            error_path.write_text(str(exc), encoding="utf-8")
+            report_path = run_dir / "report.json"
+            report_path.write_text(
+                json.dumps(
+                    {
+                        "task_id": task.id,
+                        "run_id": run.id,
+                        "attempt": run.attempt,
+                        "strategy": task.strategy,
+                        "objective": task.objective,
+                        "worker_backend": "llm",
+                        "llm_backend": routed_backend,
+                        "error": str(exc),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            return WorkResult(
+                summary=f"LLM worker failed via {routed_backend}.",
+                artifacts=[
+                    ("report", str(report_path), "Structured run report"),
+                    ("llm_error", str(error_path), "LLM execution failure"),
+                ],
+                outcome="failed",
+                diagnostics={
+                    "worker_backend": "llm",
+                    "llm_backend": routed_backend,
+                    "llm_model": self.model,
+                    "error": str(exc),
+                },
+            )
+
+        report_path = run_dir / "report.json"
+        report_path.write_text(
+            json.dumps(
+                {
+                    "task_id": task.id,
+                    "run_id": run.id,
+                    "attempt": run.attempt,
+                    "strategy": task.strategy,
+                    "objective": task.objective,
+                    "worker_backend": "llm",
+                    "llm_backend": result.backend,
+                    "llm_model": self.model,
+                },
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        return WorkResult(
+            summary=summary,
+            artifacts=[
+                ("plan", str(result.prompt_path), "Prompt sent to the routed LLM executor"),
+                ("llm_response", str(result.response_path), "LLM response artifact"),
+                ("report", str(report_path), "Structured run report"),
+            ],
+            outcome=outcome,
+            diagnostics=diagnostics,
+        )
+
+    def _build_prompt(self, task: Task, run: Run) -> str:
+        return (
+            f"Task: {task.title}\n"
+            f"Objective: {task.objective}\n"
+            f"Strategy: {task.strategy}\n"
+            f"Task ID: {task.id}\n"
+            f"Run ID: {run.id}\n"
+            f"Attempt: {run.attempt}\n"
+            "Instructions:\n"
+            "- Produce the work needed for the objective.\n"
+            "- Preserve durable artifacts in the run directory when appropriate.\n"
+            "- Favor test-driven implementation when changing software behavior.\n"
+        )
+
+
 def build_worker(backend: str, shell_command: str | None = None) -> WorkerBackend:
     if backend == "local":
         return LocalArtifactWorker()
@@ -138,3 +244,9 @@ def build_worker(backend: str, shell_command: str | None = None) -> WorkerBacken
             raise ValueError("Agent worker backend requires ACCRUVIA_WORKER_COMMAND")
         return AgentCommandWorker(shell_command)
     raise ValueError(f"Unsupported worker backend: {backend}")
+
+
+def build_worker_from_config(config: HarnessConfig) -> WorkerBackend:
+    if config.worker_backend == "llm":
+        return LLMTaskWorker(build_llm_router(config), model=config.llm_model)
+    return build_worker(config.worker_backend, config.worker_command)

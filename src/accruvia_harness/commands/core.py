@@ -24,6 +24,12 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
             "temporal_task_queue": config.temporal_task_queue,
             "worker_backend": config.worker_backend,
             "worker_command": config.worker_command,
+            "llm_backend": config.llm_backend,
+            "llm_model": config.llm_model,
+            "llm_command": config.llm_command,
+            "llm_codex_command": config.llm_codex_command,
+            "llm_claude_command": config.llm_claude_command,
+            "llm_accruvia_client_command": config.llm_accruvia_client_command,
         })
         return True
     if args.command == "create-project":

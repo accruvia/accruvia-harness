@@ -18,6 +18,12 @@ class HarnessConfig:
     temporal_task_queue: str
     worker_backend: str
     worker_command: str | None
+    llm_backend: str
+    llm_model: str | None
+    llm_command: str | None
+    llm_codex_command: str | None
+    llm_claude_command: str | None
+    llm_accruvia_client_command: str | None
 
     @classmethod
     def from_env(
@@ -44,4 +50,10 @@ class HarnessConfig:
             temporal_task_queue=os.environ.get("ACCRUVIA_TEMPORAL_TASK_QUEUE", "accruvia-harness"),
             worker_backend=os.environ.get("ACCRUVIA_WORKER_BACKEND", "local"),
             worker_command=os.environ.get("ACCRUVIA_WORKER_COMMAND"),
+            llm_backend=os.environ.get("ACCRUVIA_LLM_BACKEND", "auto"),
+            llm_model=os.environ.get("ACCRUVIA_LLM_MODEL"),
+            llm_command=os.environ.get("ACCRUVIA_LLM_COMMAND"),
+            llm_codex_command=os.environ.get("ACCRUVIA_LLM_CODEX_COMMAND"),
+            llm_claude_command=os.environ.get("ACCRUVIA_LLM_CLAUDE_COMMAND"),
+            llm_accruvia_client_command=os.environ.get("ACCRUVIA_LLM_ACCRUVIA_CLIENT_COMMAND"),
         )
