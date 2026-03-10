@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from accruvia_harness.config import HarnessConfig
 from accruvia_harness.domain import Run, RunStatus, Task, new_id
-from accruvia_harness.llm import build_llm_router
+from accruvia_harness.llm import build_llm_router, parse_affirmation_response
 from accruvia_harness.workers import (
     AgentCommandWorker,
     LocalArtifactWorker,
@@ -123,3 +123,8 @@ class WorkerTests(unittest.TestCase):
 
         self.assertEqual("accruvia_client", backend)
         self.assertEqual("accruvia_client", executor.backend_name)
+
+    def test_parse_affirmation_response_handles_loose_rejection_text(self) -> None:
+        approved, rationale = parse_affirmation_response("I would reject this candidate.\nIt is not ready to promote.")
+        self.assertFalse(approved)
+        self.assertIn("not ready", rationale)

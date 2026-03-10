@@ -143,3 +143,35 @@ def build_llm_router(config: HarnessConfig) -> LLMRouter:
             "accruvia_client", config.llm_accruvia_client_command
         )
     return LLMRouter(config.llm_backend, executors)
+
+
+def parse_affirmation_response(text: str) -> tuple[bool, str]:
+    stripped = text.strip()
+    if not stripped:
+        raise ValueError("LLM affirmation response was empty")
+    try:
+        import json
+
+        payload = json.loads(stripped)
+        if isinstance(payload, dict):
+            approved = payload.get("approved")
+            rationale = str(payload.get("rationale") or payload.get("summary") or stripped)
+            if isinstance(approved, bool):
+                return approved, rationale
+    except Exception:
+        pass
+
+    lowered = stripped.lower()
+    first_line, *rest = stripped.splitlines()
+    rationale = "\n".join(rest).strip() or first_line.strip()
+    if first_line.strip().upper().startswith("APPROVE") or " approve" in f" {lowered[:240]}":
+        return True, rationale
+    if first_line.strip().upper().startswith("REJECT") or " reject" in f" {lowered[:240]}":
+        return False, rationale
+    if "should be promoted" in lowered and any(token in lowered for token in ("yes", "approve", "promote it")):
+        return True, rationale
+    if "should not be promoted" in lowered or any(
+        token in lowered for token in ("do not promote", "not ready to promote", "reject this candidate")
+    ):
+        return False, rationale
+    raise ValueError("Unable to infer LLM affirmation decision from response text")

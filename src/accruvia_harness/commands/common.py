@@ -12,6 +12,7 @@ from ..gitlab import GitLabCLI
 from ..interrogation import HarnessQueryService
 from ..runtime import WorkflowRuntime, build_runtime
 from ..store import SQLiteHarnessStore
+from ..llm import build_llm_router
 from ..workers import build_worker_from_config
 
 
@@ -34,6 +35,7 @@ def build_context(config: HarnessConfig) -> CLIContext:
     store = SQLiteHarnessStore(config.db_path)
     store.initialize()
     engine = HarnessEngine(store=store, workspace_root=config.workspace_root)
+    engine.set_llm_router(build_llm_router(config))
     engine.set_worker(build_worker_from_config(config))
     return CLIContext(
         config=config,

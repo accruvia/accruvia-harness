@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from ..domain import Event, PromotionRecord, PromotionStatus, RunStatus, TaskStatus, new_id
+from ..llm import LLMInvocation, LLMRouter, parse_affirmation_response
 from ..store import SQLiteHarnessStore
 from ..validation import PromotionValidator, ValidationIssue, default_promotion_validators
 from .task_service import TaskService
@@ -19,11 +21,15 @@ class PromotionService:
         self,
         store: SQLiteHarnessStore,
         task_service: TaskService,
+        workspace_root: Path,
         validators: list[PromotionValidator] | None = None,
+        llm_router: LLMRouter | None = None,
     ) -> None:
         self.store = store
         self.task_service = task_service
+        self.workspace_root = workspace_root
         self.validators = validators or default_promotion_validators()
+        self.llm_router = llm_router
 
     def review_task(self, task_id: str, run_id: str | None = None, create_follow_on: bool = True) -> PromotionReviewResult:
         task = self.store.get_task(task_id)
@@ -40,9 +46,12 @@ class PromotionService:
                 id=new_id("promotion"),
                 task_id=task.id,
                 run_id=run.id,
-                status=PromotionStatus.APPROVED,
-                summary="Promotion review approved the candidate.",
-                details={"validators": [self._serialize_result(result) for result in results]},
+                status=PromotionStatus.PENDING,
+                summary="Deterministic promotion gates passed; awaiting LLM affirmation.",
+                details={
+                    "validators": [self._serialize_result(result) for result in results],
+                    "affirmation_required": True,
+                },
             )
             self.store.create_promotion(promotion)
             self.store.create_event(
@@ -50,7 +59,7 @@ class PromotionService:
                     id=new_id("event"),
                     entity_type="task",
                     entity_id=task.id,
-                    event_type="promotion_approved",
+                    event_type="promotion_pending",
                     payload={"promotion_id": promotion.id, "run_id": run.id},
                 )
             )
@@ -100,6 +109,119 @@ class PromotionService:
         )
         return PromotionReviewResult(promotion=promotion, follow_on_task_id=follow_on_task_id)
 
+    def affirm_review(
+        self,
+        task_id: str,
+        run_id: str | None = None,
+        promotion_id: str | None = None,
+        create_follow_on: bool = True,
+    ) -> PromotionReviewResult:
+        if self.llm_router is None:
+            raise ValueError("No LLM router configured for promotion affirmation")
+        task = self.store.get_task(task_id)
+        if task is None:
+            raise ValueError(f"Unknown task: {task_id}")
+        promotion = self._select_promotion(task_id, run_id=run_id, promotion_id=promotion_id)
+        if promotion.status != PromotionStatus.PENDING:
+            raise ValueError(f"Promotion {promotion.id} is not pending affirmation")
+        run = self._select_run(task_id, promotion.run_id)
+        artifacts = self.store.list_artifacts(run.id)
+        executor, routed_backend = self.llm_router.resolve()
+        invocation = LLMInvocation(
+            task=task,
+            run=run,
+            prompt=self._build_affirmation_prompt(task, promotion, artifacts),
+            run_dir=self._affirmation_run_dir(run.id),
+        )
+        result = executor.execute(invocation)
+        approved, rationale = parse_affirmation_response(result.response_text)
+        details = {
+            **promotion.details,
+            "affirmation": {
+                "backend": routed_backend,
+                "response_path": str(result.response_path),
+                "prompt_path": str(result.prompt_path),
+                "rationale": rationale,
+                "approved": approved,
+            },
+        }
+        follow_on_task_id: str | None = None
+        if approved:
+            promotion = PromotionRecord(
+                id=promotion.id,
+                task_id=promotion.task_id,
+                run_id=promotion.run_id,
+                status=PromotionStatus.APPROVED,
+                summary="Promotion affirmed by deterministic gates and LLM review.",
+                details=details,
+                created_at=promotion.created_at,
+            )
+            self.store.update_promotion(promotion)
+            self.store.create_event(
+                Event(
+                    id=new_id("event"),
+                    entity_type="task",
+                    entity_id=task.id,
+                    event_type="promotion_approved",
+                    payload={"promotion_id": promotion.id, "run_id": run.id, "llm_backend": routed_backend},
+                )
+            )
+            return PromotionReviewResult(promotion=promotion, follow_on_task_id=None)
+
+        issues = self._issues_from_promotion_details(promotion.details)
+        if create_follow_on and issues:
+            existing = self.store.find_follow_on_task(task.id, run.id)
+            if existing is not None:
+                follow_on_task_id = existing.id
+            else:
+                title, objective = self._follow_on_from_issues(task.title, issues)
+                follow_on = self.task_service.create_follow_on_task(
+                    parent_task_id=task.id,
+                    source_run_id=run.id,
+                    title=title,
+                    objective=objective,
+                )
+                follow_on_task_id = follow_on.id
+        elif create_follow_on:
+            existing = self.store.find_follow_on_task(task.id, run.id)
+            if existing is not None:
+                follow_on_task_id = existing.id
+            else:
+                follow_on = self.task_service.create_follow_on_task(
+                    parent_task_id=task.id,
+                    source_run_id=run.id,
+                    title=f"Address LLM promotion concerns for {task.title}",
+                    objective="Resolve the LLM promotion concerns recorded in the affirmation rationale and regenerate the candidate.",
+                )
+                follow_on_task_id = follow_on.id
+        details["follow_on_task_id"] = follow_on_task_id
+        promotion = PromotionRecord(
+            id=promotion.id,
+            task_id=promotion.task_id,
+            run_id=promotion.run_id,
+            status=PromotionStatus.REJECTED,
+            summary="Promotion rejected by LLM affirmation.",
+            details=details,
+            created_at=promotion.created_at,
+        )
+        self.store.update_promotion(promotion)
+        self.store.update_task_status(task.id, TaskStatus.FAILED)
+        self.store.create_event(
+            Event(
+                id=new_id("event"),
+                entity_type="task",
+                entity_id=task.id,
+                event_type="promotion_rejected",
+                payload={
+                    "promotion_id": promotion.id,
+                    "run_id": run.id,
+                    "follow_on_task_id": follow_on_task_id,
+                    "llm_backend": routed_backend,
+                },
+            )
+        )
+        return PromotionReviewResult(promotion=promotion, follow_on_task_id=follow_on_task_id)
+
     def _select_run(self, task_id: str, run_id: str | None):
         if run_id is not None:
             run = self.store.get_run(run_id)
@@ -127,6 +249,67 @@ class PromotionService:
                 for issue in result.issues
             ],
         }
+
+    def _issues_from_promotion_details(self, details: dict[str, object]) -> list[ValidationIssue]:
+        issues: list[ValidationIssue] = []
+        for result in details.get("validators", []):
+            if not isinstance(result, dict):
+                continue
+            for issue in result.get("issues", []):
+                if not isinstance(issue, dict):
+                    continue
+                issues.append(
+                    ValidationIssue(
+                        code=str(issue.get("code", "unknown_issue")),
+                        summary=str(issue.get("summary", "Promotion issue")),
+                        details=issue.get("details", {}) if isinstance(issue.get("details"), dict) else {},
+                        follow_on_title=issue.get("follow_on_title") if isinstance(issue.get("follow_on_title"), str) else None,
+                        follow_on_objective=issue.get("follow_on_objective") if isinstance(issue.get("follow_on_objective"), str) else None,
+                    )
+                )
+        return issues
+
+    def _select_promotion(
+        self, task_id: str, run_id: str | None = None, promotion_id: str | None = None
+    ) -> PromotionRecord:
+        promotions = self.store.list_promotions(task_id)
+        if promotion_id is not None:
+            for promotion in promotions:
+                if promotion.id == promotion_id:
+                    return promotion
+            raise ValueError(f"Unknown promotion {promotion_id} for task {task_id}")
+        if run_id is not None:
+            matching = [promotion for promotion in promotions if promotion.run_id == run_id]
+            if matching:
+                return matching[-1]
+            raise ValueError(f"No promotion exists for run {run_id} on task {task_id}")
+        if not promotions:
+            raise ValueError(f"Task {task_id} has no promotion reviews")
+        return promotions[-1]
+
+    def _build_affirmation_prompt(
+        self, task, promotion: PromotionRecord, artifacts
+    ) -> str:
+        validator_summaries = promotion.details.get("validators", [])
+        artifact_lines = "\n".join(f"- {artifact.kind}: {artifact.path}" for artifact in artifacts)
+        return (
+            "You are affirming a promotion decision after deterministic validation has already run.\n"
+            "Decide whether the candidate should be promoted.\n"
+            "Reply on the first line with APPROVE or REJECT.\n"
+            "After the first line, provide a short rationale.\n\n"
+            f"Task: {task.title}\n"
+            f"Objective: {task.objective}\n"
+            f"Task ID: {task.id}\n"
+            f"Run ID: {promotion.run_id}\n"
+            f"Validator Results: {validator_summaries}\n"
+            f"Artifacts:\n{artifact_lines}\n"
+        )
+
+    def _affirmation_run_dir(self, run_id: str):
+        run = self.store.get_run(run_id)
+        if run is None:
+            raise ValueError(f"Unknown run: {run_id}")
+        return self.workspace_root / "runs" / run.id / "promotion_affirmation"
 
     def _follow_on_from_issues(self, task_title: str, issues: list[ValidationIssue]) -> tuple[str, str]:
         first = issues[0]

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from .github import GitHubCLI
 from .gitlab import GitLabCLI
+from .llm import LLMRouter
 from .policy import DefaultAnalyzer, DefaultDecider, DefaultPlanner
 from .services import (
     GitHubTaskService,
@@ -26,6 +27,7 @@ class HarnessEngine:
         worker: WorkerBackend | None = None,
         analyzer: DefaultAnalyzer | None = None,
         decider: DefaultDecider | None = None,
+        llm_router: LLMRouter | None = None,
     ) -> None:
         self.store = store
         self.workspace_root = Path(workspace_root)
@@ -34,6 +36,7 @@ class HarnessEngine:
         self.worker = worker or LocalArtifactWorker()
         self.analyzer = analyzer or DefaultAnalyzer()
         self.decider = decider or DefaultDecider()
+        self.llm_router = llm_router
 
         self.tasks = TaskService(self.store)
         self._build_services()
@@ -50,10 +53,14 @@ class HarnessEngine:
         self.queue = QueueService(self.store, self.runs)
         self.github_tasks = GitHubTaskService(self.tasks, self.store)
         self.gitlab_tasks = GitLabTaskService(self.tasks, self.store)
-        self.promotions = PromotionService(self.store, self.tasks)
+        self.promotions = PromotionService(self.store, self.tasks, self.workspace_root, llm_router=self.llm_router)
 
     def set_worker(self, worker: WorkerBackend) -> None:
         self.worker = worker
+        self._build_services()
+
+    def set_llm_router(self, llm_router: LLMRouter | None) -> None:
+        self.llm_router = llm_router
         self._build_services()
 
     def create_project(self, name: str, description: str):
@@ -309,5 +316,19 @@ class HarnessEngine:
         return self.promotions.review_task(
             task_id=task_id,
             run_id=run_id,
+            create_follow_on=create_follow_on,
+        )
+
+    def affirm_promotion(
+        self,
+        task_id: str,
+        run_id: str | None = None,
+        promotion_id: str | None = None,
+        create_follow_on: bool = True,
+    ):
+        return self.promotions.affirm_review(
+            task_id=task_id,
+            run_id=run_id,
+            promotion_id=promotion_id,
             create_follow_on=create_follow_on,
         )

@@ -39,6 +39,7 @@ class DecisionAction(StrEnum):
 
 
 class PromotionStatus(StrEnum):
+    PENDING = "pending"
     APPROVED = "approved"
     REJECTED = "rejected"
 

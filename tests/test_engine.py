@@ -5,8 +5,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from accruvia_harness.config import HarnessConfig
 from accruvia_harness.domain import Project, new_id
 from accruvia_harness.engine import HarnessEngine
+from accruvia_harness.llm import build_llm_router
 from accruvia_harness.policy import WorkResult
 from accruvia_harness.workers import LocalArtifactWorker
 from accruvia_harness.store import SQLiteHarnessStore
@@ -277,7 +279,7 @@ class HarnessEngineTests(unittest.TestCase):
         self.assertEqual(task.id, result["task"].id if result else None)
         self.assertEqual([], self.store.list_task_leases())
 
-    def test_review_promotion_approves_completed_candidate(self) -> None:
+    def test_review_promotion_creates_pending_candidate(self) -> None:
         task = self.engine.create_task_with_policy(
             project_id=self.project_id,
             title="Promotion pass",
@@ -295,9 +297,55 @@ class HarnessEngineTests(unittest.TestCase):
 
         result = self.engine.review_promotion(task.id, run.id)
 
-        self.assertEqual("approved", result.promotion.status.value)
+        self.assertEqual("pending", result.promotion.status.value)
         self.assertIsNone(result.follow_on_task_id)
-        self.assertEqual("approved", self.store.latest_promotion(task.id).status.value)
+        self.assertEqual("pending", self.store.latest_promotion(task.id).status.value)
+
+    def test_affirm_promotion_approves_pending_candidate(self) -> None:
+        config = HarnessConfig(
+            db_path=Path(self.temp_dir.name) / "affirm.db",
+            workspace_root=Path(self.temp_dir.name) / "workspace-affirm",
+            log_path=Path(self.temp_dir.name) / "affirm.log",
+            default_project_name="demo",
+            default_repo="accruvia/accruvia",
+            runtime_backend="local",
+            temporal_target="localhost:7233",
+            temporal_namespace="default",
+            temporal_task_queue="accruvia-harness",
+            worker_backend="local",
+            worker_command=None,
+            llm_backend="command",
+            llm_model=None,
+            llm_command=f'bash "{Path(__file__).resolve().parent / "fixtures" / "fake_affirm_approve.sh"}"',
+            llm_codex_command=None,
+            llm_claude_command=None,
+            llm_accruvia_client_command=None,
+        )
+        engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-affirm",
+            llm_router=build_llm_router(config),
+        )
+        task = engine.create_task_with_policy(
+            project_id=self.project_id,
+            title="Promotion affirm",
+            objective="Affirm a promotable candidate",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+        run = engine.run_once(task.id)
+        engine.review_promotion(task.id, run.id)
+
+        result = engine.affirm_promotion(task.id, run.id)
+
+        self.assertEqual("approved", result.promotion.status.value)
+        self.assertIn("affirmation", result.promotion.details)
 
     def test_review_promotion_rejects_and_creates_follow_on(self) -> None:
         engine = HarnessEngine(
@@ -407,3 +455,49 @@ class HarnessEngineTests(unittest.TestCase):
         self.assertEqual("rejected", result.promotion.status.value)
         validator_names = [entry["validator"] for entry in result.promotion.details["validators"]]
         self.assertIn("test_evidence", validator_names)
+
+    def test_affirm_promotion_rejects_pending_candidate(self) -> None:
+        config = HarnessConfig(
+            db_path=Path(self.temp_dir.name) / "reject.db",
+            workspace_root=Path(self.temp_dir.name) / "workspace-reject-affirm",
+            log_path=Path(self.temp_dir.name) / "reject.log",
+            default_project_name="demo",
+            default_repo="accruvia/accruvia",
+            runtime_backend="local",
+            temporal_target="localhost:7233",
+            temporal_namespace="default",
+            temporal_task_queue="accruvia-harness",
+            worker_backend="local",
+            worker_command=None,
+            llm_backend="command",
+            llm_model=None,
+            llm_command=f'bash "{Path(__file__).resolve().parent / "fixtures" / "fake_affirm_reject.sh"}"',
+            llm_codex_command=None,
+            llm_claude_command=None,
+            llm_accruvia_client_command=None,
+        )
+        engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-reject-affirm",
+            llm_router=build_llm_router(config),
+        )
+        task = engine.create_task_with_policy(
+            project_id=self.project_id,
+            title="Promotion reject",
+            objective="Reject a pending promotion",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+        run = engine.run_once(task.id)
+        engine.review_promotion(task.id, run.id)
+
+        result = engine.affirm_promotion(task.id, run.id)
+
+        self.assertEqual("rejected", result.promotion.status.value)
+        self.assertIsNotNone(result.follow_on_task_id)

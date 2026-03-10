@@ -60,6 +60,15 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
         result = engine.review_promotion(args.task_id, run_id=args.run_id, create_follow_on=not args.no_follow_on)
         emit({"promotion": serialize_dataclass(result.promotion), "follow_on_task_id": result.follow_on_task_id})
         return True
+    if args.command == "affirm-promotion":
+        result = engine.affirm_promotion(
+            args.task_id,
+            run_id=args.run_id,
+            promotion_id=args.promotion_id,
+            create_follow_on=not args.no_follow_on,
+        )
+        emit({"promotion": serialize_dataclass(result.promotion), "follow_on_task_id": result.follow_on_task_id})
+        return True
     if args.command == "smoke-test":
         project = engine.create_project(args.project_name, "Local smoke-test project")
         task = engine.create_task_with_policy(project.id, args.task_title, args.objective, 100, None, None, None, None, "smoke", 2, ["plan", "report"])

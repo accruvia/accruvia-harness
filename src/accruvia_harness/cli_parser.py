@@ -110,6 +110,12 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--run-id")
     review.add_argument("--no-follow-on", action="store_true")
 
+    affirm = subparsers.add_parser("affirm-promotion", help="Ask the configured LLM executor to affirm or reject a pending promotion.")
+    affirm.add_argument("task_id")
+    affirm.add_argument("--run-id")
+    affirm.add_argument("--promotion-id")
+    affirm.add_argument("--no-follow-on", action="store_true")
+
     smoke = subparsers.add_parser("smoke-test", help="Run a local end-to-end smoke test from project creation through task completion.")
     smoke.add_argument("--project-name", default="smoke-project")
     smoke.add_argument("--task-title", default="Smoke task")

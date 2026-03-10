@@ -14,6 +14,7 @@ class CLITests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.repo_root = Path(__file__).resolve().parents[1]
+        self.fixtures = self.repo_root / "tests" / "fixtures"
         self.env = os.environ.copy()
         self.env["ACCRUVIA_HARNESS_HOME"] = self.temp_dir.name
         self.env["PYTHONPATH"] = str(self.repo_root / "src")
@@ -51,7 +52,7 @@ class CLITests(unittest.TestCase):
         self.assertEqual(task["id"], task_report["task"]["id"])
         self.assertEqual(1, len(task_report["runs"]))
 
-    def test_review_promotion_command_records_approval(self) -> None:
+    def test_review_then_affirm_promotion_commands_record_final_approval(self) -> None:
         project = self.run_cli("create-project", "promotion", "promotion project")["project"]
         task = self.run_cli(
             "create-task",
@@ -60,9 +61,13 @@ class CLITests(unittest.TestCase):
             "Objective B",
         )["task"]
         self.run_cli("run-once", task["id"])
+        self.env["ACCRUVIA_LLM_BACKEND"] = "command"
+        self.env["ACCRUVIA_LLM_COMMAND"] = f'bash "{self.fixtures / "fake_affirm_approve.sh"}"'
 
         review = self.run_cli("review-promotion", task["id"])
+        affirmation = self.run_cli("affirm-promotion", task["id"])
         status = self.run_cli("status")
 
-        self.assertEqual("approved", review["promotion"]["status"])
+        self.assertEqual("pending", review["promotion"]["status"])
+        self.assertEqual("approved", affirmation["promotion"]["status"])
         self.assertEqual(1, len(status["promotions"]))

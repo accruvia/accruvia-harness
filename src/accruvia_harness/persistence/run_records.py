@@ -153,6 +153,18 @@ class RunRecordsStoreMixin:
                 ),
             )
 
+    def update_promotion(self, promotion: PromotionRecord) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE promotions SET status = ?, summary = ?, details_json = ? WHERE id = ?",
+                (
+                    promotion.status.value,
+                    promotion.summary,
+                    json.dumps(promotion.details, sort_keys=True),
+                    promotion.id,
+                ),
+            )
+
     def list_promotions(self, task_id: str | None = None) -> list[PromotionRecord]:
         query = "SELECT id, task_id, run_id, status, summary, details_json, created_at FROM promotions"
         params: tuple[str, ...] = ()
