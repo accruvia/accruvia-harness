@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "accruvia-harness"
+version = "0.1.0"
+description = "A workflow harness for creating and managing LLM-developed software."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+  { name = "S Overton" }
+]
+dependencies = []
+
+[project.optional-dependencies]
+temporal = ["temporalio>=1.8,<2"]
+
+[project.scripts]
+accruvia-harness = "accruvia_harness.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

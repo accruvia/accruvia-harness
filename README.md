@@ -1,0 +1,206 @@
+# accruvia-harness
+
+`accruvia-harness` is a workflow harness for creating and managing LLM-developed software.
+
+Its purpose is to run a durable loop:
+
+1. plan
+2. work
+3. analyze
+4. decide
+5. repeat
+
+The first serious workload will be software tasks in the `accruvia` ecosystem, starting with `accruvia_client.runner`-style work. The harness is intended to support multiple projects over time, but v1 will stay operationally simple while keeping a multi-project-ready data model.
+
+## Why This Exists
+
+OpenClaw was useful as an interactive shell and interrogation surface, but it was a weak fit for long-running autonomous workflow control.
+
+The main lessons learned were:
+
+- prompt-driven cron orchestration is not a reliable control plane
+- durable state must be explicit and authoritative
+- artifacts, evaluations, and decisions must be first-class records
+- retries and promotions must be policy-driven, not inferred from chat state
+- observability must come from structured telemetry, not reconstructed memory
+- runtime execution and human interrogation should be separate concerns
+
+## What This Harness Will Do
+
+- run durable software-development workflows
+- support parallel work where appropriate
+- persist tasks, runs, artifacts, evaluations, and decisions
+- link internal tasks to external systems such as repo issues
+- evaluate outputs before promotion
+- support retries, requeues, and follow-on work explicitly
+- expose results to an interrogation layer for analysis and productivity review
+
+## What This Harness Will Not Do
+
+- use chat history as the system of record
+- rely on lossy summaries as canonical memory
+- treat an LLM session as authoritative execution truth
+- use OpenClaw as the workflow controller
+
+## Initial Architecture
+
+- workflow engine: `Temporal`
+- LLM control graph: `LangGraph`
+- system database: `PostgreSQL`
+- experiment and evaluation tracking: `MLflow`
+- observability: `OpenTelemetry`
+- optional interrogation surface: `OpenClaw`
+
+## Core Records
+
+- `project`
+- `task`
+- `run`
+- `artifact`
+- `evaluation`
+- `decision`
+
+Tasks may optionally carry external references such as `gitlab_issue:#456`. Those references are intake and reporting links, not the execution control plane.
+
+## V1 Golden Path
+
+1. create a task
+2. generate a plan
+3. run a worker
+4. collect artifacts
+5. evaluate output
+6. decide promote, retry, fail, or branch
+7. persist the outcome
+8. repeat until resolved
+
+## Success Criteria For V1
+
+- one durable end-to-end loop works reliably
+- artifacts and decisions are persisted explicitly
+- retries are bounded and policy-driven
+- evaluations can reject incomplete or low-quality work
+- the system can explain why it took a given action
+
+## Role Of OpenClaw
+
+OpenClaw may still be useful as an observer and interrogator over harness state, artifacts, and productivity metrics. It is not the controller.
+
+## Source Of Truth
+
+The harness keeps execution truth internally.
+
+- GitLab issues and other external systems are intake and reporting surfaces
+- the harness database and event history are the canonical source of truth for task execution
+- retries, runs, evaluations, decisions, and artifacts are governed by the harness, not the issue tracker
+
+This means a task may link to `gitlab_issue:#456`, but the issue itself is not the workflow control plane.
+
+## Current Implementation
+
+This repo now contains a minimal durable harness foundation:
+
+- a Python package in `src/accruvia_harness`
+- a SQLite-backed system of record
+- core records for `project`, `task`, `run`, `artifact`, `evaluation`, and `decision`
+- an append-only event log for auditable state transitions
+- a migration-managed schema bootstrap
+- an explicit configuration model
+- structured JSONL logging for CLI operations
+- a separate workflow policy module for `plan -> work -> analyze -> decide`
+- a workflow runtime boundary with local and Temporal backends
+- queue selection for pending tasks by priority
+- task leasing for safe queue arbitration
+- task lineage via `parent_task_id` and `source_run_id`
+- a GitLab adapter for importing issues and reporting results back out
+- a read-only interrogation surface for summaries, context packets, and task reports
+- a small CLI for creating projects, syncing issue-backed tasks, running cycles, and inspecting status
+
+This is intentionally narrow. It proves the control shape before adding Temporal, LangGraph, distributed execution, or real LLM workers.
+
+## Quick Start
+
+```bash
+PYTHONPATH=src python3 -m accruvia_harness init-db
+PYTHONPATH=src python3 -m accruvia_harness config
+PYTHONPATH=src python3 -m accruvia_harness runtime-info
+PYTHONPATH=src python3 -m accruvia_harness run-temporal-worker
+PYTHONPATH=src python3 -m accruvia_harness create-project accruvia "Accruvia harness work"
+PYTHONPATH=src python3 -m accruvia_harness create-task <project_id> "First task" "Build the first durable loop" --priority 200 --external-ref-type gitlab_issue --external-ref-id 456 --strategy baseline --required-artifact plan --required-artifact report
+PYTHONPATH=src python3 -m accruvia_harness import-issue <project_id> 456 "First task" "Build the first durable loop" --priority 200 --strategy baseline --required-artifact plan --required-artifact report
+PYTHONPATH=src python3 -m accruvia_harness import-gitlab-issue <project_id> soverton/accruvia 456 --priority 200 --strategy baseline --required-artifact plan --required-artifact report
+PYTHONPATH=src python3 -m accruvia_harness sync-gitlab-open <project_id> soverton/accruvia --limit 20 --priority 200 --strategy baseline --required-artifact plan --required-artifact report
+PYTHONPATH=src python3 -m accruvia_harness run-once <task_id>
+PYTHONPATH=src python3 -m accruvia_harness run-runtime <task_id>
+PYTHONPATH=src python3 -m accruvia_harness run-until-stable <task_id>
+PYTHONPATH=src python3 -m accruvia_harness process-next --worker-id worker-a --lease-seconds 300
+PYTHONPATH=src python3 -m accruvia_harness process-next-runtime --worker-id worker-a --lease-seconds 300
+PYTHONPATH=src python3 -m accruvia_harness process-queue 5 --worker-id worker-a --lease-seconds 300
+PYTHONPATH=src python3 -m accruvia_harness report-gitlab <task_id> soverton/accruvia --comment "Harness completed this task." --close
+PYTHONPATH=src python3 -m accruvia_harness smoke-test
+PYTHONPATH=src python3 -m accruvia_harness status
+PYTHONPATH=src python3 -m accruvia_harness summary
+PYTHONPATH=src python3 -m accruvia_harness context-packet
+PYTHONPATH=src python3 -m accruvia_harness task-report <task_id>
+PYTHONPATH=src python3 -m accruvia_harness events
+```
+
+## Phase 1 Status
+
+The harness now includes the first Phase 1 durability improvements:
+
+- migration-managed schema initialization
+- explicit path/config resolution
+- structured CLI logging with basic error classification
+- a local `smoke-test` command for the end-to-end happy path
+- workflow policy extracted from the monolithic engine
+- an operator runbook for local operation and recovery
+
+## Phase 2 Start
+
+Phase 2 has begun with a real runtime boundary:
+
+- `local` runtime backend is the current working default
+- `temporal` runtime backend is now a first-class configuration target
+- Temporal workflow submission and worker hooks now exist behind optional dependencies
+- if `temporalio` is not installed, the harness reports that explicitly and stays on the local backend
+
+## Current Product Coverage
+
+The repo now has meaningful slices of the later phases in place:
+
+- Phase 3: worker abstractions
+  - local and shell-backed workers
+  - normalized artifact capture
+- Phase 4: evaluation and promotion baseline
+  - explicit evaluation records
+  - bounded retry, fail, and promote decisions
+  - follow-on task lineage support
+- Phase 5: GitLab workflow integration
+  - import, sync, report, and close flows
+- Phase 6: parallel execution baseline
+  - task leasing and worker-aware queue arbitration
+- Phase 7: observability and analytics baseline
+  - structured JSONL logs
+  - metrics snapshots over tasks, runs, and leases
+- Phase 8: interrogation layer baseline
+  - `summary`
+  - `context-packet`
+  - `task-report`
+
+The remaining work is depth and hardening, not whether these concerns exist at all.
+
+## Temporal Dev Stack
+
+For local Phase 2 development, a Temporal server can be started with:
+
+```bash
+docker compose -f docker-compose.temporal.yml up -d
+```
+
+If you install the optional SDK dependency in a virtualenv:
+
+```bash
+.venv/bin/pip install -e ".[temporal]"
+ACCRUVIA_HARNESS_RUNTIME=temporal .venv/bin/python -m accruvia_harness run-temporal-worker
+ACCRUVIA_HARNESS_RUNTIME=temporal .venv/bin/python -m accruvia_harness run-runtime <task_id>
+```

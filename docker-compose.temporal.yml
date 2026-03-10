@@ -1,0 +1,26 @@
+services:
+  postgres:
+    image: postgres:15
+    container_name: accruvia-harness-temporal-postgres
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_DB: temporal
+    ports:
+      - "5433:5432"
+    restart: unless-stopped
+
+  temporal:
+    image: temporalio/auto-setup:1.28.1
+    container_name: accruvia-harness-temporal
+    depends_on:
+      - postgres
+    ports:
+      - "7233:7233"
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: temporal
+      POSTGRES_SEEDS: postgres
+    restart: unless-stopped

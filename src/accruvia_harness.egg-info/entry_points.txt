@@ -1,0 +1,2 @@
+[console_scripts]
+accruvia-harness = accruvia_harness.cli:main

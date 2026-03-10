@@ -1,0 +1,158 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from ..domain import (
+    Artifact,
+    Decision,
+    DecisionAction,
+    Event,
+    Evaluation,
+    Run,
+    RunStatus,
+    TaskStatus,
+    new_id,
+)
+from ..policy import DefaultAnalyzer, DefaultDecider, DefaultPlanner
+from ..store import SQLiteHarnessStore
+from ..workers import WorkerBackend
+
+
+class RunService:
+    def __init__(
+        self,
+        store: SQLiteHarnessStore,
+        workspace_root: Path,
+        planner: DefaultPlanner,
+        worker: WorkerBackend,
+        analyzer: DefaultAnalyzer,
+        decider: DefaultDecider,
+    ) -> None:
+        self.store = store
+        self.workspace_root = workspace_root
+        self.planner = planner
+        self.worker = worker
+        self.analyzer = analyzer
+        self.decider = decider
+
+    def run_once(self, task_id: str) -> Run:
+        task = self.store.get_task(task_id)
+        if task is None:
+            raise ValueError(f"Unknown task: {task_id}")
+
+        self.store.update_task_status(task.id, TaskStatus.ACTIVE)
+        self.store.create_event(
+            Event(id=new_id("event"), entity_type="task", entity_id=task.id, event_type="task_activated", payload={})
+        )
+        attempt = self.store.next_attempt(task.id)
+        run = Run(
+            id=new_id("run"),
+            task_id=task.id,
+            status=RunStatus.PLANNING,
+            attempt=attempt,
+            summary="Run created.",
+        )
+        self.store.create_run(run)
+        self.store.create_event(
+            Event(
+                id=new_id("event"),
+                entity_type="run",
+                entity_id=run.id,
+                event_type="run_created",
+                payload={"task_id": task.id, "attempt": attempt},
+            )
+        )
+
+        plan = self.planner.plan(task)
+        self.store.create_event(
+            Event(
+                id=new_id("event"),
+                entity_type="run",
+                entity_id=run.id,
+                event_type="planned",
+                payload={"summary": plan.summary},
+            )
+        )
+        run = self.store.mark_run(run, RunStatus.WORKING, plan.summary)
+
+        work = self.worker.work(task, run, self.workspace_root)
+        for kind, path, summary in work.artifacts:
+            artifact = Artifact(id=new_id("artifact"), run_id=run.id, kind=kind, path=path, summary=summary)
+            self.store.create_artifact(artifact)
+            self.store.create_event(
+                Event(
+                    id=new_id("event"),
+                    entity_type="artifact",
+                    entity_id=artifact.id,
+                    event_type="artifact_recorded",
+                    payload={"run_id": run.id, "kind": kind, "path": path},
+                )
+            )
+        run = self.store.mark_run(run, RunStatus.ANALYZING, work.summary)
+
+        analysis = self.analyzer.analyze(task, run, self.store.list_artifacts(run.id))
+        evaluation = Evaluation(
+            id=new_id("evaluation"),
+            run_id=run.id,
+            verdict=analysis.verdict,
+            confidence=analysis.confidence,
+            summary=analysis.summary,
+            details=analysis.details,
+        )
+        self.store.create_evaluation(evaluation)
+        self.store.create_event(
+            Event(
+                id=new_id("event"),
+                entity_type="evaluation",
+                entity_id=evaluation.id,
+                event_type="evaluation_recorded",
+                payload={"run_id": run.id, "verdict": analysis.verdict, "confidence": analysis.confidence},
+            )
+        )
+        run = self.store.mark_run(run, RunStatus.DECIDING, analysis.summary)
+
+        decision_result = self.decider.decide(analysis, run, task)
+        decision = Decision(
+            id=new_id("decision"),
+            run_id=run.id,
+            action=decision_result.action,
+            rationale=decision_result.rationale,
+        )
+        self.store.create_decision(decision)
+        self.store.create_event(
+            Event(
+                id=new_id("event"),
+                entity_type="decision",
+                entity_id=decision.id,
+                event_type="decision_recorded",
+                payload={"run_id": run.id, "action": decision.action.value},
+            )
+        )
+
+        final_status = RunStatus.COMPLETED if decision_result.action == DecisionAction.PROMOTE else RunStatus.FAILED
+        task_status = TaskStatus.COMPLETED if decision_result.action == DecisionAction.PROMOTE else TaskStatus.PENDING
+        if decision_result.action == DecisionAction.FAIL:
+            task_status = TaskStatus.FAILED
+        run = self.store.mark_run(run, final_status, decision_result.rationale)
+        self.store.update_task_status(task.id, task_status)
+        self.store.create_event(
+            Event(
+                id=new_id("event"),
+                entity_type="task",
+                entity_id=task.id,
+                event_type="task_status_changed",
+                payload={"status": task_status.value, "run_id": run.id},
+            )
+        )
+        return run
+
+    def run_until_stable(self, task_id: str) -> list[Run]:
+        completed_runs: list[Run] = []
+        while True:
+            task = self.store.get_task(task_id)
+            if task is None:
+                raise ValueError(f"Unknown task: {task_id}")
+            if task.status in {TaskStatus.COMPLETED, TaskStatus.FAILED}:
+                break
+            completed_runs.append(self.run_once(task_id))
+        return completed_runs

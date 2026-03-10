@@ -1,0 +1,101 @@
+from __future__ import annotations
+
+from ..domain import Event, Project, Task, new_id
+from ..store import SQLiteHarnessStore
+from .common import task_created_payload
+
+
+class TaskService:
+    def __init__(self, store: SQLiteHarnessStore) -> None:
+        self.store = store
+
+    def create_project(self, name: str, description: str) -> Project:
+        project = Project(id=new_id("project"), name=name, description=description)
+        self.store.create_project(project)
+        return project
+
+    def create_task(self, task: Task) -> Task:
+        if task.external_ref_type and task.external_ref_id and not task.parent_task_id and not task.source_run_id:
+            existing = self.store.get_task_by_external_ref(task.external_ref_type, task.external_ref_id)
+            if existing is not None:
+                return existing
+        self.store.create_task(task)
+        self.store.create_event(
+            Event(
+                id=new_id("event"),
+                entity_type="task",
+                entity_id=task.id,
+                event_type="task_created",
+                payload=task_created_payload(task),
+            )
+        )
+        return task
+
+    def create_task_with_policy(
+        self,
+        project_id: str,
+        title: str,
+        objective: str,
+        priority: int,
+        parent_task_id: str | None,
+        source_run_id: str | None,
+        external_ref_type: str | None,
+        external_ref_id: str | None,
+        strategy: str,
+        max_attempts: int,
+        required_artifacts: list[str],
+    ) -> Task:
+        return self.create_task(
+            Task(
+                id=new_id("task"),
+                project_id=project_id,
+                title=title,
+                objective=objective,
+                priority=priority,
+                parent_task_id=parent_task_id,
+                source_run_id=source_run_id,
+                external_ref_type=external_ref_type,
+                external_ref_id=external_ref_id,
+                strategy=strategy,
+                max_attempts=max_attempts,
+                required_artifacts=required_artifacts,
+            )
+        )
+
+    def create_follow_on_task(
+        self,
+        parent_task_id: str,
+        source_run_id: str,
+        title: str,
+        objective: str,
+        priority: int | None = None,
+        strategy: str | None = None,
+        max_attempts: int | None = None,
+        required_artifacts: list[str] | None = None,
+    ) -> Task:
+        parent = self.store.get_task(parent_task_id)
+        if parent is None:
+            raise ValueError(f"Unknown parent task: {parent_task_id}")
+        task = self.create_task_with_policy(
+            project_id=parent.project_id,
+            title=title,
+            objective=objective,
+            priority=priority if priority is not None else parent.priority,
+            parent_task_id=parent_task_id,
+            source_run_id=source_run_id,
+            external_ref_type=parent.external_ref_type,
+            external_ref_id=parent.external_ref_id,
+            strategy=strategy or parent.strategy,
+            max_attempts=max_attempts if max_attempts is not None else parent.max_attempts,
+            required_artifacts=required_artifacts or list(parent.required_artifacts),
+        )
+        self.store.create_event(
+            Event(
+                id=new_id("event"),
+                entity_type="task",
+                entity_id=task.id,
+                event_type="follow_on_task_created",
+                payload={"parent_task_id": parent_task_id, "source_run_id": source_run_id},
+            )
+        )
+        return task
