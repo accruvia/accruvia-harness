@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from datetime import UTC, datetime
 
@@ -20,9 +21,22 @@ from ..domain import (
     TaskStatus,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def parse_dt(value: str) -> datetime:
     return datetime.fromisoformat(value).astimezone(UTC)
+
+
+def _safe_json_loads(value: str | None, fallback: object = None) -> object:
+    """Parse JSON with a fallback for corrupt data instead of crashing."""
+    if value is None:
+        return fallback if fallback is not None else {}
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, TypeError) as exc:
+        logger.warning("Corrupt JSON in database column (returning fallback): %s", exc)
+        return fallback if fallback is not None else {}
 
 
 def task_from_row(row: sqlite3.Row) -> Task:
@@ -36,12 +50,12 @@ def task_from_row(row: sqlite3.Row) -> Task:
         source_run_id=row["source_run_id"],
         external_ref_type=row["external_ref_type"],
         external_ref_id=row["external_ref_id"],
-        external_ref_metadata=json.loads(row["external_ref_metadata_json"]),
+        external_ref_metadata=_safe_json_loads(row["external_ref_metadata_json"], {}),
         validation_profile=row["validation_profile"],
         strategy=row["strategy"],
         max_attempts=int(row["max_attempts"]),
         max_branches=int(row["max_branches"]) if "max_branches" in row.keys() else 1,
-        required_artifacts=json.loads(row["required_artifacts_json"]),
+        required_artifacts=_safe_json_loads(row["required_artifacts_json"], []),
         status=TaskStatus(row["status"]),
         created_at=parse_dt(row["created_at"]),
         updated_at=parse_dt(row["updated_at"]),
@@ -88,7 +102,7 @@ def evaluation_from_row(row: sqlite3.Row) -> Evaluation:
         verdict=EvaluationVerdict(row["verdict"]),
         confidence=float(row["confidence"]),
         summary=row["summary"],
-        details=json.loads(row["details_json"]),
+        details=_safe_json_loads(row["details_json"], {}),
         created_at=parse_dt(row["created_at"]),
     )
 
@@ -109,7 +123,7 @@ def event_from_row(row: sqlite3.Row) -> Event:
         entity_type=row["entity_type"],
         entity_id=row["entity_id"],
         event_type=row["event_type"],
-        payload=json.loads(row["payload_json"]),
+        payload=_safe_json_loads(row["payload_json"], {}),
         created_at=parse_dt(row["created_at"]),
     )
 
@@ -121,6 +135,6 @@ def promotion_from_row(row: sqlite3.Row) -> PromotionRecord:
         run_id=row["run_id"],
         status=PromotionStatus(row["status"]),
         summary=row["summary"],
-        details=json.loads(row["details_json"]),
+        details=_safe_json_loads(row["details_json"], {}),
         created_at=parse_dt(row["created_at"]),
     )

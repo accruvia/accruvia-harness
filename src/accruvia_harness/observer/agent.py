@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 from dataclasses import dataclass
 
@@ -161,8 +162,7 @@ class ObserverAgent:
 
     def _invoke_llm(self, prompt: str) -> str:
         completed = subprocess.run(
-            self.llm_command,
-            shell=True,
+            shlex.split(self.llm_command),
             input=prompt,
             capture_output=True,
             text=True,
