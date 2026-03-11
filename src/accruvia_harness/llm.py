@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -275,24 +276,23 @@ def parse_affirmation_response(text: str) -> tuple[bool, str]:
     stripped = text.strip()
     if not stripped:
         raise ValueError("LLM affirmation response was empty")
-    try:
-        import json
-
-        payload = json.loads(stripped)
-        if isinstance(payload, dict):
-            approved = payload.get("approved")
-            rationale = str(payload.get("rationale") or payload.get("summary") or stripped)
-            if isinstance(approved, bool):
-                return approved, rationale
-    except Exception:
-        pass
+    for candidate in _candidate_json_payloads(stripped):
+        payload = _parse_json_object(candidate)
+        if payload is None:
+            continue
+        approved, rationale = _decision_from_mapping(payload, fallback=stripped)
+        if approved is not None:
+            return approved, rationale
 
     lowered = stripped.lower()
     first_line, *rest = stripped.splitlines()
     rationale = "\n".join(rest).strip() or first_line.strip()
-    if first_line.strip().upper().startswith("APPROVE") or " approve" in f" {lowered[:240]}":
+    structured_match = _structured_text_decision(stripped)
+    if structured_match is not None:
+        return structured_match, rationale
+    if first_line.strip().upper().startswith("APPROVE"):
         return True, rationale
-    if first_line.strip().upper().startswith("REJECT") or " reject" in f" {lowered[:240]}":
+    if first_line.strip().upper().startswith("REJECT"):
         return False, rationale
     if "should be promoted" in lowered and any(token in lowered for token in ("yes", "approve", "promote it")):
         return True, rationale
@@ -301,3 +301,63 @@ def parse_affirmation_response(text: str) -> tuple[bool, str]:
     ):
         return False, rationale
     raise ValueError("Unable to infer LLM affirmation decision from response text")
+
+
+def _candidate_json_payloads(text: str) -> list[str]:
+    candidates = [text]
+    fenced = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL)
+    candidates.extend(fenced)
+    inline = re.findall(r"(\{.*\})", text, flags=re.DOTALL)
+    candidates.extend(inline[:1])
+    return candidates
+
+
+def _parse_json_object(candidate: str) -> dict[str, object] | None:
+    try:
+        payload = json.loads(candidate)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _decision_from_mapping(payload: dict[str, object], fallback: str) -> tuple[bool, str] | tuple[None, str]:
+    approved = payload.get("approved")
+    if isinstance(approved, bool):
+        rationale = str(payload.get("rationale") or payload.get("summary") or fallback)
+        return approved, rationale
+
+    for key in ("decision", "verdict", "status", "recommendation"):
+        value = payload.get(key)
+        if not isinstance(value, str):
+            continue
+        parsed = _normalize_decision_word(value)
+        if parsed is not None:
+            rationale = str(payload.get("rationale") or payload.get("summary") or fallback)
+            return parsed, rationale
+    return None, fallback
+
+
+def _structured_text_decision(text: str) -> bool | None:
+    for line in text.splitlines():
+        match = re.match(
+            r"^\s*(decision|verdict|approved|status|recommendation)\s*[:=-]\s*(.+?)\s*$",
+            line,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            continue
+        parsed = _normalize_decision_word(match.group(2))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _normalize_decision_word(value: str) -> bool | None:
+    lowered = value.strip().lower()
+    positive = {"approve", "approved", "true", "yes", "promote", "promoted"}
+    negative = {"reject", "rejected", "false", "no", "deny", "blocked"}
+    if lowered in positive:
+        return True
+    if lowered in negative:
+        return False
+    return None

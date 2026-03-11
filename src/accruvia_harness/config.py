@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+from dataclasses import asdict
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 
 
@@ -43,6 +45,74 @@ class HarnessConfig:
     memory_limit_mb: int = 1024
     cpu_time_limit_seconds: int = 300
     observer_webhook_url: str | None = None
+
+    def to_payload(self) -> dict[str, object]:
+        payload = asdict(self)
+        for path_key in ("db_path", "workspace_root", "log_path", "telemetry_dir"):
+            payload[path_key] = str(payload[path_key])
+        return payload
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_payload(), sort_keys=True)
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, object]) -> "HarnessConfig":
+        return cls(
+            db_path=Path(str(payload["db_path"])),
+            workspace_root=Path(str(payload["workspace_root"])),
+            log_path=Path(str(payload["log_path"])),
+            telemetry_dir=Path(str(payload["telemetry_dir"])),
+            default_project_name=str(payload["default_project_name"]),
+            default_repo=str(payload["default_repo"]),
+            runtime_backend=str(payload["runtime_backend"]),
+            temporal_target=str(payload["temporal_target"]),
+            temporal_namespace=str(payload["temporal_namespace"]),
+            temporal_task_queue=str(payload["temporal_task_queue"]),
+            worker_backend=str(payload["worker_backend"]),
+            worker_command=(str(payload["worker_command"]) if payload["worker_command"] is not None else None),
+            llm_backend=str(payload["llm_backend"]),
+            llm_model=(str(payload["llm_model"]) if payload["llm_model"] is not None else None),
+            llm_command=(str(payload["llm_command"]) if payload["llm_command"] is not None else None),
+            llm_codex_command=(str(payload["llm_codex_command"]) if payload["llm_codex_command"] is not None else None),
+            llm_claude_command=(str(payload["llm_claude_command"]) if payload["llm_claude_command"] is not None else None),
+            llm_accruvia_client_command=(
+                str(payload["llm_accruvia_client_command"])
+                if payload["llm_accruvia_client_command"] is not None
+                else None
+            ),
+            env_passthrough=tuple(str(item) for item in payload.get("env_passthrough", ())),
+            adapter_modules=tuple(str(item) for item in payload.get("adapter_modules", ())),
+            project_adapter_modules=tuple(str(item) for item in payload.get("project_adapter_modules", ())),
+            validator_modules=tuple(str(item) for item in payload.get("validator_modules", ())),
+            otel_service_name=str(payload.get("otel_service_name", "accruvia-harness")),
+            otel_exporter_otlp_endpoint=(
+                str(payload["otel_exporter_otlp_endpoint"])
+                if payload.get("otel_exporter_otlp_endpoint") is not None
+                else None
+            ),
+            issue_close_on_completed=bool(payload.get("issue_close_on_completed", True)),
+            issue_close_only_on_approved_promotion=bool(
+                payload.get("issue_close_only_on_approved_promotion", False)
+            ),
+            issue_reopen_on_pending=bool(payload.get("issue_reopen_on_pending", True)),
+            issue_reopen_on_active=bool(payload.get("issue_reopen_on_active", True)),
+            issue_reopen_on_failed=bool(payload.get("issue_reopen_on_failed", True)),
+            timeout_ema_alpha=float(payload.get("timeout_ema_alpha", 0.5)),
+            timeout_min_seconds=int(payload.get("timeout_min_seconds", 30)),
+            timeout_max_seconds=int(payload.get("timeout_max_seconds", 1800)),
+            timeout_multiplier=float(payload.get("timeout_multiplier", 2.5)),
+            memory_limit_mb=int(payload.get("memory_limit_mb", 1024)),
+            cpu_time_limit_seconds=int(payload.get("cpu_time_limit_seconds", 300)),
+            observer_webhook_url=(
+                str(payload["observer_webhook_url"])
+                if payload.get("observer_webhook_url") is not None
+                else None
+            ),
+        )
+
+    @classmethod
+    def from_json(cls, payload: str) -> "HarnessConfig":
+        return cls.from_payload(json.loads(payload))
 
     @classmethod
     def from_env(

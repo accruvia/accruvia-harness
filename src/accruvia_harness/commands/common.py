@@ -4,20 +4,16 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from ..bootstrap import build_engine_from_config, build_store, build_telemetry
 from ..config import HarnessConfig
 from ..domain import serialize_dataclass
 from ..engine import HarnessEngine
 from ..github import GitHubCLI
 from ..gitlab import GitLabCLI
 from ..interrogation import HarnessQueryService, InterrogationService
-from ..project_adapters import build_project_adapter_registry
 from ..runtime import WorkflowRuntime, build_runtime
 from ..store import SQLiteHarnessStore
 from ..telemetry import TelemetrySink
-from ..validation import build_validator_registry
-from ..llm import build_llm_router
-from ..services.issue_policy import IssueStatePolicy
-from ..workers import build_worker_from_config
 
 
 def emit(payload: Any) -> None:
@@ -38,31 +34,9 @@ class CLIContext:
 
 
 def build_context(config: HarnessConfig) -> CLIContext:
-    store = SQLiteHarnessStore(config.db_path)
-    store.initialize()
-    store.observer_webhook_url = config.observer_webhook_url
-    telemetry = TelemetrySink(
-        config.telemetry_dir,
-        service_name=config.otel_service_name,
-        otlp_endpoint=config.otel_exporter_otlp_endpoint,
-    )
-    issue_policy = IssueStatePolicy(
-        close_on_completed=config.issue_close_on_completed,
-        close_only_on_approved_promotion=config.issue_close_only_on_approved_promotion,
-        reopen_on_pending=config.issue_reopen_on_pending,
-        reopen_on_active=config.issue_reopen_on_active,
-        reopen_on_failed=config.issue_reopen_on_failed,
-    )
-    engine = HarnessEngine(
-        store=store,
-        workspace_root=config.workspace_root,
-        project_adapter_registry=build_project_adapter_registry(config.project_adapter_modules),
-        validator_registry=build_validator_registry(config.validator_modules),
-        telemetry=telemetry,
-        issue_state_policy=issue_policy,
-    )
-    engine.set_llm_router(build_llm_router(config, telemetry=telemetry))
-    engine.set_worker(build_worker_from_config(config, telemetry=telemetry))
+    store = build_store(config)
+    telemetry = build_telemetry(config)
+    engine = build_engine_from_config(config, store=store, telemetry=telemetry)
     query_service = HarnessQueryService(store, telemetry=telemetry)
     return CLIContext(
         config=config,
@@ -72,6 +46,7 @@ def build_context(config: HarnessConfig) -> CLIContext:
         gitlab=GitLabCLI(),
         runtime=build_runtime(
             backend=config.runtime_backend,
+            config=config,
             engine=engine,
             temporal_target=config.temporal_target,
             temporal_namespace=config.temporal_namespace,

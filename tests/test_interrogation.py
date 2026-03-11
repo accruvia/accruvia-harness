@@ -190,3 +190,7 @@ class HarnessQueryServiceTests(unittest.TestCase):
     def test_query_service_uses_read_only_store_wrapper(self) -> None:
         with self.assertRaises(AttributeError):
             self.query.store.update_task_status("task_x", None)
+
+    def test_query_service_read_only_store_blocks_low_level_connection_access(self) -> None:
+        with self.assertRaises(AttributeError):
+            self.query.store.connect()

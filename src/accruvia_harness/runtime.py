@@ -5,6 +5,7 @@ import asyncio
 from uuid import uuid4
 from typing import Protocol
 
+from .config import HarnessConfig
 from .engine import HarnessEngine
 from .temporal_backend import temporal_support_available
 
@@ -66,6 +67,7 @@ class LocalWorkflowRuntime:
 
 @dataclass(slots=True)
 class TemporalWorkflowRuntime:
+    config: HarnessConfig
     engine: HarnessEngine
     target: str
     namespace: str
@@ -114,13 +116,9 @@ class TemporalWorkflowRuntime:
     async def _run_task_until_stable(self, task_id: str) -> dict[str, object]:
         client_cls = _get_temporal_client_class()
         client = await client_cls.connect(self.target, namespace=self.namespace)
-        config = {
-            "db_path": str(self.engine.store.db_path),
-            "workspace_root": str(self.engine.workspace_root),
-        }
         await client.execute_workflow(
             "task_to_stable_workflow",
-            args=[config, task_id],
+            args=[self.config.to_json(), task_id],
             id=f"task-to-stable-{task_id}-{uuid4().hex[:8]}",
             task_queue=self.task_queue,
         )
@@ -136,13 +134,9 @@ class TemporalWorkflowRuntime:
     ) -> dict[str, object] | None:
         client_cls = _get_temporal_client_class()
         client = await client_cls.connect(self.target, namespace=self.namespace)
-        config = {
-            "db_path": str(self.engine.store.db_path),
-            "workspace_root": str(self.engine.workspace_root),
-        }
         result = await client.execute_workflow(
             "process_next_task_workflow",
-            args=[config, project_id, worker_id, lease_seconds],
+            args=[self.config.to_json(), project_id, worker_id, lease_seconds],
             id=f"process-next-{project_id or 'global'}-{uuid4().hex[:8]}",
             task_queue=self.task_queue,
         )
@@ -156,6 +150,7 @@ class TemporalWorkflowRuntime:
 
 def build_runtime(
     backend: str,
+    config: HarnessConfig,
     engine: HarnessEngine,
     temporal_target: str,
     temporal_namespace: str,
@@ -165,6 +160,7 @@ def build_runtime(
         return LocalWorkflowRuntime(engine=engine)
     if backend == "temporal":
         return TemporalWorkflowRuntime(
+            config=config,
             engine=engine,
             target=temporal_target,
             namespace=temporal_namespace,

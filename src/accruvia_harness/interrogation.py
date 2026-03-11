@@ -11,12 +11,29 @@ from .telemetry import TelemetrySink
 
 
 class ReadOnlyStore:
+    _ALLOWED_METHODS = {
+        "get_task",
+        "get_project",
+        "latest_promotion",
+        "list_artifacts",
+        "list_child_tasks",
+        "list_decisions",
+        "list_evaluations",
+        "list_events",
+        "list_projects",
+        "list_promotions",
+        "list_runs",
+        "list_task_leases",
+        "list_tasks",
+        "metrics_snapshot",
+    }
+
     def __init__(self, store) -> None:
         self._store = store
 
     def __getattr__(self, name: str):
-        if name.startswith(("create_", "update_", "mark_", "release_", "acquire_")):
-            raise AttributeError(f"Mutation method '{name}' is not available on ReadOnlyStore")
+        if name not in self._ALLOWED_METHODS:
+            raise AttributeError(f"Attribute '{name}' is not available on ReadOnlyStore")
         return getattr(self._store, name)
 
 

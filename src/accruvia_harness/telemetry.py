@@ -38,16 +38,22 @@ class TelemetrySink:
     otlp_endpoint: str | None = None
     metrics_path: Path = field(init=False)
     spans_path: Path = field(init=False)
+    warnings_path: Path = field(init=False)
     _otel: "_OpenTelemetryBridge | None" = field(init=False, default=None)
+    otel_status: str = field(init=False, default="disabled")
+    otel_warning: str | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         self.metrics_path = self.root / "metrics.jsonl"
         self.spans_path = self.root / "spans.jsonl"
-        self._otel = _OpenTelemetryBridge.build(
+        self.warnings_path = self.root / "warnings.jsonl"
+        self._otel, self.otel_status, self.otel_warning = _OpenTelemetryBridge.build(
             service_name=self.service_name,
             endpoint=self.otlp_endpoint,
         )
+        if self.otel_warning:
+            self.warn("otel_setup", self.otel_warning, endpoint=self.otlp_endpoint)
 
     def metric(self, name: str, value: float, metric_type: str = "counter", **attributes: Any) -> None:
         sanitized = _sanitize_attributes(attributes)
@@ -61,7 +67,10 @@ class TelemetrySink:
         }
         self._append(self.metrics_path, payload)
         if self._otel is not None:
-            self._otel.metric(name, value, metric_type=metric_type, attributes=sanitized)
+            try:
+                self._otel.metric(name, value, metric_type=metric_type, attributes=sanitized)
+            except Exception as exc:
+                self.warn("otel_metric_export", str(exc), metric=name, metric_type=metric_type)
 
     def span(self, name: str, duration_ms: float | None = None, **attributes: Any) -> None:
         sanitized = _sanitize_attributes(attributes)
@@ -75,7 +84,10 @@ class TelemetrySink:
             payload["duration_ms"] = duration_ms
         self._append(self.spans_path, payload)
         if self._otel is not None:
-            self._otel.span(name, duration_ms=duration_ms, attributes=sanitized)
+            try:
+                self._otel.span(name, duration_ms=duration_ms, attributes=sanitized)
+            except Exception as exc:
+                self.warn("otel_span_export", str(exc), span=name)
 
     def timed(self, name: str, **attributes: Any):
         return _TimedSpan(self, name, attributes)
@@ -83,6 +95,7 @@ class TelemetrySink:
     def summary(self) -> dict[str, object]:
         metrics = self.load_metrics()
         spans = self.load_spans()
+        warnings = self.load_warnings()
         metric_totals: dict[str, float] = {}
         metric_series: dict[str, list[float]] = {}
         cost_totals = {
@@ -115,8 +128,12 @@ class TelemetrySink:
             "otlp_trace_endpoint": self._otel.trace_endpoint if self._otel is not None else None,
             "otlp_metric_endpoint": self._otel.metric_endpoint if self._otel is not None else None,
             "otel_enabled": self._otel is not None,
+            "otel_status": self.otel_status,
+            "otel_warning": self.otel_warning,
             "metrics_path": str(self.metrics_path),
             "spans_path": str(self.spans_path),
+            "warnings_path": str(self.warnings_path),
+            "warnings": warnings[-20:],
             "metric_totals": metric_totals,
             "metric_averages": {
                 name: (sum(values) / len(values)) for name, values in metric_series.items() if values
@@ -150,6 +167,16 @@ class TelemetrySink:
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, sort_keys=True) + "\n")
 
+    def warn(self, category: str, message: str, **attributes: Any) -> None:
+        payload = {
+            "timestamp": datetime.now(UTC).isoformat(),
+            "type": "warning",
+            "category": category,
+            "message": message,
+            "attributes": _sanitize_attributes(attributes),
+        }
+        self._append(self.warnings_path, payload)
+
     def _load(self, path: Path) -> list[dict[str, Any]]:
         if not path.exists():
             return []
@@ -165,6 +192,9 @@ class TelemetrySink:
 
     def load_spans(self) -> list[dict[str, Any]]:
         return self._load(self.spans_path)
+
+    def load_warnings(self) -> list[dict[str, Any]]:
+        return self._load(self.warnings_path)
 
 
 class _TimedSpan:
@@ -197,7 +227,11 @@ class _OpenTelemetryBridge:
         self._histograms: dict[str, Any] = {}
 
     @classmethod
-    def build(cls, service_name: str, endpoint: str | None) -> "_OpenTelemetryBridge | None":
+    def build(
+        cls, service_name: str, endpoint: str | None
+    ) -> tuple["_OpenTelemetryBridge | None", str, str | None]:
+        if not endpoint:
+            return None, "disabled", None
         try:
             from opentelemetry import metrics, trace
             from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
@@ -207,13 +241,11 @@ class _OpenTelemetryBridge:
             from opentelemetry.sdk.resources import Resource
             from opentelemetry.sdk.trace import TracerProvider
             from opentelemetry.sdk.trace.export import BatchSpanProcessor
-        except Exception:
-            return None
-        if not endpoint:
-            return None
+        except Exception as exc:
+            return None, "error", f"OpenTelemetry import/setup failed: {exc}"
         trace_endpoint, metric_endpoint = _otlp_signal_endpoints(endpoint)
         if not trace_endpoint or not metric_endpoint:
-            return None
+            return None, "error", "Unable to derive OTLP trace and metric endpoints"
         resource = Resource.create({"service.name": service_name})
         trace_provider = TracerProvider(resource=resource)
         trace_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=trace_endpoint)))
@@ -221,11 +253,15 @@ class _OpenTelemetryBridge:
         meter_provider = MeterProvider(resource=resource, metric_readers=[metric_reader])
         trace.set_tracer_provider(trace_provider)
         metrics.set_meter_provider(meter_provider)
-        return cls(
-            tracer=trace.get_tracer(service_name),
-            meter=metrics.get_meter(service_name),
-            trace_endpoint=trace_endpoint,
-            metric_endpoint=metric_endpoint,
+        return (
+            cls(
+                tracer=trace.get_tracer(service_name),
+                meter=metrics.get_meter(service_name),
+                trace_endpoint=trace_endpoint,
+                metric_endpoint=metric_endpoint,
+            ),
+            "enabled",
+            None,
         )
 
     def metric(
@@ -250,10 +286,7 @@ class _OpenTelemetryBridge:
                 instrument = self.meter.create_counter(name)
             self._counters[name] = instrument
         if value < 0 and instrument in self._counters.values():
-            try:
-                instrument.add(value, attributes=attributes)
-            except Exception:
-                pass
+            instrument.add(value, attributes=attributes)
             return
         instrument.add(value, attributes=attributes)
 

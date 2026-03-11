@@ -78,6 +78,21 @@ class Phase1Tests(unittest.TestCase):
 
         self.assertEqual(("FOO", "BAR"), config.env_passthrough)
 
+    def test_config_payload_round_trip_preserves_runtime_settings(self) -> None:
+        config = HarnessConfig.from_env(
+            db_path=self.base / "payload.db",
+            workspace_root=self.base / "workspace",
+            log_path=self.base / "harness.log",
+        )
+        payload = config.to_payload()
+
+        restored = HarnessConfig.from_payload(payload)
+
+        self.assertEqual(config.db_path, restored.db_path)
+        self.assertEqual(config.workspace_root, restored.workspace_root)
+        self.assertEqual(config.runtime_backend, restored.runtime_backend)
+        self.assertEqual(config.timeout_multiplier, restored.timeout_multiplier)
+
     def test_redact_command_hides_command_tail(self) -> None:
         self.assertEqual("codex [REDACTED]", _redact_command("codex exec --api-key secret"))
         self.assertIsNone(_redact_command(None))
@@ -91,3 +106,16 @@ class Phase1Tests(unittest.TestCase):
             ("http://localhost:4318/v1/traces", "http://localhost:4318/v1/metrics"),
             _otlp_signal_endpoints("http://localhost:4318/v1/traces"),
         )
+
+    def test_telemetry_summary_surfaces_otel_setup_warning(self) -> None:
+        with unittest.mock.patch(
+            "accruvia_harness.telemetry._OpenTelemetryBridge.build",
+            return_value=(None, "error", "OpenTelemetry import/setup failed: boom"),
+        ):
+            telemetry = TelemetrySink(self.base / "telemetry", otlp_endpoint="http://localhost:4318")
+
+        summary = telemetry.summary()
+
+        self.assertEqual("error", summary["otel_status"])
+        self.assertEqual("OpenTelemetry import/setup failed: boom", summary["otel_warning"])
+        self.assertEqual("otel_setup", summary["warnings"][0]["category"])

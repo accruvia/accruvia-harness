@@ -224,11 +224,35 @@ class WorkerTests(unittest.TestCase):
         self.assertFalse(approved)
         self.assertIn("not ready", rationale)
 
+    def test_parse_affirmation_response_handles_structured_text_fields(self) -> None:
+        approved, rationale = parse_affirmation_response(
+            "decision: approved\nrationale: deterministic gates passed and risk is acceptable"
+        )
+        self.assertTrue(approved)
+        self.assertIn("rationale", rationale)
+
+    def test_parse_affirmation_response_handles_json_fenced_payload(self) -> None:
+        approved, rationale = parse_affirmation_response(
+            '```json\n{"decision":"rejected","rationale":"report shows failing tests"}\n```'
+        )
+        self.assertFalse(approved)
+        self.assertIn("failing tests", rationale)
+
     def test_build_subprocess_env_sanitizes_ambient_variables(self) -> None:
-        with patch.dict(os.environ, {"SECRET_TOKEN": "shh", "PATH": "/usr/bin", "KEEP_ME": "ok"}, clear=True):
+        with patch.dict(
+            os.environ,
+            {
+                "SECRET_TOKEN": "shh",
+                "PATH": "/usr/bin",
+                "KEEP_ME": "ok",
+                "ACCRUVIA_SECRET_TOKEN": "dont-pass",
+            },
+            clear=True,
+        ):
             env = build_subprocess_env({"ACCRUVIA_TASK_ID": "task_1"}, passthrough=("KEEP_ME",))
 
         self.assertNotIn("SECRET_TOKEN", env)
+        self.assertNotIn("ACCRUVIA_SECRET_TOKEN", env)
         self.assertEqual("/usr/bin", env["PATH"])
         self.assertEqual("ok", env["KEEP_ME"])
         self.assertEqual("task_1", env["ACCRUVIA_TASK_ID"])

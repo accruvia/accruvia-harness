@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
-from pathlib import Path
 from typing import Any
 
+from .bootstrap import build_engine_from_config
+from .config import HarnessConfig
 from .engine import HarnessEngine
-from .store import SQLiteHarnessStore
-from .telemetry import TelemetrySink
 
 try:
     from temporalio import activity, workflow
@@ -22,14 +21,12 @@ except ModuleNotFoundError:  # pragma: no cover - exercised via availability che
     Worker = None
 
 
-def _build_engine(db_path: str, workspace_root: str) -> HarnessEngine:
-    store = SQLiteHarnessStore(Path(db_path))
-    store.initialize()
-    return HarnessEngine(
-        store=store,
-        workspace_root=Path(workspace_root),
-        telemetry=TelemetrySink(Path(db_path).parent / "telemetry"),
-    )
+def _build_engine(config_payload: str | dict[str, object]) -> HarnessEngine:
+    if isinstance(config_payload, str):
+        config = HarnessConfig.from_json(config_payload)
+    else:
+        config = HarnessConfig.from_payload(config_payload)
+    return build_engine_from_config(config)
 
 
 def _import_temporal_modules() -> tuple[Any, Any, Any]:
@@ -46,20 +43,20 @@ def temporal_support_available() -> bool:
     return True
 
 
-def task_to_stable_activity(config: dict[str, str], task_id: str) -> dict[str, object]:
-    engine = _build_engine(config["db_path"], config["workspace_root"])
+def task_to_stable_activity(config: str, task_id: str) -> dict[str, object]:
+    engine = _build_engine(config)
     runs = engine.run_until_stable(task_id)
     task = engine.store.get_task(task_id)
     return {"task_id": task_id, "task_status": task.status.value if task else None, "run_count": len(runs)}
 
 
 def process_next_task_activity(
-    config: dict[str, str],
+    config: str,
     project_id: str | None = None,
     worker_id: str = "local-worker",
     lease_seconds: int = 300,
 ) -> dict[str, object] | None:
-    engine = _build_engine(config["db_path"], config["workspace_root"])
+    engine = _build_engine(config)
     result = engine.process_next_task(
         project_id,
         worker_id=worker_id,
@@ -74,15 +71,13 @@ def process_next_task_activity(
 if activity is not None and workflow is not None:
 
     @activity.defn(name="task_to_stable_activity")
-    async def task_to_stable_activity_defn(
-        config: dict[str, str], task_id: str
-    ) -> dict[str, object]:
+    async def task_to_stable_activity_defn(config: str, task_id: str) -> dict[str, object]:
         return await asyncio.to_thread(task_to_stable_activity, config, task_id)
 
 
     @activity.defn(name="process_next_task_activity")
     async def process_next_task_activity_defn(
-        config: dict[str, str],
+        config: str,
         project_id: str | None = None,
         worker_id: str = "local-worker",
         lease_seconds: int = 300,
@@ -99,7 +94,7 @@ if activity is not None and workflow is not None:
     @workflow.defn(name="task_to_stable_workflow")
     class TaskToStableWorkflow:
         @workflow.run
-        async def run(self, config: dict[str, str], task_id: str) -> dict[str, object]:
+        async def run(self, config: str, task_id: str) -> dict[str, object]:
             return await workflow.execute_activity(
                 "task_to_stable_activity",
                 args=[config, task_id],
@@ -113,7 +108,7 @@ if activity is not None and workflow is not None:
         @workflow.run
         async def run(
             self,
-            config: dict[str, str],
+            config: str,
             project_id: str | None = None,
             worker_id: str = "local-worker",
             lease_seconds: int = 300,

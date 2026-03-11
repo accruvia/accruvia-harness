@@ -26,7 +26,7 @@ def build_subprocess_env(extra: dict[str, str], passthrough: tuple[str, ...] = (
     sanitized = {
         key: value
         for key, value in os.environ.items()
-        if key in allowed or key.startswith("ACCRUVIA_")
+        if key in allowed
     }
     sanitized.update(extra)
     return sanitized

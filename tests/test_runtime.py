@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 from unittest.mock import AsyncMock
 
+from accruvia_harness.config import HarnessConfig
 from accruvia_harness.domain import EvaluationVerdict, Project, RunStatus, new_id
 from accruvia_harness.engine import HarnessEngine
+from accruvia_harness.temporal_backend import _build_engine
 from accruvia_harness.runtime import LocalWorkflowRuntime, build_runtime
 from accruvia_harness.store import SQLiteHarnessStore
 
@@ -22,6 +25,26 @@ class RuntimeTests(unittest.TestCase):
         self.engine = HarnessEngine(
             store=self.store,
             workspace_root=base / "workspace",
+        )
+        self.config = HarnessConfig(
+            db_path=base / "harness.db",
+            workspace_root=base / "workspace",
+            log_path=base / "harness.log",
+            telemetry_dir=base / "telemetry",
+            default_project_name="accruvia",
+            default_repo="accruvia/accruvia",
+            runtime_backend="local",
+            temporal_target="localhost:7233",
+            temporal_namespace="default",
+            temporal_task_queue="accruvia-harness",
+            worker_backend="local",
+            worker_command=None,
+            llm_backend="auto",
+            llm_model=None,
+            llm_command=None,
+            llm_codex_command=None,
+            llm_claude_command=None,
+            llm_accruvia_client_command=None,
         )
         project = Project(id=new_id("project"), name="accruvia", description="Harness work")
         self.store.create_project(project)
@@ -51,6 +74,7 @@ class RuntimeTests(unittest.TestCase):
     def test_temporal_runtime_reports_unavailable_without_dependency(self) -> None:
         runtime = build_runtime(
             backend="temporal",
+            config=self.config,
             engine=self.engine,
             temporal_target="localhost:7233",
             temporal_namespace="default",
@@ -66,6 +90,7 @@ class RuntimeTests(unittest.TestCase):
     def test_temporal_runtime_info_reports_available_when_supported(self) -> None:
         runtime = build_runtime(
             backend="temporal",
+            config=self.config,
             engine=self.engine,
             temporal_target="localhost:7233",
             temporal_namespace="default",
@@ -81,6 +106,7 @@ class RuntimeTests(unittest.TestCase):
     def test_temporal_runtime_normalizes_workflow_result_shape(self) -> None:
         runtime = build_runtime(
             backend="temporal",
+            config=self.config,
             engine=self.engine,
             temporal_target="localhost:7233",
             temporal_namespace="default",
@@ -113,6 +139,62 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(task.id, result["task"].id)
         self.assertEqual(run.id, result["runs"][0].id)
+
+    def test_temporal_engine_builder_uses_configured_external_modules(self) -> None:
+        plugin_root = Path(self.temp_dir.name) / "plugins"
+        plugin_root.mkdir()
+        module_path = plugin_root / "temporal_private_adapter.py"
+        module_path.write_text(
+            "from pathlib import Path\n\n"
+            "from accruvia_harness.adapters.base import AdapterEvidence\n\n"
+            "class TemporalPrivateAdapter:\n"
+            "    profile = 'temporal_private'\n\n"
+            "    def build_evidence(self, task, run_dir: Path):\n"
+            "        artifact = run_dir / 'temporal.txt'\n"
+            "        artifact.write_text('temporal adapter output\\n', encoding='utf-8')\n"
+            "        return AdapterEvidence(\n"
+            "            passed=True,\n"
+            "            report={\n"
+            "                'changed_files': [str(artifact)],\n"
+            "                'test_files': [],\n"
+            "                'compile_check': {'passed': True, 'targets': [str(artifact)]},\n"
+            "                'test_check': {'passed': True, 'framework': 'temporal-private'},\n"
+            "            },\n"
+            "            diagnostics={'adapter': 'temporal_private'},\n"
+            "        )\n\n"
+            "def register_adapters(registry):\n"
+            "    registry.register(TemporalPrivateAdapter())\n",
+            encoding="utf-8",
+        )
+        sys.path.insert(0, str(plugin_root))
+        self.addCleanup(lambda: sys.path.remove(str(plugin_root)))
+
+        config = HarnessConfig.from_payload(
+            {
+                **self.config.to_payload(),
+                "adapter_modules": ("temporal_private_adapter",),
+            }
+        )
+        engine = _build_engine(config.to_payload())
+        project = engine.create_project("temporal-private", "Temporal private project")
+        task = engine.create_task_with_policy(
+            project_id=project.id,
+            title="Temporal private task",
+            objective="Use external adapter through temporal builder",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            validation_profile="temporal_private",
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+
+        run = engine.run_once(task.id)
+
+        self.assertEqual(RunStatus.COMPLETED, run.status)
 
     def test_blocked_run_uses_explicit_run_status_enum(self) -> None:
         task = self.engine.create_task_with_policy(
