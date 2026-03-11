@@ -1,8 +1,8 @@
 # accruvia-harness
 
-`accruvia-harness` is a workflow harness for creating and managing LLM-developed software.
+`accruvia-harness` is an opinionated harness for creating and managing LLM-developed software.
 
-Its purpose is to run a durable loop:
+It runs a durable loop:
 
 1. plan
 2. work
@@ -10,48 +10,38 @@ Its purpose is to run a durable loop:
 4. decide
 5. repeat
 
-The first serious workload will be software tasks in the `accruvia` ecosystem, starting with `accruvia_client.runner`-style work. The harness is intended to support multiple projects over time, but v1 will stay operationally simple while keeping a multi-project-ready data model.
+The harness owns execution truth. External issue systems such as GitHub and GitLab are intake and reporting surfaces, not the control plane.
 
 ## Why This Exists
 
-OpenClaw was useful as an interactive shell and interrogation surface, but it was a weak fit for long-running autonomous workflow control.
+This project exists because prompt-driven agent shells were not a reliable way to run long-lived software workflows.
 
-The main lessons learned were:
+The harness is designed around a few non-negotiable rules:
 
-- prompt-driven cron orchestration is not a reliable control plane
-- durable state must be explicit and authoritative
+- durable state must be explicit
 - artifacts, evaluations, and decisions must be first-class records
-- retries and promotions must be policy-driven, not inferred from chat state
-- observability must come from structured telemetry, not reconstructed memory
-- runtime execution and human interrogation should be separate concerns
+- retries and promotions must be policy-driven
+- execution and interrogation must be separate concerns
+- telemetry must come from structured signals, not reconstructed chat state
 
-## What This Harness Will Do
+## What It Does
 
-- run durable software-development workflows
-- support parallel work where appropriate
-- persist tasks, runs, artifacts, evaluations, and decisions
-- link internal tasks to external systems such as repo issues
-- evaluate outputs before promotion
-- support retries, requeues, and follow-on work explicitly
-- expose results to an interrogation layer for analysis and productivity review
+- persists `project`, `task`, `run`, `artifact`, `evaluation`, `decision`, and `event`
+- supports local and Temporal-backed runtime paths
+- supports GitHub and GitLab issue intake/reporting
+- supports workload adapters, project adapters, and validator plugins
+- supports deterministic promotion review plus LLM affirmation
+- exposes a read-only interrogation layer for explanation and ops review
 
-## What This Harness Will Not Do
+## Architecture
 
-- use chat history as the system of record
-- rely on lossy summaries as canonical memory
-- treat an LLM session as authoritative execution truth
-- use OpenClaw as the workflow controller
+- workflow runtime: local now, Temporal-backed path available
+- system of record: SQLite today
+- observability: JSONL telemetry with optional OpenTelemetry export
+- worker backends: `local`, `shell`, `agent`, `llm`
+- LLM routing: local CLI or `accruvia-client`
 
-## Initial Architecture
-
-- workflow engine: `Temporal`
-- LLM control graph: `LangGraph`
-- system database: `PostgreSQL`
-- experiment and evaluation tracking: `MLflow`
-- observability: `OpenTelemetry`
-- optional interrogation surface: `OpenClaw`
-
-## Core Records
+Core records:
 
 - `project`
 - `task`
@@ -60,124 +50,65 @@ The main lessons learned were:
 - `evaluation`
 - `decision`
 
-Tasks may optionally carry external references such as `github_issue:#456`. Those references are intake and reporting links, not the execution control plane.
-
-## V1 Golden Path
-
-1. create a task
-2. generate a plan
-3. run a worker
-4. collect artifacts
-5. evaluate output
-6. decide promote, retry, fail, or branch
-7. persist the outcome
-8. repeat until resolved
-
-## Success Criteria For V1
-
-- one durable end-to-end loop works reliably
-- artifacts and decisions are persisted explicitly
-- retries are bounded and policy-driven
-- evaluations can reject incomplete or low-quality work
-- the system can explain why it took a given action
-
-## Role Of OpenClaw
-
-OpenClaw may still be useful as an observer and interrogator over harness state, artifacts, and productivity metrics. It is not the controller.
-
 ## Source Of Truth
 
-The harness keeps execution truth internally.
+Execution truth is internal to the harness.
 
-- GitHub issues and other external systems are intake and reporting surfaces
-- the harness database and event history are the canonical source of truth for task execution
-- retries, runs, evaluations, decisions, and artifacts are governed by the harness, not the issue tracker
-
-This means a task may link to `github_issue:#456`, but the issue itself is not the workflow control plane.
-
-## Current Implementation
-
-This repo now contains a minimal durable harness foundation:
-
-- a Python package in `src/accruvia_harness`
-- a SQLite-backed system of record
-- core records for `project`, `task`, `run`, `artifact`, `evaluation`, and `decision`
-- explicit task validation profiles so language- or workload-specific evidence rules can be selected
-- an append-only event log for auditable state transitions
-- JSONL telemetry plus optional OpenTelemetry export
-- a migration-managed schema bootstrap
-- an explicit configuration model
-- structured JSONL logging for CLI operations
-- a separate workflow policy module for `plan -> work -> analyze -> decide`
-- retry planning informed by the previous run's evaluation and decision
-- a workflow runtime boundary with local and Temporal backends
-- queue selection for pending tasks by priority
-- task leasing for safe queue arbitration
-- task lineage via `parent_task_id` and `source_run_id`
-- GitHub and GitLab adapters for importing issues and reporting results back out
-- a project adapter registry for preparing per-run workspaces without hardcoding private repo logic
-- a validator registry for built-in and externally supplied promotion validators
-- worker backends for `local`, `shell`, `agent`, and routed `llm`
-- an LLM executor/router layer that can choose local CLI tools or `accruvia-client`
-- an adapter registry for built-in workload adapters plus externally supplied adapter modules
-- a profile-aware local worker that emits deterministic evidence for `generic`, `python`, `javascript`, and `terraform` tasks
-- a read-only interrogation surface for summaries, context packets, and task reports
-- LLM-backed `explain-system` and `explain-task` commands built on read-only evidence packets
-- an operational report for pending affirmations and profile-aware workload metrics
-- a dashboard export for slow operations, queue state, retry rate, and LLM cost usage
-- a small CLI for creating projects, syncing issue-backed tasks, running cycles, and inspecting status
-
-This is intentionally narrow. It proves the control shape before adding deeper Temporal, LangGraph, and distributed execution hardening.
+- GitHub/GitLab issues are references
+- the harness DB and event history are canonical
+- retries, promotions, branches, and follow-on work are governed by the harness
 
 ## Quick Start
 
+Create a virtualenv, install the package, and initialize the harness:
+
 ```bash
-PYTHONPATH=src python3 -m accruvia_harness init-db
-PYTHONPATH=src python3 -m accruvia_harness config
-PYTHONPATH=src python3 -m accruvia_harness runtime-info
-PYTHONPATH=src python3 -m accruvia_harness run-temporal-worker
-PYTHONPATH=src python3 -m accruvia_harness create-project accruvia "Accruvia harness work" --adapter-name generic
-PYTHONPATH=src python3 -m accruvia_harness create-task <project_id> "First task" "Build the first durable loop" --priority 200 --validation-profile generic --external-ref-type github_issue --external-ref-id 456 --strategy baseline --required-artifact plan --required-artifact report
-PYTHONPATH=src python3 -m accruvia_harness import-issue <project_id> 456 "First task" "Build the first durable loop" --priority 200 --validation-profile generic --strategy baseline --required-artifact plan --required-artifact report
-PYTHONPATH=src python3 -m accruvia_harness import-github-issue <project_id> accruvia/accruvia 456 --priority 200 --validation-profile generic --strategy baseline --required-artifact plan --required-artifact report
-PYTHONPATH=src python3 -m accruvia_harness import-gitlab-issue <project_id> group/project 456 --priority 200 --validation-profile generic --strategy baseline --required-artifact plan --required-artifact report
-PYTHONPATH=src python3 -m accruvia_harness sync-github-open <project_id> accruvia/accruvia --limit 20 --priority 200 --validation-profile generic --strategy baseline --required-artifact plan --required-artifact report
-PYTHONPATH=src python3 -m accruvia_harness sync-gitlab-open <project_id> group/project --limit 20 --priority 200 --validation-profile generic --strategy baseline --required-artifact plan --required-artifact report
-PYTHONPATH=src python3 -m accruvia_harness report-github <task_id> accruvia/accruvia
-PYTHONPATH=src python3 -m accruvia_harness report-gitlab <task_id> group/project
-PYTHONPATH=src python3 -m accruvia_harness sync-github-state <task_id> accruvia/accruvia
-PYTHONPATH=src python3 -m accruvia_harness sync-gitlab-state <task_id> group/project
-PYTHONPATH=src python3 -m accruvia_harness sync-github-metadata <task_id> accruvia/accruvia
-PYTHONPATH=src python3 -m accruvia_harness sync-gitlab-metadata <task_id> group/project
-PYTHONPATH=src python3 -m accruvia_harness run-once <task_id>
-PYTHONPATH=src python3 -m accruvia_harness run-runtime <task_id>
-PYTHONPATH=src python3 -m accruvia_harness run-until-stable <task_id>
-PYTHONPATH=src python3 -m accruvia_harness process-next --worker-id worker-a --lease-seconds 300
-PYTHONPATH=src python3 -m accruvia_harness process-next-runtime --worker-id worker-a --lease-seconds 300
-PYTHONPATH=src python3 -m accruvia_harness process-queue 5 --worker-id worker-a --lease-seconds 300
-PYTHONPATH=src python3 -m accruvia_harness smoke-test
-PYTHONPATH=src python3 -m accruvia_harness status
-PYTHONPATH=src python3 -m accruvia_harness summary
-PYTHONPATH=src python3 -m accruvia_harness context-packet
-PYTHONPATH=src python3 -m accruvia_harness ops-report
-PYTHONPATH=src python3 -m accruvia_harness telemetry-report
-PYTHONPATH=src python3 -m accruvia_harness dashboard-report
-PYTHONPATH=src python3 -m accruvia_harness explain-system
-PYTHONPATH=src python3 -m accruvia_harness explain-task <task_id>
-PYTHONPATH=src python3 -m accruvia_harness review-promotion <task_id>
-PYTHONPATH=src python3 -m accruvia_harness affirm-promotion <task_id>
-PYTHONPATH=src python3 -m accruvia_harness rereview-promotion <task_id> <remediation_task_id>
-PYTHONPATH=src python3 -m accruvia_harness task-report <task_id>
-PYTHONPATH=src python3 -m accruvia_harness events
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -e .
+make init
+make test-fast
 ```
 
-### Routed LLM Execution
+Create a project and run a task:
 
-The `llm` worker backend is designed to keep model invocation separate from workflow control.
+```bash
+make run ARGS="create-project accruvia 'Accruvia harness work'"
+make run ARGS="create-task <project_id> 'First task' 'Build the first durable loop'"
+make run ARGS="run-once <task_id>"
+make run ARGS="review-promotion <task_id>"
+```
 
-- local development can route to a CLI such as Codex or Claude Code
-- CI can route to `accruvia-client` or another centrally managed path
-- the harness chooses an executor explicitly or via `ACCRUVIA_LLM_BACKEND=auto`
+## Common Commands
+
+Use the `Makefile` for common developer flows:
+
+```bash
+make help
+make init
+make test-fast
+make test
+make test-e2e
+make temporal-up
+make temporal-down
+make run ARGS="status"
+```
+
+Direct CLI entrypoints also work:
+
+```bash
+PYTHONPATH=src python3 -m accruvia_harness status
+PYTHONPATH=src python3 -m accruvia_harness context-packet
+PYTHONPATH=src python3 -m accruvia_harness explain-system
+```
+
+## LLM Routing
+
+The harness separates workflow control from model execution.
+
+- local development can route to Codex or Claude Code
+- CI can route to API-backed execution or `accruvia-client`
+- `ACCRUVIA_LLM_BACKEND=auto` chooses an executor by environment
 
 Example:
 
@@ -186,273 +117,53 @@ export ACCRUVIA_WORKER_BACKEND=llm
 export ACCRUVIA_LLM_BACKEND=auto
 export ACCRUVIA_LLM_CODEX_COMMAND='codex exec < "$ACCRUVIA_LLM_PROMPT_PATH" > "$ACCRUVIA_LLM_RESPONSE_PATH"'
 export ACCRUVIA_LLM_ACCRUVIA_CLIENT_COMMAND='accruvia-client llm run --prompt-file "$ACCRUVIA_LLM_PROMPT_PATH" --output-file "$ACCRUVIA_LLM_RESPONSE_PATH"'
-PYTHONPATH=src python3 -m accruvia_harness process-next --worker-id worker-a --lease-seconds 300
+make run ARGS="process-next --worker-id worker-a --lease-seconds 300"
 ```
 
-On GitHub Actions, `auto` prefers `accruvia-client` when configured. Outside CI, it prefers a local CLI executor such as Codex first, then Claude, then `accruvia-client`, then a generic command executor.
+## Interrogation
 
-LLM executors can also emit structured usage metadata to `ACCRUVIA_LLM_METADATA_PATH`, for example:
+The observer path is intentionally read-only.
 
-```json
-{
-  "model": "gpt-5.4",
-  "prompt_tokens": 1200,
-  "completion_tokens": 340,
-  "total_tokens": 1540,
-  "latency_ms": 820,
-  "cost_usd": 0.19
-}
-```
+- `context-packet`
+- `summary`
+- `ops-report`
+- `dashboard-report`
+- `explain-system`
+- `explain-task`
 
-The harness records those values into telemetry and exposes them through `telemetry-report` and `dashboard-report`.
+Explanation commands use the configured LLM executor over read-only evidence packets and do not mutate workflow state.
 
-### Interrogation Layer
+## Observability
 
-The interrogation layer is now explicitly read-only.
-
-- query surfaces use a read-only store facade
-- explanation commands use the configured LLM executor over exported evidence
-- explanations write their own artifacts under the interrogation workspace
-- the observer path does not mutate task, run, promotion, or event records
-
-Commands:
-
-```bash
-PYTHONPATH=src python3 -m accruvia_harness context-packet --project-id <project_id>
-PYTHONPATH=src python3 -m accruvia_harness explain-system --project-id <project_id>
-PYTHONPATH=src python3 -m accruvia_harness explain-task <task_id>
-```
-
-### Observability
-
-Phase 7 now includes:
+Telemetry includes:
 
 - JSONL metrics and spans under `.accruvia-harness/telemetry`
-- histogram-style timing metrics for planning, work, analysis, decision, promotion review, and affirmation
-- LLM cost/token/latency accounting when executors emit metadata
-- a small dashboard export via `dashboard-report`
-- optional OTLP export when OpenTelemetry packages are installed
+- timing metrics for planning, work, analysis, decision, and promotion
+- optional OpenTelemetry export
+- LLM cost/token/latency rollups when executors emit metadata
 
-Environment variables:
-
-```bash
-export ACCRUVIA_OTEL_SERVICE_NAME=accruvia-harness
-export ACCRUVIA_OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318/v1/traces
-```
-
-Install the optional OpenTelemetry dependencies with:
+Optional observability extras:
 
 ```bash
-pip install '.[observability]'
+pip install -e '.[observability]'
+export ACCRUVIA_OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
 ```
 
-### Workload Adapters
+## Extensibility
 
-This repo owns the adapter interface, registry, and a small set of built-in adapters.
+Built-in generic adapters and validators live here. Project-specific logic usually should not.
 
-- built-in adapters belong here when they are generic and reusable
-- project-specific adapters generally should not live here
-- private or repo-specific workloads should provide their own adapter module and load it with `ACCRUVIA_ADAPTER_MODULES`
+Extension points:
 
-Example:
+- `ACCRUVIA_ADAPTER_MODULES`
+- `ACCRUVIA_PROJECT_ADAPTER_MODULES`
+- `ACCRUVIA_VALIDATOR_MODULES`
 
-```bash
-export ACCRUVIA_ADAPTER_MODULES='my_private_project.harness_adapters'
-PYTHONPATH=src python3 -m accruvia_harness config
-```
+That lets a private project supply its own workspace preparation, workload evidence generation, and promotion checks without editing the harness source.
 
-External adapter modules are expected to expose:
+## Other Docs
 
-```python
-def register_adapters(registry) -> None:
-    ...
-```
-
-That keeps the harness core generic while letting each project define its own workspace setup, evidence generation, and validation expectations.
-
-### Validator Modules
-
-Promotion validators are now pluggable.
-
-- built-in validators live in this repo
-- project-specific promotion gates should usually live outside this repo
-- external validator modules are loaded with `ACCRUVIA_VALIDATOR_MODULES`
-
-Example:
-
-```bash
-export ACCRUVIA_VALIDATOR_MODULES='my_private_project.harness_validators'
-PYTHONPATH=src python3 -m accruvia_harness config
-```
-
-External validator modules are expected to expose:
-
-```python
-def register_validators(registry) -> None:
-    ...
-```
-
-They can register additional validators for one or more validation profiles without editing the harness source.
-
-### Issue Sync Policy
-
-Issue comments and issue state are now policy-driven for both GitHub and GitLab.
-
-- report commands can generate a structured status comment from canonical harness state
-- duplicate reports are deduped across both providers
-- close/reopen behavior is configurable
-- labels, milestone, assignees, and issue URL/state are synced into task metadata
-
-Relevant environment variables:
-
-```bash
-export ACCRUVIA_ISSUE_CLOSE_ON_COMPLETED=true
-export ACCRUVIA_ISSUE_CLOSE_ONLY_ON_APPROVED_PROMOTION=false
-export ACCRUVIA_ISSUE_REOPEN_ON_PENDING=true
-export ACCRUVIA_ISSUE_REOPEN_ON_ACTIVE=true
-export ACCRUVIA_ISSUE_REOPEN_ON_FAILED=true
-```
-
-### Project Adapters
-
-Workload adapters decide how evidence is generated for a task class. Project adapters decide how a real project workspace is prepared for each run.
-
-- this repo ships a built-in `generic` project adapter
-- private projects should usually provide their own project adapter module
-- project adapters are loaded with `ACCRUVIA_PROJECT_ADAPTER_MODULES`
-- each project selects its adapter with `create-project --adapter-name ...`
-
-Example:
-
-```bash
-export ACCRUVIA_PROJECT_ADAPTER_MODULES='accruvia_client.harness_project_adapters'
-PYTHONPATH=src python3 -m accruvia_harness create-project accruvia-client "Private client work" --adapter-name accruvia_client
-```
-
-External project adapter modules are expected to expose:
-
-```python
-def register_project_adapters(registry) -> None:
-    ...
-```
-
-## Phase 1 Status
-
-The harness now includes the first Phase 1 durability improvements:
-
-- migration-managed schema initialization
-- explicit path/config resolution
-- structured CLI logging with basic error classification
-- a local `smoke-test` command for the end-to-end happy path
-- workflow policy extracted from the monolithic engine
-- an operator runbook for local operation and recovery
-
-## Phase 2 Start
-
-Phase 2 has begun with a real runtime boundary:
-
-- `local` runtime backend is the current working default
-- `temporal` runtime backend is now a first-class configuration target
-- Temporal workflow submission and worker hooks now exist behind optional dependencies
-- if `temporalio` is not installed, the harness reports that explicitly and stays on the local backend
-
-## Current Product Coverage
-
-The repo now has meaningful slices of the later phases in place:
-
-- Phase 3: worker abstractions
-  - local and shell-backed workers
-  - normalized artifact capture
-- Phase 4: evaluation and promotion baseline
-  - explicit evaluation records
-  - bounded retry, fail, and promote decisions
-  - explicit promotion review records and follow-on task generation
-  - follow-on task lineage support
-  - deterministic promotion gates for changed files, compile success, passing tests, and required artifacts
-- Phase 5: GitHub workflow integration
-  - import, sync, report, close, and state-sync flows
-- real worker backends
-  - `local`
-  - `shell`
-  - `agent`
-  - routed `llm`
-- Phase 6: parallel execution baseline
-  - task leasing and worker-aware queue arbitration
-- Phase 7: observability and analytics baseline
-  - structured JSONL logs
-  - telemetry metrics and span logs under `.accruvia-harness/telemetry`
-  - metrics snapshots over tasks, runs, leases, retries, promotions, and follow-on work
-- Phase 8: interrogation layer baseline
-  - `summary`
-  - `context-packet`
-  - `task-report`
-
-The remaining work is depth and hardening, not whether these concerns exist at all.
-
-## Deterministic Promotion Gates
-
-Promotion is no longer based only on artifact presence.
-
-The baseline deterministic validators now require structured evidence for:
-
-- required artifacts existing on disk
-- changed files being recorded
-- a passing compile check
-- named test files plus a passing deterministic test run
-
-These checks run before any higher-order LLM affirmation layer. The LLM reviewer should interpret evidence, not replace it.
-
-## Validation Profiles
-
-The harness no longer assumes every task is Python work.
-
-- each task carries a `validation_profile`
-- the core harness stays language-agnostic
-- deterministic validators are selected by profile
-- worker reports should declare the same profile they are generating evidence for
-
-Current baseline profiles:
-
-- `generic`: general changed-file, build/compile, test, and artifact evidence
-- `python`: the generic gates plus Python-oriented test-file expectations
-- `javascript`: the generic gates plus JS/TS test-file expectations
-- `terraform`: Terraform file-change and `terraform validate`-style evidence
-
-The profile-aware local worker now uses real local tools when available:
-
-- `python`: `py_compile` + `unittest`
-- `javascript`: `node --check` + `node --test`
-- `terraform`: `terraform validate`
-
-If a tool is unavailable, the worker records that explicitly and falls back to deterministic stub evidence rather than silently inventing a pass.
-
-This is intended to grow into project- or task-class-specific validator bundles without changing the control plane.
-
-## Promotion Flow
-
-Promotion is now a durable two-step process:
-
-1. `review-promotion`
-   - runs deterministic gates
-   - records a `pending` promotion if the hard gates pass
-2. `affirm-promotion`
-   - routes to an LLM executor
-   - records final `approved` or `rejected` state with rationale
-
-This avoids treating a transient in-memory judgment as the full promotion decision.
-
-## Temporal Dev Stack
-
-For local Phase 2 development, a Temporal server can be started with:
-
-```bash
-docker compose -f docker-compose.temporal.yml up -d
-```
-
-If you install the optional SDK dependency in a virtualenv:
-
-```bash
-.venv/bin/pip install -e ".[temporal]"
-ACCRUVIA_HARNESS_RUNTIME=temporal .venv/bin/python -m accruvia_harness run-temporal-worker
-ACCRUVIA_HARNESS_RUNTIME=temporal .venv/bin/python -m accruvia_harness run-runtime <task_id>
-```
+- [PRODUCT_PLAN.md](/home/soverton/accruvia-harness/PRODUCT_PLAN.md)
+- [ENGINEERING_CHECKLIST.md](/home/soverton/accruvia-harness/ENGINEERING_CHECKLIST.md)
+- [OPERATOR_RUNBOOK.md](/home/soverton/accruvia-harness/OPERATOR_RUNBOOK.md)
+- [CONTRIBUTING.md](/home/soverton/accruvia-harness/CONTRIBUTING.md)
