@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -11,6 +12,7 @@ from accruvia_harness.adapters import build_adapter_registry
 from accruvia_harness.config import HarnessConfig
 from accruvia_harness.domain import Run, RunStatus, Task, new_id
 from accruvia_harness.llm import build_llm_router, parse_affirmation_response
+from accruvia_harness.subprocess_env import build_subprocess_env
 from accruvia_harness.telemetry import TelemetrySink
 from accruvia_harness.timeout_policy import ExecutionTimeoutPolicy
 from accruvia_harness.workers import (
@@ -221,3 +223,12 @@ class WorkerTests(unittest.TestCase):
         approved, rationale = parse_affirmation_response("I would reject this candidate.\nIt is not ready to promote.")
         self.assertFalse(approved)
         self.assertIn("not ready", rationale)
+
+    def test_build_subprocess_env_sanitizes_ambient_variables(self) -> None:
+        with patch.dict(os.environ, {"SECRET_TOKEN": "shh", "PATH": "/usr/bin", "KEEP_ME": "ok"}, clear=True):
+            env = build_subprocess_env({"ACCRUVIA_TASK_ID": "task_1"}, passthrough=("KEEP_ME",))
+
+        self.assertNotIn("SECRET_TOKEN", env)
+        self.assertEqual("/usr/bin", env["PATH"])
+        self.assertEqual("ok", env["KEEP_ME"])
+        self.assertEqual("task_1", env["ACCRUVIA_TASK_ID"])

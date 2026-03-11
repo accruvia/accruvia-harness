@@ -4,6 +4,16 @@ from ..domain import serialize_dataclass
 from .common import CLIContext, emit
 
 
+def _redact_command(value: str | None) -> str | None:
+    if not value:
+        return None
+    command = value.strip()
+    if not command:
+        return None
+    first = command.split()[0]
+    return f"{first} [REDACTED]"
+
+
 def handle_core_command(args, ctx: CLIContext) -> bool:
     config = ctx.config
     store = ctx.store
@@ -24,13 +34,14 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
             "temporal_namespace": config.temporal_namespace,
             "temporal_task_queue": config.temporal_task_queue,
             "worker_backend": config.worker_backend,
-            "worker_command": config.worker_command,
+            "worker_command": _redact_command(config.worker_command),
             "llm_backend": config.llm_backend,
             "llm_model": config.llm_model,
-            "llm_command": config.llm_command,
-            "llm_codex_command": config.llm_codex_command,
-            "llm_claude_command": config.llm_claude_command,
-            "llm_accruvia_client_command": config.llm_accruvia_client_command,
+            "llm_command": _redact_command(config.llm_command),
+            "llm_codex_command": _redact_command(config.llm_codex_command),
+            "llm_claude_command": _redact_command(config.llm_claude_command),
+            "llm_accruvia_client_command": _redact_command(config.llm_accruvia_client_command),
+            "env_passthrough": list(config.env_passthrough),
             "adapter_modules": list(config.adapter_modules),
             "project_adapter_modules": list(config.project_adapter_modules),
             "validator_modules": list(config.validator_modules),

@@ -1,8 +1,0 @@
-
-[observability]
-opentelemetry-api<2,>=1.31
-opentelemetry-sdk<2,>=1.31
-opentelemetry-exporter-otlp-proto-http<2,>=1.31
-
-[temporal]
-temporalio<2,>=1.8

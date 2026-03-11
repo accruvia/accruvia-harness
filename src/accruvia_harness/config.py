@@ -24,6 +24,7 @@ class HarnessConfig:
     llm_codex_command: str | None
     llm_claude_command: str | None
     llm_accruvia_client_command: str | None
+    env_passthrough: tuple[str, ...] = field(default_factory=tuple)
     adapter_modules: tuple[str, ...] = field(default_factory=tuple)
     project_adapter_modules: tuple[str, ...] = field(default_factory=tuple)
     validator_modules: tuple[str, ...] = field(default_factory=tuple)
@@ -77,6 +78,11 @@ class HarnessConfig:
             llm_codex_command=os.environ.get("ACCRUVIA_LLM_CODEX_COMMAND"),
             llm_claude_command=os.environ.get("ACCRUVIA_LLM_CLAUDE_COMMAND"),
             llm_accruvia_client_command=os.environ.get("ACCRUVIA_LLM_ACCRUVIA_CLIENT_COMMAND"),
+            env_passthrough=tuple(
+                item.strip()
+                for item in os.environ.get("ACCRUVIA_ENV_PASSTHROUGH", "").split(",")
+                if item.strip()
+            ),
             adapter_modules=tuple(
                 item.strip()
                 for item in os.environ.get("ACCRUVIA_ADAPTER_MODULES", "").split(",")

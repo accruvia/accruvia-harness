@@ -9,6 +9,7 @@ from typing import Protocol
 
 from .config import HarnessConfig
 from .domain import Run, Task
+from .subprocess_env import build_subprocess_env
 
 
 @dataclass(slots=True)
@@ -47,12 +48,14 @@ class CommandLLMExecutor:
         timeout_policy=None,
         resource_policy=None,
         telemetry=None,
+        env_passthrough: tuple[str, ...] = (),
     ) -> None:
         self.backend_name = backend_name
         self.command = command
         self.timeout_policy = timeout_policy
         self.resource_policy = resource_policy
         self.telemetry = telemetry
+        self.env_passthrough = env_passthrough
 
     def execute(self, invocation: LLMInvocation) -> LLMExecutionResult:
         invocation.run_dir.mkdir(parents=True, exist_ok=True)
@@ -63,8 +66,8 @@ class CommandLLMExecutor:
         stderr_path = invocation.run_dir / "llm.stderr.txt"
         prompt_path.write_text(invocation.prompt, encoding="utf-8")
 
-        env = {
-            **os.environ,
+        env = build_subprocess_env(
+            {
             "ACCRUVIA_TASK_ID": invocation.task.id,
             "ACCRUVIA_RUN_ID": invocation.run.id,
             "ACCRUVIA_TASK_OBJECTIVE": invocation.task.objective,
@@ -74,7 +77,9 @@ class CommandLLMExecutor:
             "ACCRUVIA_LLM_PROMPT_PATH": str(prompt_path),
             "ACCRUVIA_LLM_RESPONSE_PATH": str(response_path),
             "ACCRUVIA_LLM_METADATA_PATH": str(metadata_path),
-        }
+            },
+            passthrough=self.env_passthrough,
+        )
         if invocation.model:
             env["ACCRUVIA_LLM_MODEL"] = invocation.model
 
@@ -234,6 +239,7 @@ def build_llm_router(config: HarnessConfig, telemetry=None) -> LLMRouter:
             timeout_policy=timeout_policy,
             resource_policy=resource_policy,
             telemetry=telemetry,
+            env_passthrough=config.env_passthrough,
         )
     if config.llm_codex_command:
         executors["codex"] = CommandLLMExecutor(
@@ -242,6 +248,7 @@ def build_llm_router(config: HarnessConfig, telemetry=None) -> LLMRouter:
             timeout_policy=timeout_policy,
             resource_policy=resource_policy,
             telemetry=telemetry,
+            env_passthrough=config.env_passthrough,
         )
     if config.llm_claude_command:
         executors["claude"] = CommandLLMExecutor(
@@ -250,6 +257,7 @@ def build_llm_router(config: HarnessConfig, telemetry=None) -> LLMRouter:
             timeout_policy=timeout_policy,
             resource_policy=resource_policy,
             telemetry=telemetry,
+            env_passthrough=config.env_passthrough,
         )
     if config.llm_accruvia_client_command:
         executors["accruvia_client"] = CommandLLMExecutor(
@@ -258,6 +266,7 @@ def build_llm_router(config: HarnessConfig, telemetry=None) -> LLMRouter:
             timeout_policy=timeout_policy,
             resource_policy=resource_policy,
             telemetry=telemetry,
+            env_passthrough=config.env_passthrough,
         )
     return LLMRouter(config.llm_backend, executors)
 

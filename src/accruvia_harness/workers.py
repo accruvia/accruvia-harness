@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 from pathlib import Path
 from typing import Protocol
@@ -11,6 +10,7 @@ from .config import HarnessConfig
 from .domain import Run, Task
 from .llm import LLMExecutionError, LLMInvocation, LLMRouter, build_llm_router
 from .policy import WorkResult
+from .subprocess_env import build_subprocess_env
 
 
 class WorkerBackend(Protocol):
@@ -77,11 +77,19 @@ class LocalArtifactWorker:
 
 
 class CommandWorker:
-    def __init__(self, command: str, backend_name: str, timeout_policy=None, resource_policy=None) -> None:
+    def __init__(
+        self,
+        command: str,
+        backend_name: str,
+        timeout_policy=None,
+        resource_policy=None,
+        env_passthrough: tuple[str, ...] = (),
+    ) -> None:
         self.command = command
         self.backend_name = backend_name
         self.timeout_policy = timeout_policy
         self.resource_policy = resource_policy
+        self.env_passthrough = env_passthrough
 
     def work(self, task: Task, run: Run, workspace_root: Path) -> WorkResult:
         run_dir = workspace_root / "runs" / run.id
@@ -108,7 +116,7 @@ class CommandWorker:
                 cwd=project_workspace,
                 capture_output=True,
                 text=True,
-                env={**os.environ, **env},
+                env=build_subprocess_env(env, passthrough=self.env_passthrough),
                 timeout=timeout_seconds,
                 preexec_fn=self.resource_policy.preexec_fn() if self.resource_policy is not None else None,
             )
@@ -218,22 +226,28 @@ class CommandWorker:
 
 
 class ShellCommandWorker(CommandWorker):
-    def __init__(self, command: str, timeout_policy=None, resource_policy=None) -> None:
+    def __init__(
+        self, command: str, timeout_policy=None, resource_policy=None, env_passthrough: tuple[str, ...] = ()
+    ) -> None:
         super().__init__(
             command=command,
             backend_name="shell",
             timeout_policy=timeout_policy,
             resource_policy=resource_policy,
+            env_passthrough=env_passthrough,
         )
 
 
 class AgentCommandWorker(CommandWorker):
-    def __init__(self, command: str, timeout_policy=None, resource_policy=None) -> None:
+    def __init__(
+        self, command: str, timeout_policy=None, resource_policy=None, env_passthrough: tuple[str, ...] = ()
+    ) -> None:
         super().__init__(
             command=command,
             backend_name="agent",
             timeout_policy=timeout_policy,
             resource_policy=resource_policy,
+            env_passthrough=env_passthrough,
         )
 
 
@@ -398,6 +412,7 @@ def build_worker_from_config(config: HarnessConfig, telemetry=None) -> WorkerBac
             config.worker_command,
             timeout_policy=timeout_policy,
             resource_policy=resource_policy,
+            env_passthrough=config.env_passthrough,
         )
     if config.worker_backend == "agent":
         if not config.worker_command:
@@ -406,5 +421,6 @@ def build_worker_from_config(config: HarnessConfig, telemetry=None) -> WorkerBac
             config.worker_command,
             timeout_policy=timeout_policy,
             resource_policy=resource_policy,
+            env_passthrough=config.env_passthrough,
         )
     return build_worker(config.worker_backend, config.worker_command)

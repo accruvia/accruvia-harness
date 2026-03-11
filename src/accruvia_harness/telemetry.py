@@ -20,6 +20,17 @@ def _sanitize_attributes(attributes: dict[str, Any]) -> dict[str, str | int | fl
     return sanitized
 
 
+def _otlp_signal_endpoints(endpoint: str | None) -> tuple[str | None, str | None]:
+    if not endpoint:
+        return (None, None)
+    trimmed = endpoint.rstrip("/")
+    if trimmed.endswith("/v1/traces"):
+        return (trimmed, trimmed.removesuffix("/v1/traces") + "/v1/metrics")
+    if trimmed.endswith("/v1/metrics"):
+        return (trimmed.removesuffix("/v1/metrics") + "/v1/traces", trimmed)
+    return (trimmed + "/v1/traces", trimmed + "/v1/metrics")
+
+
 @dataclass(slots=True)
 class TelemetrySink:
     root: Path
@@ -101,6 +112,8 @@ class TelemetrySink:
         return {
             "service_name": self.service_name,
             "otlp_endpoint": self.otlp_endpoint,
+            "otlp_trace_endpoint": self._otel.trace_endpoint if self._otel is not None else None,
+            "otlp_metric_endpoint": self._otel.metric_endpoint if self._otel is not None else None,
             "otel_enabled": self._otel is not None,
             "metrics_path": str(self.metrics_path),
             "spans_path": str(self.spans_path),
@@ -175,9 +188,11 @@ class _TimedSpan:
 
 
 class _OpenTelemetryBridge:
-    def __init__(self, tracer, meter) -> None:
+    def __init__(self, tracer, meter, trace_endpoint: str, metric_endpoint: str) -> None:
         self.tracer = tracer
         self.meter = meter
+        self.trace_endpoint = trace_endpoint
+        self.metric_endpoint = metric_endpoint
         self._counters: dict[str, Any] = {}
         self._histograms: dict[str, Any] = {}
 
@@ -196,16 +211,21 @@ class _OpenTelemetryBridge:
             return None
         if not endpoint:
             return None
+        trace_endpoint, metric_endpoint = _otlp_signal_endpoints(endpoint)
+        if not trace_endpoint or not metric_endpoint:
+            return None
         resource = Resource.create({"service.name": service_name})
         trace_provider = TracerProvider(resource=resource)
-        trace_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
-        metric_reader = PeriodicExportingMetricReader(OTLPMetricExporter(endpoint=endpoint))
+        trace_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=trace_endpoint)))
+        metric_reader = PeriodicExportingMetricReader(OTLPMetricExporter(endpoint=metric_endpoint))
         meter_provider = MeterProvider(resource=resource, metric_readers=[metric_reader])
         trace.set_tracer_provider(trace_provider)
         metrics.set_meter_provider(meter_provider)
         return cls(
             tracer=trace.get_tracer(service_name),
             meter=metrics.get_meter(service_name),
+            trace_endpoint=trace_endpoint,
+            metric_endpoint=metric_endpoint,
         )
 
     def metric(

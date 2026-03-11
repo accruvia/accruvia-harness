@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
 from accruvia_harness.config import HarnessConfig
+from accruvia_harness.commands.core import _redact_command
 from accruvia_harness.logging_utils import HarnessLogger, classify_error
 from accruvia_harness.store import SQLiteHarnessStore
-from accruvia_harness.telemetry import TelemetrySink
+from accruvia_harness.telemetry import TelemetrySink, _otlp_signal_endpoints
 
 
 class Phase1Tests(unittest.TestCase):
@@ -31,6 +33,7 @@ class Phase1Tests(unittest.TestCase):
         self.assertEqual(300, config.cpu_time_limit_seconds)
         self.assertEqual("accruvia-harness", config.otel_service_name)
         self.assertIsNone(config.otel_exporter_otlp_endpoint)
+        self.assertEqual((), config.env_passthrough)
 
     def test_logger_writes_jsonl(self) -> None:
         logger = HarnessLogger(self.base / "logs" / "harness.jsonl")
@@ -61,3 +64,30 @@ class Phase1Tests(unittest.TestCase):
         self.assertEqual(0.42, summary["cost_totals"]["cost_usd"])
         self.assertEqual(1234.0, summary["cost_totals"]["total_tokens"])
         self.assertTrue(summary["dashboard"]["slowest_operations_ms"])
+
+    def test_config_reads_env_passthrough(self) -> None:
+        original = os.environ.get("ACCRUVIA_ENV_PASSTHROUGH")
+        self.addCleanup(
+            lambda: os.environ.__setitem__("ACCRUVIA_ENV_PASSTHROUGH", original)
+            if original is not None
+            else os.environ.pop("ACCRUVIA_ENV_PASSTHROUGH", None)
+        )
+        os.environ["ACCRUVIA_ENV_PASSTHROUGH"] = "FOO,BAR"
+
+        config = HarnessConfig.from_env()
+
+        self.assertEqual(("FOO", "BAR"), config.env_passthrough)
+
+    def test_redact_command_hides_command_tail(self) -> None:
+        self.assertEqual("codex [REDACTED]", _redact_command("codex exec --api-key secret"))
+        self.assertIsNone(_redact_command(None))
+
+    def test_otlp_signal_endpoints_are_derived_per_signal(self) -> None:
+        self.assertEqual(
+            ("http://localhost:4318/v1/traces", "http://localhost:4318/v1/metrics"),
+            _otlp_signal_endpoints("http://localhost:4318"),
+        )
+        self.assertEqual(
+            ("http://localhost:4318/v1/traces", "http://localhost:4318/v1/metrics"),
+            _otlp_signal_endpoints("http://localhost:4318/v1/traces"),
+        )
