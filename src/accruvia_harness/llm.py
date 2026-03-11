@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from dataclasses import dataclass
@@ -39,16 +40,25 @@ class LLMExecutionError(RuntimeError):
 
 
 class CommandLLMExecutor:
-    def __init__(self, backend_name: str, command: str, timeout_policy=None, resource_policy=None) -> None:
+    def __init__(
+        self,
+        backend_name: str,
+        command: str,
+        timeout_policy=None,
+        resource_policy=None,
+        telemetry=None,
+    ) -> None:
         self.backend_name = backend_name
         self.command = command
         self.timeout_policy = timeout_policy
         self.resource_policy = resource_policy
+        self.telemetry = telemetry
 
     def execute(self, invocation: LLMInvocation) -> LLMExecutionResult:
         invocation.run_dir.mkdir(parents=True, exist_ok=True)
         prompt_path = invocation.run_dir / "llm_prompt.txt"
         response_path = invocation.run_dir / "llm_response.md"
+        metadata_path = invocation.run_dir / "llm_metadata.json"
         stdout_path = invocation.run_dir / "llm.stdout.txt"
         stderr_path = invocation.run_dir / "llm.stderr.txt"
         prompt_path.write_text(invocation.prompt, encoding="utf-8")
@@ -63,6 +73,7 @@ class CommandLLMExecutor:
             "ACCRUVIA_RUN_DIR": str(invocation.run_dir),
             "ACCRUVIA_LLM_PROMPT_PATH": str(prompt_path),
             "ACCRUVIA_LLM_RESPONSE_PATH": str(response_path),
+            "ACCRUVIA_LLM_METADATA_PATH": str(metadata_path),
         }
         if invocation.model:
             env["ACCRUVIA_LLM_MODEL"] = invocation.model
@@ -73,17 +84,37 @@ class CommandLLMExecutor:
                 invocation.task.validation_profile, self.backend_name
             )
         try:
-            completed = subprocess.run(
-                self.command,
-                shell=True,
-                check=False,
-                cwd=invocation.run_dir,
-                capture_output=True,
-                text=True,
-                env=env,
-                timeout=timeout_seconds,
-                preexec_fn=self.resource_policy.preexec_fn() if self.resource_policy is not None else None,
-            )
+            if self.telemetry is not None:
+                with self.telemetry.timed(
+                    "llm_execute",
+                    task_id=invocation.task.id,
+                    run_id=invocation.run.id,
+                    llm_backend=self.backend_name,
+                    validation_profile=invocation.task.validation_profile,
+                ):
+                    completed = subprocess.run(
+                        self.command,
+                        shell=True,
+                        check=False,
+                        cwd=invocation.run_dir,
+                        capture_output=True,
+                        text=True,
+                        env=env,
+                        timeout=timeout_seconds,
+                        preexec_fn=self.resource_policy.preexec_fn() if self.resource_policy is not None else None,
+                    )
+            else:
+                completed = subprocess.run(
+                    self.command,
+                    shell=True,
+                    check=False,
+                    cwd=invocation.run_dir,
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    timeout=timeout_seconds,
+                    preexec_fn=self.resource_policy.preexec_fn() if self.resource_policy is not None else None,
+                )
         except subprocess.TimeoutExpired as exc:
             stdout_path.write_text(exc.stdout or "", encoding="utf-8")
             stderr_path.write_text(exc.stderr or "", encoding="utf-8")
@@ -99,10 +130,39 @@ class CommandLLMExecutor:
             response_text = completed.stdout
             response_path.write_text(response_text, encoding="utf-8")
 
+        metadata: dict[str, object] = {}
+        if metadata_path.exists():
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                metadata = {}
+
         if completed.returncode != 0:
             raise LLMExecutionError(
                 f"{self.backend_name} executor failed with return code {completed.returncode}"
             )
+
+        token_metrics = {
+            "llm_cost_usd": float(metadata.get("cost_usd", 0.0) or 0.0),
+            "llm_prompt_tokens": float(metadata.get("prompt_tokens", 0.0) or 0.0),
+            "llm_completion_tokens": float(metadata.get("completion_tokens", 0.0) or 0.0),
+            "llm_total_tokens": float(metadata.get("total_tokens", 0.0) or 0.0),
+            "llm_latency_ms": float(metadata.get("latency_ms", 0.0) or 0.0),
+        }
+        if self.telemetry is not None:
+            for metric_name, metric_value in token_metrics.items():
+                if metric_value <= 0:
+                    continue
+                self.telemetry.metric(
+                    metric_name,
+                    metric_value,
+                    metric_type="histogram" if metric_name.endswith(("_usd", "_ms")) else "counter",
+                    task_id=invocation.task.id,
+                    run_id=invocation.run.id,
+                    llm_backend=self.backend_name,
+                    model=metadata.get("model") or invocation.model,
+                    validation_profile=invocation.task.validation_profile,
+                )
 
         return LLMExecutionResult(
             backend=self.backend_name,
@@ -115,9 +175,11 @@ class CommandLLMExecutor:
                 "returncode": completed.returncode,
                 "stdout_path": str(stdout_path),
                 "stderr_path": str(stderr_path),
+                "metadata_path": str(metadata_path),
                 "timeout_seconds": timeout_seconds,
                 "memory_limit_mb": getattr(self.resource_policy, "memory_limit_mb", None),
                 "cpu_time_limit_seconds": getattr(self.resource_policy, "cpu_time_limit_seconds", None),
+                **metadata,
             },
         )
 
@@ -149,13 +211,12 @@ class LLMRouter:
         raise ValueError("No LLM executors are configured for ACCRUVIA_LLM_BACKEND=auto")
 
 
-def build_llm_router(config: HarnessConfig) -> LLMRouter:
-    from .telemetry import TelemetrySink
+def build_llm_router(config: HarnessConfig, telemetry=None) -> LLMRouter:
     from .resource_limits import ResourceLimitPolicy
     from .timeout_policy import ExecutionTimeoutPolicy
 
     timeout_policy = ExecutionTimeoutPolicy(
-        TelemetrySink(config.telemetry_dir),
+        telemetry,
         alpha=config.timeout_ema_alpha,
         min_seconds=config.timeout_min_seconds,
         max_seconds=config.timeout_max_seconds,
@@ -172,6 +233,7 @@ def build_llm_router(config: HarnessConfig) -> LLMRouter:
             config.llm_command,
             timeout_policy=timeout_policy,
             resource_policy=resource_policy,
+            telemetry=telemetry,
         )
     if config.llm_codex_command:
         executors["codex"] = CommandLLMExecutor(
@@ -179,6 +241,7 @@ def build_llm_router(config: HarnessConfig) -> LLMRouter:
             config.llm_codex_command,
             timeout_policy=timeout_policy,
             resource_policy=resource_policy,
+            telemetry=telemetry,
         )
     if config.llm_claude_command:
         executors["claude"] = CommandLLMExecutor(
@@ -186,6 +249,7 @@ def build_llm_router(config: HarnessConfig) -> LLMRouter:
             config.llm_claude_command,
             timeout_policy=timeout_policy,
             resource_policy=resource_policy,
+            telemetry=telemetry,
         )
     if config.llm_accruvia_client_command:
         executors["accruvia_client"] = CommandLLMExecutor(
@@ -193,6 +257,7 @@ def build_llm_router(config: HarnessConfig) -> LLMRouter:
             config.llm_accruvia_client_command,
             timeout_policy=timeout_policy,
             resource_policy=resource_policy,
+            telemetry=telemetry,
         )
     return LLMRouter(config.llm_backend, executors)
 

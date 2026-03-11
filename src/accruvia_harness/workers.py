@@ -371,14 +371,13 @@ def build_worker(backend: str, shell_command: str | None = None) -> WorkerBacken
     raise ValueError(f"Unsupported worker backend: {backend}")
 
 
-def build_worker_from_config(config: HarnessConfig) -> WorkerBackend:
-    from .telemetry import TelemetrySink
+def build_worker_from_config(config: HarnessConfig, telemetry=None) -> WorkerBackend:
     from .resource_limits import ResourceLimitPolicy
     from .timeout_policy import ExecutionTimeoutPolicy
 
     adapter_registry = build_adapter_registry(config.adapter_modules)
     timeout_policy = ExecutionTimeoutPolicy(
-        TelemetrySink(config.telemetry_dir),
+        telemetry,
         alpha=config.timeout_ema_alpha,
         min_seconds=config.timeout_min_seconds,
         max_seconds=config.timeout_max_seconds,
@@ -389,7 +388,7 @@ def build_worker_from_config(config: HarnessConfig) -> WorkerBackend:
         cpu_time_limit_seconds=config.cpu_time_limit_seconds,
     )
     if config.worker_backend == "llm":
-        return LLMTaskWorker(build_llm_router(config), model=config.llm_model)
+        return LLMTaskWorker(build_llm_router(config, telemetry=telemetry), model=config.llm_model)
     if config.worker_backend == "local":
         return LocalArtifactWorker(adapter_registry=adapter_registry)
     if config.worker_backend == "shell":

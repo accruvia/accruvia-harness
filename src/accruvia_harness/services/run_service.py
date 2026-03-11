@@ -50,6 +50,18 @@ class RunService:
         project = self.store.get_project(task.project_id)
         if project is None:
             raise ValueError(f"Unknown project for task: {task.project_id}")
+        if self.telemetry is not None:
+            with self.telemetry.timed(
+                "run_cycle",
+                task_id=task.id,
+                project_id=task.project_id,
+                validation_profile=task.validation_profile,
+                strategy=task.strategy,
+            ):
+                return self._run_once(task, project)
+        return self._run_once(task, project)
+
+    def _run_once(self, task, project) -> Run:
 
         self.store.update_task_status(task.id, TaskStatus.ACTIVE)
         self.store.create_event(
@@ -170,6 +182,7 @@ class RunService:
                 run_id=run.id,
                 attempt=attempt,
                 validation_profile=task.validation_profile,
+                worker_backend=type(self.worker).__name__,
             ):
                 work = self.worker.work(task, run, self.workspace_root)
         else:
@@ -322,6 +335,14 @@ class RunService:
                     attempt=attempt,
                     validation_profile=task.validation_profile,
                 )
+            self.telemetry.metric(
+                "run_attempt",
+                attempt,
+                metric_type="histogram",
+                task_id=task.id,
+                run_id=run.id,
+                validation_profile=task.validation_profile,
+            )
         return run
 
     def run_until_stable(self, task_id: str) -> list[Run]:

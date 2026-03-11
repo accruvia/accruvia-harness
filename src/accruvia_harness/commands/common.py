@@ -39,7 +39,11 @@ class CLIContext:
 def build_context(config: HarnessConfig) -> CLIContext:
     store = SQLiteHarnessStore(config.db_path)
     store.initialize()
-    telemetry = TelemetrySink(config.telemetry_dir)
+    telemetry = TelemetrySink(
+        config.telemetry_dir,
+        service_name=config.otel_service_name,
+        otlp_endpoint=config.otel_exporter_otlp_endpoint,
+    )
     issue_policy = IssueStatePolicy(
         close_on_completed=config.issue_close_on_completed,
         close_only_on_approved_promotion=config.issue_close_only_on_approved_promotion,
@@ -55,8 +59,8 @@ def build_context(config: HarnessConfig) -> CLIContext:
         telemetry=telemetry,
         issue_state_policy=issue_policy,
     )
-    engine.set_llm_router(build_llm_router(config))
-    engine.set_worker(build_worker_from_config(config))
+    engine.set_llm_router(build_llm_router(config, telemetry=telemetry))
+    engine.set_worker(build_worker_from_config(config, telemetry=telemetry))
     return CLIContext(
         config=config,
         store=store,
@@ -70,6 +74,6 @@ def build_context(config: HarnessConfig) -> CLIContext:
             temporal_namespace=config.temporal_namespace,
             temporal_task_queue=config.temporal_task_queue,
         ),
-        query_service=HarnessQueryService(store),
+        query_service=HarnessQueryService(store, telemetry=telemetry),
         telemetry=telemetry,
     )

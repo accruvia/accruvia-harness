@@ -28,6 +28,8 @@ class HarnessConfig:
     project_adapter_modules: tuple[str, ...] = field(default_factory=tuple)
     validator_modules: tuple[str, ...] = field(default_factory=tuple)
     telemetry_dir: Path = Path(".accruvia-harness/telemetry")
+    otel_service_name: str = "accruvia-harness"
+    otel_exporter_otlp_endpoint: str | None = None
     issue_close_on_completed: bool = True
     issue_close_only_on_approved_promotion: bool = False
     issue_reopen_on_pending: bool = True
@@ -59,6 +61,8 @@ class HarnessConfig:
             workspace_root=resolved_workspace,
             log_path=resolved_log,
             telemetry_dir=resolved_telemetry,
+            otel_service_name=os.environ.get("ACCRUVIA_OTEL_SERVICE_NAME", "accruvia-harness"),
+            otel_exporter_otlp_endpoint=os.environ.get("ACCRUVIA_OTEL_EXPORTER_OTLP_ENDPOINT") or None,
             default_project_name=os.environ.get("ACCRUVIA_HARNESS_PROJECT", "accruvia"),
             default_repo=os.environ.get("ACCRUVIA_HARNESS_REPO", "soverton/accruvia"),
             runtime_backend=os.environ.get("ACCRUVIA_HARNESS_RUNTIME", "local"),

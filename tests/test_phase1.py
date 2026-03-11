@@ -8,6 +8,7 @@ from pathlib import Path
 from accruvia_harness.config import HarnessConfig
 from accruvia_harness.logging_utils import HarnessLogger, classify_error
 from accruvia_harness.store import SQLiteHarnessStore
+from accruvia_harness.telemetry import TelemetrySink
 
 
 class Phase1Tests(unittest.TestCase):
@@ -28,6 +29,8 @@ class Phase1Tests(unittest.TestCase):
         self.assertEqual("local", config.runtime_backend)
         self.assertEqual(1024, config.memory_limit_mb)
         self.assertEqual(300, config.cpu_time_limit_seconds)
+        self.assertEqual("accruvia-harness", config.otel_service_name)
+        self.assertIsNone(config.otel_exporter_otlp_endpoint)
 
     def test_logger_writes_jsonl(self) -> None:
         logger = HarnessLogger(self.base / "logs" / "harness.jsonl")
@@ -44,3 +47,17 @@ class Phase1Tests(unittest.TestCase):
         store = SQLiteHarnessStore(self.base / "harness.db")
         store.initialize()
         self.assertEqual(store.expected_schema_version(), store.schema_version())
+
+    def test_telemetry_summary_reports_cost_and_dashboard(self) -> None:
+        telemetry = TelemetrySink(self.base / "telemetry")
+        telemetry.metric("llm_cost_usd", 0.42, metric_type="histogram", llm_backend="codex")
+        telemetry.metric("llm_total_tokens", 1234, llm_backend="codex")
+        with telemetry.timed("work", validation_profile="python"):
+            pass
+
+        summary = telemetry.summary()
+
+        self.assertFalse(summary["otel_enabled"])
+        self.assertEqual(0.42, summary["cost_totals"]["cost_usd"])
+        self.assertEqual(1234.0, summary["cost_totals"]["total_tokens"])
+        self.assertTrue(summary["dashboard"]["slowest_operations_ms"])

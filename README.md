@@ -104,6 +104,7 @@ This repo now contains a minimal durable harness foundation:
 - core records for `project`, `task`, `run`, `artifact`, `evaluation`, and `decision`
 - explicit task validation profiles so language- or workload-specific evidence rules can be selected
 - an append-only event log for auditable state transitions
+- JSONL telemetry plus optional OpenTelemetry export
 - a migration-managed schema bootstrap
 - an explicit configuration model
 - structured JSONL logging for CLI operations
@@ -122,6 +123,7 @@ This repo now contains a minimal durable harness foundation:
 - a profile-aware local worker that emits deterministic evidence for `generic`, `python`, `javascript`, and `terraform` tasks
 - a read-only interrogation surface for summaries, context packets, and task reports
 - an operational report for pending affirmations and profile-aware workload metrics
+- a dashboard export for slow operations, queue state, retry rate, and LLM cost usage
 - a small CLI for creating projects, syncing issue-backed tasks, running cycles, and inspecting status
 
 This is intentionally narrow. It proves the control shape before adding deeper Temporal, LangGraph, and distributed execution hardening.
@@ -158,6 +160,7 @@ PYTHONPATH=src python3 -m accruvia_harness summary
 PYTHONPATH=src python3 -m accruvia_harness context-packet
 PYTHONPATH=src python3 -m accruvia_harness ops-report
 PYTHONPATH=src python3 -m accruvia_harness telemetry-report
+PYTHONPATH=src python3 -m accruvia_harness dashboard-report
 PYTHONPATH=src python3 -m accruvia_harness review-promotion <task_id>
 PYTHONPATH=src python3 -m accruvia_harness affirm-promotion <task_id>
 PYTHONPATH=src python3 -m accruvia_harness rereview-promotion <task_id> <remediation_task_id>
@@ -184,6 +187,44 @@ PYTHONPATH=src python3 -m accruvia_harness process-next --worker-id worker-a --l
 ```
 
 On GitHub Actions, `auto` prefers `accruvia-client` when configured. Outside CI, it prefers a local CLI executor such as Codex first, then Claude, then `accruvia-client`, then a generic command executor.
+
+LLM executors can also emit structured usage metadata to `ACCRUVIA_LLM_METADATA_PATH`, for example:
+
+```json
+{
+  "model": "gpt-5.4",
+  "prompt_tokens": 1200,
+  "completion_tokens": 340,
+  "total_tokens": 1540,
+  "latency_ms": 820,
+  "cost_usd": 0.19
+}
+```
+
+The harness records those values into telemetry and exposes them through `telemetry-report` and `dashboard-report`.
+
+### Observability
+
+Phase 7 now includes:
+
+- JSONL metrics and spans under `.accruvia-harness/telemetry`
+- histogram-style timing metrics for planning, work, analysis, decision, promotion review, and affirmation
+- LLM cost/token/latency accounting when executors emit metadata
+- a small dashboard export via `dashboard-report`
+- optional OTLP export when OpenTelemetry packages are installed
+
+Environment variables:
+
+```bash
+export ACCRUVIA_OTEL_SERVICE_NAME=accruvia-harness
+export ACCRUVIA_OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318/v1/traces
+```
+
+Install the optional OpenTelemetry dependencies with:
+
+```bash
+pip install '.[observability]'
+```
 
 ### Workload Adapters
 

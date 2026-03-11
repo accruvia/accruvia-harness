@@ -25,6 +25,7 @@ class PromotionService:
         validators: list[PromotionValidator] | None = None,
         validator_registry: PromotionValidatorRegistry | None = None,
         llm_router: LLMRouter | None = None,
+        telemetry=None,
     ) -> None:
         self.store = store
         self.task_service = task_service
@@ -32,6 +33,7 @@ class PromotionService:
         self.validators = validators
         self.validator_registry = validator_registry
         self.llm_router = llm_router
+        self.telemetry = telemetry
 
     def review_task(self, task_id: str, run_id: str | None = None, create_follow_on: bool = True) -> PromotionReviewResult:
         task = self.store.get_task(task_id)
@@ -46,7 +48,16 @@ class PromotionService:
         if run.status != RunStatus.COMPLETED:
             raise ValueError(f"Run {run.id} is not promotion-eligible")
         artifacts = self.store.list_artifacts(run.id)
-        results = [validator.validate(task, artifacts) for validator in validators]
+        if self.telemetry is not None:
+            with self.telemetry.timed(
+                "promotion_review",
+                task_id=task.id,
+                run_id=run.id,
+                validation_profile=task.validation_profile,
+            ):
+                results = [validator.validate(task, artifacts) for validator in validators]
+        else:
+            results = [validator.validate(task, artifacts) for validator in validators]
         issues = [issue for result in results for issue in result.issues]
         if not issues:
             promotion = PromotionRecord(
@@ -70,6 +81,14 @@ class PromotionService:
                     payload={"promotion_id": promotion.id, "run_id": run.id},
                 )
             )
+            if self.telemetry is not None:
+                self.telemetry.metric(
+                    "promotion_pending",
+                    1,
+                    task_id=task.id,
+                    run_id=run.id,
+                    validation_profile=task.validation_profile,
+                )
             return PromotionReviewResult(promotion=promotion, follow_on_task_id=None)
 
         follow_on_task_id: str | None = None
@@ -114,6 +133,15 @@ class PromotionService:
                 },
             )
         )
+        if self.telemetry is not None:
+            self.telemetry.metric(
+                "promotion_rejected",
+                1,
+                task_id=task.id,
+                run_id=run.id,
+                validation_profile=task.validation_profile,
+                review_mode="review",
+            )
         return PromotionReviewResult(promotion=promotion, follow_on_task_id=follow_on_task_id)
 
     def affirm_review(
@@ -140,7 +168,18 @@ class PromotionService:
             prompt=self._build_affirmation_prompt(task, promotion, artifacts),
             run_dir=self._affirmation_run_dir(run.id),
         )
-        result = executor.execute(invocation)
+        if self.telemetry is not None:
+            with self.telemetry.timed(
+                "promotion_affirmation",
+                task_id=task.id,
+                run_id=run.id,
+                promotion_id=promotion.id,
+                validation_profile=task.validation_profile,
+                llm_backend=routed_backend,
+            ):
+                result = executor.execute(invocation)
+        else:
+            result = executor.execute(invocation)
         approved, rationale = parse_affirmation_response(result.response_text)
         details = {
             **promotion.details,
@@ -173,6 +212,15 @@ class PromotionService:
                     payload={"promotion_id": promotion.id, "run_id": run.id, "llm_backend": routed_backend},
                 )
             )
+            if self.telemetry is not None:
+                self.telemetry.metric(
+                    "promotion_approved",
+                    1,
+                    task_id=task.id,
+                    run_id=run.id,
+                    validation_profile=task.validation_profile,
+                    llm_backend=routed_backend,
+                )
             return PromotionReviewResult(promotion=promotion, follow_on_task_id=None)
 
         issues = self._issues_from_promotion_details(promotion.details)
@@ -227,6 +275,16 @@ class PromotionService:
                 },
             )
         )
+        if self.telemetry is not None:
+            self.telemetry.metric(
+                "promotion_rejected",
+                1,
+                task_id=task.id,
+                run_id=run.id,
+                validation_profile=task.validation_profile,
+                review_mode="affirmation",
+                llm_backend=routed_backend,
+            )
         return PromotionReviewResult(promotion=promotion, follow_on_task_id=follow_on_task_id)
 
     def rereview_task(
@@ -251,7 +309,17 @@ class PromotionService:
         )
         run = self._select_run(remediation_task_id, remediation_run_id)
         artifacts = self.store.list_artifacts(run.id)
-        results = [validator.validate(task, artifacts) for validator in validators]
+        if self.telemetry is not None:
+            with self.telemetry.timed(
+                "promotion_rereview",
+                task_id=task.id,
+                run_id=run.id,
+                remediation_task_id=remediation_task_id,
+                validation_profile=task.validation_profile,
+            ):
+                results = [validator.validate(task, artifacts) for validator in validators]
+        else:
+            results = [validator.validate(task, artifacts) for validator in validators]
         issues = [issue for result in results for issue in result.issues]
         if not issues:
             promotion = PromotionRecord(
@@ -270,6 +338,15 @@ class PromotionService:
                 },
             )
             self.store.create_promotion(promotion)
+            if self.telemetry is not None:
+                self.telemetry.metric(
+                    "promotion_pending",
+                    1,
+                    task_id=task.id,
+                    run_id=run.id,
+                    validation_profile=task.validation_profile,
+                    review_mode="rereview",
+                )
             return PromotionReviewResult(promotion=promotion, follow_on_task_id=None)
         follow_on_task_id: str | None = None
         if create_follow_on:
@@ -301,6 +378,15 @@ class PromotionService:
             },
         )
         self.store.create_promotion(promotion)
+        if self.telemetry is not None:
+            self.telemetry.metric(
+                "promotion_rejected",
+                1,
+                task_id=task.id,
+                run_id=run.id,
+                validation_profile=task.validation_profile,
+                review_mode="rereview",
+            )
         return PromotionReviewResult(promotion=promotion, follow_on_task_id=follow_on_task_id)
 
     def _select_run(self, task_id: str, run_id: str | None):

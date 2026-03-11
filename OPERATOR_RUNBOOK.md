@@ -26,6 +26,8 @@ PYTHONPATH=src python3 -m accruvia_harness status
 PYTHONPATH=src python3 -m accruvia_harness summary
 PYTHONPATH=src python3 -m accruvia_harness context-packet
 PYTHONPATH=src python3 -m accruvia_harness task-report <task_id>
+PYTHONPATH=src python3 -m accruvia_harness dashboard-report
+PYTHONPATH=src python3 -m accruvia_harness telemetry-report
 PYTHONPATH=src python3 -m accruvia_harness events
 ```
 
@@ -78,3 +80,4 @@ PYTHONPATH=src python3 -m accruvia_harness init-db
 4. Confirm schema version with `init-db` or `status`.
 5. If GitHub integration is involved, confirm `gh auth status`.
 6. If GitLab integration is involved, confirm `glab` authentication separately.
+7. If OTLP export is expected, confirm `ACCRUVIA_OTEL_EXPORTER_OTLP_ENDPOINT` is set and reachable.

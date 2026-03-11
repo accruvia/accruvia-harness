@@ -3,18 +3,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .telemetry import TelemetrySink
-
-
 @dataclass(slots=True)
 class ExecutionTimeoutPolicy:
-    telemetry: TelemetrySink
+    telemetry: object | None
     alpha: float = 0.5
     min_seconds: int = 30
     max_seconds: int = 1800
     multiplier: float = 2.5
 
     def timeout_seconds(self, validation_profile: str, worker_backend: str) -> int:
+        if self.telemetry is None:
+            return self.min_seconds
         spans = self.telemetry.load_spans()
         durations = [
             float(item["duration_ms"]) / 1000.0

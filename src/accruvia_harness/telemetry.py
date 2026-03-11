@@ -8,39 +8,63 @@ from pathlib import Path
 from typing import Any
 
 
+def _sanitize_attributes(attributes: dict[str, Any]) -> dict[str, str | int | float | bool]:
+    sanitized: dict[str, str | int | float | bool] = {}
+    for key, value in attributes.items():
+        if value is None:
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            sanitized[key] = value
+        else:
+            sanitized[key] = str(value)
+    return sanitized
+
+
 @dataclass(slots=True)
 class TelemetrySink:
     root: Path
+    service_name: str = "accruvia-harness"
+    otlp_endpoint: str | None = None
     metrics_path: Path = field(init=False)
     spans_path: Path = field(init=False)
+    _otel: "_OpenTelemetryBridge | None" = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         self.metrics_path = self.root / "metrics.jsonl"
         self.spans_path = self.root / "spans.jsonl"
-
-    def metric(self, name: str, value: float, **attributes: Any) -> None:
-        self._append(
-            self.metrics_path,
-            {
-                "timestamp": datetime.now(UTC).isoformat(),
-                "type": "metric",
-                "name": name,
-                "value": value,
-                "attributes": attributes,
-            },
+        self._otel = _OpenTelemetryBridge.build(
+            service_name=self.service_name,
+            endpoint=self.otlp_endpoint,
         )
 
+    def metric(self, name: str, value: float, metric_type: str = "counter", **attributes: Any) -> None:
+        sanitized = _sanitize_attributes(attributes)
+        payload = {
+            "timestamp": datetime.now(UTC).isoformat(),
+            "type": "metric",
+            "name": name,
+            "metric_type": metric_type,
+            "value": value,
+            "attributes": sanitized,
+        }
+        self._append(self.metrics_path, payload)
+        if self._otel is not None:
+            self._otel.metric(name, value, metric_type=metric_type, attributes=sanitized)
+
     def span(self, name: str, duration_ms: float | None = None, **attributes: Any) -> None:
+        sanitized = _sanitize_attributes(attributes)
         payload = {
             "timestamp": datetime.now(UTC).isoformat(),
             "type": "span",
             "name": name,
-            "attributes": attributes,
+            "attributes": sanitized,
         }
         if duration_ms is not None:
             payload["duration_ms"] = duration_ms
         self._append(self.spans_path, payload)
+        if self._otel is not None:
+            self._otel.span(name, duration_ms=duration_ms, attributes=sanitized)
 
     def timed(self, name: str, **attributes: Any):
         return _TimedSpan(self, name, attributes)
@@ -48,9 +72,22 @@ class TelemetrySink:
     def summary(self) -> dict[str, object]:
         metrics = self.load_metrics()
         spans = self.load_spans()
-        by_name: dict[str, float] = {}
+        metric_totals: dict[str, float] = {}
+        metric_series: dict[str, list[float]] = {}
+        cost_totals = {
+            "cost_usd": 0.0,
+            "prompt_tokens": 0.0,
+            "completion_tokens": 0.0,
+            "total_tokens": 0.0,
+        }
         for item in metrics:
-            by_name[item["name"]] = by_name.get(item["name"], 0.0) + float(item["value"])
+            name = str(item["name"])
+            value = float(item["value"])
+            metric_totals[name] = metric_totals.get(name, 0.0) + value
+            metric_series.setdefault(name, []).append(value)
+            if name in {"llm_cost_usd", "llm_prompt_tokens", "llm_completion_tokens", "llm_total_tokens"}:
+                key = name.removeprefix("llm_")
+                cost_totals[key] = cost_totals.get(key, 0.0) + value
         span_counts: dict[str, int] = {}
         span_durations: dict[str, list[float]] = {}
         for item in spans:
@@ -58,13 +95,41 @@ class TelemetrySink:
             span_counts[name] = span_counts.get(name, 0) + 1
             if "duration_ms" in item:
                 span_durations.setdefault(name, []).append(float(item["duration_ms"]))
+        span_average_ms = {
+            name: (sum(values) / len(values)) for name, values in span_durations.items() if values
+        }
         return {
+            "service_name": self.service_name,
+            "otlp_endpoint": self.otlp_endpoint,
+            "otel_enabled": self._otel is not None,
             "metrics_path": str(self.metrics_path),
             "spans_path": str(self.spans_path),
-            "metric_totals": by_name,
+            "metric_totals": metric_totals,
+            "metric_averages": {
+                name: (sum(values) / len(values)) for name, values in metric_series.items() if values
+            },
             "span_counts": span_counts,
-            "span_average_ms": {
-                name: (sum(values) / len(values)) for name, values in span_durations.items() if values
+            "span_average_ms": span_average_ms,
+            "cost_totals": cost_totals,
+            "dashboard": {
+                "slowest_operations_ms": sorted(
+                    (
+                        {"name": name, "avg_ms": avg}
+                        for name, avg in span_average_ms.items()
+                    ),
+                    key=lambda item: item["avg_ms"],
+                    reverse=True,
+                )[:10],
+                "highest_volume_metrics": sorted(
+                    (
+                        {"name": name, "total": total}
+                        for name, total in metric_totals.items()
+                    ),
+                    key=lambda item: item["total"],
+                    reverse=True,
+                )[:10],
+                "llm_cost_usd": cost_totals["cost_usd"],
+                "llm_total_tokens": int(cost_totals["total_tokens"]),
             },
         }
 
@@ -106,3 +171,77 @@ class _TimedSpan:
         if exc_type is not None:
             payload["error"] = exc_type.__name__
         self.sink.span(self.name, duration_ms=duration_ms, **payload)
+        self.sink.metric(f"{self.name}_duration_ms", duration_ms, metric_type="histogram", **payload)
+
+
+class _OpenTelemetryBridge:
+    def __init__(self, tracer, meter) -> None:
+        self.tracer = tracer
+        self.meter = meter
+        self._counters: dict[str, Any] = {}
+        self._histograms: dict[str, Any] = {}
+
+    @classmethod
+    def build(cls, service_name: str, endpoint: str | None) -> "_OpenTelemetryBridge | None":
+        try:
+            from opentelemetry import metrics, trace
+            from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+            from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+            from opentelemetry.sdk.metrics import MeterProvider
+            from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+            from opentelemetry.sdk.resources import Resource
+            from opentelemetry.sdk.trace import TracerProvider
+            from opentelemetry.sdk.trace.export import BatchSpanProcessor
+        except Exception:
+            return None
+        if not endpoint:
+            return None
+        resource = Resource.create({"service.name": service_name})
+        trace_provider = TracerProvider(resource=resource)
+        trace_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
+        metric_reader = PeriodicExportingMetricReader(OTLPMetricExporter(endpoint=endpoint))
+        meter_provider = MeterProvider(resource=resource, metric_readers=[metric_reader])
+        trace.set_tracer_provider(trace_provider)
+        metrics.set_meter_provider(meter_provider)
+        return cls(
+            tracer=trace.get_tracer(service_name),
+            meter=metrics.get_meter(service_name),
+        )
+
+    def metric(
+        self,
+        name: str,
+        value: float,
+        metric_type: str,
+        attributes: dict[str, str | int | float | bool],
+    ) -> None:
+        if metric_type == "histogram":
+            instrument = self._histograms.get(name)
+            if instrument is None:
+                instrument = self.meter.create_histogram(name)
+                self._histograms[name] = instrument
+            instrument.record(value, attributes=attributes)
+            return
+        instrument = self._counters.get(name)
+        if instrument is None:
+            if value < 0:
+                instrument = self.meter.create_up_down_counter(name)
+            else:
+                instrument = self.meter.create_counter(name)
+            self._counters[name] = instrument
+        if value < 0 and instrument in self._counters.values():
+            try:
+                instrument.add(value, attributes=attributes)
+            except Exception:
+                pass
+            return
+        instrument.add(value, attributes=attributes)
+
+    def span(
+        self, name: str, duration_ms: float | None, attributes: dict[str, str | int | float | bool]
+    ) -> None:
+        with self.tracer.start_as_current_span(name) as span:
+            for key, value in attributes.items():
+                span.set_attribute(key, value)
+            if duration_ms is not None:
+                span.set_attribute("duration_ms", duration_ms)

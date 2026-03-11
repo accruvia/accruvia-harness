@@ -171,12 +171,13 @@ class WorkerTests(unittest.TestCase):
             llm_backend="codex",
             llm_model="gpt-5.4-codex",
             llm_command=None,
-            llm_codex_command="printf 'codex response' > \"$ACCRUVIA_LLM_RESPONSE_PATH\"",
+            llm_codex_command="printf 'codex response' > \"$ACCRUVIA_LLM_RESPONSE_PATH\"; printf '{\"cost_usd\": 0.12, \"prompt_tokens\": 10, \"completion_tokens\": 20, \"total_tokens\": 30, \"latency_ms\": 250, \"model\": \"gpt-5.4-codex\"}' > \"$ACCRUVIA_LLM_METADATA_PATH\"",
             llm_claude_command=None,
             llm_accruvia_client_command=None,
         )
 
-        worker = build_worker_from_config(config)
+        telemetry = TelemetrySink(self.base / "telemetry")
+        worker = build_worker_from_config(config, telemetry=telemetry)
         self.assertIsInstance(worker, LLMTaskWorker)
         result = worker.work(self.task, self.run, self.base)
 
@@ -184,6 +185,10 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(["llm_response", "plan", "report"], kinds)
         self.assertEqual("success", result.outcome)
         self.assertEqual("codex", result.diagnostics["llm_backend"])
+        self.assertEqual(0.12, result.diagnostics["cost_usd"])
+        summary = telemetry.summary()
+        self.assertEqual(0.12, summary["cost_totals"]["cost_usd"])
+        self.assertEqual(30.0, summary["cost_totals"]["total_tokens"])
 
     def test_llm_router_prefers_accruvia_client_in_github_actions(self) -> None:
         config = HarnessConfig(

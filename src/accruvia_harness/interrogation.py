@@ -4,11 +4,13 @@ from dataclasses import asdict
 
 from .domain import serialize_dataclass
 from .store import SQLiteHarnessStore
+from .telemetry import TelemetrySink
 
 
 class HarnessQueryService:
-    def __init__(self, store: SQLiteHarnessStore) -> None:
+    def __init__(self, store: SQLiteHarnessStore, telemetry: TelemetrySink | None = None) -> None:
         self.store = store
+        self.telemetry = telemetry
 
     def portfolio_summary(self) -> dict[str, object]:
         projects = self.store.list_projects()
@@ -138,4 +140,29 @@ class HarnessQueryService:
             "project_id": project_id,
             "metrics": metrics,
             "pending_affirmations": pending_affirmations,
+        }
+
+    def dashboard_report(self, project_id: str | None = None) -> dict[str, object]:
+        operations = self.operations_report(project_id)
+        telemetry = self.telemetry.summary() if self.telemetry is not None else {}
+        tasks = self.store.list_tasks(project_id)
+        runs = [run for task in tasks for run in self.store.list_runs(task.id)]
+        blocked_runs = [serialize_dataclass(run) for run in runs if run.status.value == "blocked"][-10:]
+        failed_runs = [serialize_dataclass(run) for run in runs if run.status.value == "failed"][-10:]
+        return {
+            "project_id": project_id,
+            "operations": operations,
+            "telemetry": telemetry,
+            "recent_blocked_runs": blocked_runs,
+            "recent_failed_runs": failed_runs,
+            "dashboard": {
+                "queue_depth": sum(operations["metrics"]["tasks_by_status"].values()),
+                "pending_promotions": operations["metrics"]["pending_promotions"],
+                "active_leases": operations["metrics"]["active_leases"],
+                "retry_rate": operations["metrics"]["retry_rate"],
+                "promotion_approval_rate": operations["metrics"]["promotion_approval_rate"],
+                "llm_cost_usd": telemetry.get("cost_totals", {}).get("cost_usd", 0.0),
+                "llm_total_tokens": telemetry.get("cost_totals", {}).get("total_tokens", 0.0),
+                "slowest_operations_ms": telemetry.get("dashboard", {}).get("slowest_operations_ms", []),
+            },
         }

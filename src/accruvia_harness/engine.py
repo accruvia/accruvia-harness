@@ -82,6 +82,7 @@ class HarnessEngine:
             self.workspace_root,
             validator_registry=self.validator_registry,
             llm_router=self.llm_router,
+            telemetry=self.telemetry,
         )
 
     def set_worker(self, worker: WorkerBackend) -> None:

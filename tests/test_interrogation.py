@@ -9,6 +9,7 @@ from accruvia_harness.engine import HarnessEngine
 from accruvia_harness.interrogation import HarnessQueryService
 from accruvia_harness.policy import WorkResult
 from accruvia_harness.store import SQLiteHarnessStore
+from accruvia_harness.telemetry import TelemetrySink
 from accruvia_harness.workers import LocalArtifactWorker
 
 
@@ -33,13 +34,15 @@ class HarnessQueryServiceTests(unittest.TestCase):
         base = Path(self.temp_dir.name)
         self.store = SQLiteHarnessStore(base / "harness.db")
         self.store.initialize()
+        self.telemetry = TelemetrySink(base / "telemetry")
         self.engine = HarnessEngine(
             store=self.store,
             workspace_root=base / "workspace",
+            telemetry=self.telemetry,
         )
         self.project = Project(id=new_id("project"), name="accruvia", description="Harness work")
         self.store.create_project(self.project)
-        self.query = HarnessQueryService(self.store)
+        self.query = HarnessQueryService(self.store, telemetry=self.telemetry)
 
     def test_portfolio_summary_reports_project_metrics(self) -> None:
         task = self.engine.import_issue_task(
@@ -164,3 +167,22 @@ class HarnessQueryServiceTests(unittest.TestCase):
 
         self.assertEqual(parent.id, lineage["ancestors"][0]["id"])
         self.assertEqual(grandchild.id, lineage["children"][0]["task"]["id"])
+
+    def test_dashboard_report_includes_telemetry_rollups(self) -> None:
+        task = self.engine.import_issue_task(
+            project_id=self.project.id,
+            issue_id="503",
+            title="Dashboard task",
+            objective="Exercise dashboard output",
+            priority=100,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+        self.engine.run_until_stable(task.id)
+
+        dashboard = self.query.dashboard_report(self.project.id)
+
+        self.assertIn("telemetry", dashboard)
+        self.assertIn("dashboard", dashboard)
+        self.assertIn("slowest_operations_ms", dashboard["dashboard"])
