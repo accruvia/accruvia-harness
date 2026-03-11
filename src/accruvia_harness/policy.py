@@ -118,6 +118,17 @@ class DefaultAnalyzer:
             details=details,
         )
 
+    def failed(self, task: Task, run: Run, diagnostics: dict[str, object] | None = None) -> AnalyzeResult:
+        details = {"task_title": task.title, "strategy": task.strategy}
+        if diagnostics:
+            details["diagnostics"] = diagnostics
+        return AnalyzeResult(
+            verdict=EvaluationVerdict.FAILED,
+            confidence=0.95,
+            summary="Run ended with a failed worker outcome.",
+            details=details,
+        )
+
 
 class DefaultDecider:
     def decide(self, analysis: AnalyzeResult, run: Run, task: Task) -> DecideResult:

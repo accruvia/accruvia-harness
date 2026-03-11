@@ -251,11 +251,15 @@ class RunService:
             ):
                 if work.outcome == "blocked":
                     analysis = self.analyzer.blocked(task, run, work.diagnostics)
+                elif work.outcome == "failed":
+                    analysis = self.analyzer.failed(task, run, work.diagnostics)
                 else:
                     analysis = self.analyzer.analyze(task, run, self.store.list_artifacts(run.id))
         else:
             if work.outcome == "blocked":
                 analysis = self.analyzer.blocked(task, run, work.diagnostics)
+            elif work.outcome == "failed":
+                analysis = self.analyzer.failed(task, run, work.diagnostics)
             else:
                 analysis = self.analyzer.analyze(task, run, self.store.list_artifacts(run.id))
         evaluation = Evaluation(

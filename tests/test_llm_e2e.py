@@ -100,4 +100,4 @@ class LLMEndToEndTests(unittest.TestCase):
         artifact_kinds = sorted(item["kind"] for item in run_report["artifacts"])
         self.assertEqual(["llm_error", "report", "workspace_metadata"], artifact_kinds)
         self.assertEqual("failed", run_report["run"]["status"])
-        self.assertEqual("incomplete", run_report["evaluations"][0]["verdict"])
+        self.assertEqual("failed", run_report["evaluations"][0]["verdict"])

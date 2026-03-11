@@ -66,9 +66,17 @@ class SQLiteHarnessStore(ProjectTaskStoreMixin, RunRecordsStoreMixin, EventsMetr
             ]
             placeholders = ",".join("?" for _ in in_progress_statuses)
             rows = connection.execute(
-                f"UPDATE runs SET status = ?, summary = 'Recovered: process crash detected', updated_at = ? "
-                f"WHERE status IN ({placeholders})",
-                (RunStatus.FAILED.value, now, *in_progress_statuses),
+                f"""
+                UPDATE runs
+                SET status = ?, summary = 'Recovered: process crash detected', updated_at = ?
+                WHERE status IN ({placeholders})
+                  AND task_id NOT IN (
+                      SELECT task_id
+                      FROM task_leases
+                      WHERE lease_expires_at > ?
+                  )
+                """,
+                (RunStatus.FAILED.value, now, *in_progress_statuses, now),
             ).rowcount
             recovered["runs"] = rows
 

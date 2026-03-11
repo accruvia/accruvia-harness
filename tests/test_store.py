@@ -201,6 +201,40 @@ class SQLiteHarnessStoreTests(unittest.TestCase):
         self.assertEqual(TaskStatus.PENDING, task_after.status if task_after else None)
         self.assertEqual(RunStatus.FAILED, run_after.status if run_after else None)
 
+    def test_recover_stale_state_preserves_in_progress_run_with_active_lease(self) -> None:
+        project = Project(id=new_id("project"), name="recover-live", description="Recover live")
+        self.store.create_project(project)
+        task = Task(
+            id=new_id("task"),
+            project_id=project.id,
+            title="Still running",
+            objective="Do not recover a live run",
+            status=TaskStatus.ACTIVE,
+        )
+        self.store.create_task(task)
+        run = Run(
+            id=new_id("run"),
+            task_id=task.id,
+            status=RunStatus.WORKING,
+            attempt=1,
+            summary="working",
+        )
+        self.store.create_run(run)
+        with self.store.connect() as connection:
+            connection.execute(
+                "INSERT INTO task_leases (task_id, worker_id, lease_expires_at, created_at) VALUES (?, ?, ?, ?)",
+                (task.id, "worker-a", "2099-01-01T00:00:00+00:00", "2099-01-01T00:00:00+00:00"),
+            )
+
+        recovered = self.store.recover_stale_state()
+        task_after = self.store.get_task(task.id)
+        run_after = self.store.get_run(run.id)
+
+        self.assertEqual(0, recovered["runs"])
+        self.assertEqual(0, recovered["tasks"])
+        self.assertEqual(TaskStatus.ACTIVE, task_after.status if task_after else None)
+        self.assertEqual(RunStatus.WORKING, run_after.status if run_after else None)
+
     def test_foreign_keys_are_enforced(self) -> None:
         task = Task(id=new_id("task"), project_id="missing-project", title="bad", objective="bad")
 
