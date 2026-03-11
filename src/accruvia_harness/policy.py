@@ -132,6 +132,11 @@ class DefaultDecider:
                 rationale="Worker reported a blocked diagnosis.",
             )
         if run.attempt >= task.max_attempts:
+            if task.max_branches > 1 and run.branch_id is None:
+                return DecideResult(
+                    action=DecisionAction.BRANCH,
+                    rationale=f"Retry budget exhausted; branching into {task.max_branches} speculative runs.",
+                )
             return DecideResult(
                 action=DecisionAction.FAIL,
                 rationale="Retry budget exhausted.",

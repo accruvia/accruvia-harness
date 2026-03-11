@@ -9,6 +9,7 @@ from .policy import DefaultAnalyzer, DefaultDecider, DefaultPlanner
 from .project_adapters import ProjectAdapterRegistry, build_project_adapter_registry
 from .services.issue_policy import IssueStatePolicy
 from .services import (
+    BranchService,
     GitHubTaskService,
     GitLabTaskService,
     PromotionService,
@@ -63,6 +64,15 @@ class HarnessEngine:
             project_adapter_registry=self.project_adapter_registry,
             telemetry=self.telemetry,
         )
+        self.branches = BranchService(
+            store=self.store,
+            workspace_root=self.workspace_root,
+            planner=self.planner,
+            worker=self.worker,
+            analyzer=self.analyzer,
+            project_adapter_registry=self.project_adapter_registry,
+            telemetry=self.telemetry,
+        )
         self.queue = QueueService(self.store, self.runs)
         self.github_tasks = GitHubTaskService(self.tasks, self.store, state_policy=self.issue_state_policy)
         self.gitlab_tasks = GitLabTaskService(self.tasks, self.store, state_policy=self.issue_state_policy)
@@ -114,6 +124,7 @@ class HarnessEngine:
         validation_profile: str = "generic",
         strategy: str = "default",
         max_attempts: int = 3,
+        max_branches: int = 1,
         required_artifacts: list[str] | None = None,
     ):
         return self.tasks.create_task_with_policy(
@@ -128,6 +139,7 @@ class HarnessEngine:
             validation_profile=validation_profile,
             strategy=strategy,
             max_attempts=max_attempts,
+            max_branches=max_branches,
             required_artifacts=required_artifacts or ["plan", "report"],
         )
 
@@ -388,6 +400,12 @@ class HarnessEngine:
             promotion_id=promotion_id,
             create_follow_on=create_follow_on,
         )
+
+    def create_branches(self, task_id: str, count: int | None = None):
+        return self.branches.create_branches(task_id, count=count)
+
+    def select_winner(self, task_id: str, branch_id: str):
+        return self.branches.select_winner(task_id, branch_id)
 
     def rereview_promotion(
         self,

@@ -151,6 +151,15 @@ MIGRATIONS: list[Migration] = [
         ALTER TABLE tasks ADD COLUMN external_ref_metadata_json TEXT NOT NULL DEFAULT '{}';
         """,
     ),
+    Migration(
+        version=7,
+        name="parallel_execution",
+        sql="""
+        ALTER TABLE projects ADD COLUMN max_concurrent_tasks INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE tasks ADD COLUMN max_branches INTEGER NOT NULL DEFAULT 1;
+        ALTER TABLE runs ADD COLUMN branch_id TEXT;
+        """,
+    ),
 ]
 
 

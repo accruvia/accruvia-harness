@@ -45,6 +45,7 @@ class TaskService:
         validation_profile: str = "generic",
         strategy: str = "default",
         max_attempts: int = 3,
+        max_branches: int = 1,
         required_artifacts: list[str] | None = None,
     ) -> Task:
         return self.create_task(
@@ -62,6 +63,7 @@ class TaskService:
                 validation_profile=validation_profile,
                 strategy=strategy,
                 max_attempts=max_attempts,
+                max_branches=max_branches,
                 required_artifacts=required_artifacts or ["plan", "report"],
             )
         )

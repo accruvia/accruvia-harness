@@ -19,8 +19,8 @@ class RunRecordsStoreMixin:
         with self.connect() as connection:
             connection.execute(
                 """
-                INSERT INTO runs (id, task_id, status, attempt, summary, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO runs (id, task_id, status, attempt, summary, branch_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run.id,
@@ -28,6 +28,7 @@ class RunRecordsStoreMixin:
                     run.status.value,
                     run.attempt,
                     run.summary,
+                    run.branch_id,
                     run.created_at.isoformat(),
                     run.updated_at.isoformat(),
                 ),
@@ -41,7 +42,7 @@ class RunRecordsStoreMixin:
             )
 
     def list_runs(self, task_id: str | None = None) -> list[Run]:
-        query = "SELECT id, task_id, status, attempt, summary, created_at, updated_at FROM runs"
+        query = "SELECT id, task_id, status, attempt, summary, branch_id, created_at, updated_at FROM runs"
         params: tuple[str, ...] = ()
         if task_id:
             query += " WHERE task_id = ?"
@@ -54,7 +55,7 @@ class RunRecordsStoreMixin:
     def get_run(self, run_id: str) -> Run | None:
         with self.connect() as connection:
             row = connection.execute(
-                "SELECT id, task_id, status, attempt, summary, created_at, updated_at FROM runs WHERE id = ?",
+                "SELECT id, task_id, status, attempt, summary, branch_id, created_at, updated_at FROM runs WHERE id = ?",
                 (run_id,),
             ).fetchone()
         return run_from_row(row) if row else None

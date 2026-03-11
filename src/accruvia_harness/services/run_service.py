@@ -284,9 +284,13 @@ class RunService:
         final_status = RunStatus.COMPLETED if decision_result.action == DecisionAction.PROMOTE else RunStatus.FAILED
         if analysis.verdict == EvaluationVerdict.BLOCKED:
             final_status = RunStatus.BLOCKED
+        if decision_result.action == DecisionAction.BRANCH:
+            final_status = RunStatus.FAILED
         task_status = TaskStatus.COMPLETED if decision_result.action == DecisionAction.PROMOTE else TaskStatus.PENDING
         if decision_result.action == DecisionAction.FAIL:
             task_status = TaskStatus.FAILED
+        if decision_result.action == DecisionAction.BRANCH:
+            task_status = TaskStatus.ACTIVE
         run = self.store.mark_run(run, final_status, decision_result.rationale)
         self.store.update_task_status(task.id, task_status)
         self.store.create_event(
