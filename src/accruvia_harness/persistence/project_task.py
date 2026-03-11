@@ -33,6 +33,29 @@ class ProjectTaskStoreMixin:
                 ),
             )
 
+    def update_project(self, project: Project) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE projects
+                SET name = ?, description = ?, adapter_name = ?, workspace_policy = ?, promotion_mode = ?,
+                    repo_provider = ?, repo_name = ?, base_branch = ?, max_concurrent_tasks = ?
+                WHERE id = ?
+                """,
+                (
+                    project.name,
+                    project.description,
+                    project.adapter_name,
+                    project.workspace_policy.value,
+                    project.promotion_mode.value,
+                    project.repo_provider.value if project.repo_provider is not None else None,
+                    project.repo_name,
+                    project.base_branch,
+                    project.max_concurrent_tasks,
+                    project.id,
+                ),
+            )
+
     def list_projects(self) -> list[Project]:
         with self.connect() as connection:
             rows = connection.execute(

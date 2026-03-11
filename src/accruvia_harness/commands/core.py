@@ -94,6 +94,26 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
             }
         )
         return True
+    if args.command == "update-project":
+        emit(
+            {
+                "project": serialize_dataclass(
+                    engine.update_project(
+                        args.project_id,
+                        name=args.name,
+                        description=args.description,
+                        adapter_name=args.adapter_name,
+                        workspace_policy=WorkspacePolicy(args.workspace_policy) if args.workspace_policy else None,
+                        promotion_mode=PromotionMode(args.promotion_mode) if args.promotion_mode else None,
+                        repo_provider=RepoProvider(args.repo_provider) if args.repo_provider else None,
+                        repo_name=args.repo_name,
+                        base_branch=args.base_branch,
+                        max_concurrent_tasks=args.max_concurrent_tasks,
+                    )
+                )
+            }
+        )
+        return True
     if args.command == "create-task":
         required_artifacts = args.required_artifacts or ["plan", "report"]
         scope = _task_scope_from_args(args)

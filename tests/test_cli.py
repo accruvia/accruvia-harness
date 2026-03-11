@@ -52,6 +52,32 @@ class CLITests(unittest.TestCase):
         self.assertEqual(task["id"], task_report["task"]["id"])
         self.assertEqual(1, len(task_report["runs"]))
 
+    def test_update_project_persists_repo_and_policy_settings(self) -> None:
+        project = self.run_cli("create-project", "demo", "demo project")["project"]
+
+        updated = self.run_cli(
+            "update-project",
+            project["id"],
+            "--repo-provider",
+            "github",
+            "--repo-name",
+            "accruvia/routellect",
+            "--promotion-mode",
+            "branch_and_pr",
+            "--workspace-policy",
+            "isolated_required",
+            "--base-branch",
+            "main",
+        )["project"]
+        status = self.run_cli("status")
+
+        self.assertEqual("github", updated["repo_provider"])
+        self.assertEqual("accruvia/routellect", updated["repo_name"])
+        self.assertEqual("branch_and_pr", updated["promotion_mode"])
+        self.assertEqual("isolated_required", updated["workspace_policy"])
+        self.assertEqual("main", updated["base_branch"])
+        self.assertEqual("accruvia/routellect", status["projects"][0]["repo_name"])
+
     def test_ops_report_includes_validation_profile_metrics(self) -> None:
         project = self.run_cli("create-project", "ops", "ops project")["project"]
         task = self.run_cli(

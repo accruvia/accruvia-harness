@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from ..domain import Event, Project, PromotionMode, RepoProvider, Task, WorkspacePolicy, new_id
 from ..store import SQLiteHarnessStore
 from .common import task_created_payload
@@ -32,6 +34,40 @@ class TaskService:
             base_branch=base_branch,
         )
         self.store.create_project(project)
+        return project
+
+    def update_project(
+        self,
+        project_id: str,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        adapter_name: str | None = None,
+        workspace_policy: WorkspacePolicy | None = None,
+        promotion_mode: PromotionMode | None = None,
+        repo_provider: RepoProvider | None = None,
+        repo_name: str | None = None,
+        base_branch: str | None = None,
+        max_concurrent_tasks: int | None = None,
+    ) -> Project:
+        existing = self.store.get_project(project_id)
+        if existing is None:
+            raise ValueError(f"Unknown project: {project_id}")
+        project = replace(
+            existing,
+            name=name if name is not None else existing.name,
+            description=description if description is not None else existing.description,
+            adapter_name=adapter_name if adapter_name is not None else existing.adapter_name,
+            workspace_policy=workspace_policy if workspace_policy is not None else existing.workspace_policy,
+            promotion_mode=promotion_mode if promotion_mode is not None else existing.promotion_mode,
+            repo_provider=repo_provider if repo_provider is not None else existing.repo_provider,
+            repo_name=repo_name if repo_name is not None else existing.repo_name,
+            base_branch=base_branch if base_branch is not None else existing.base_branch,
+            max_concurrent_tasks=max_concurrent_tasks
+            if max_concurrent_tasks is not None
+            else existing.max_concurrent_tasks,
+        )
+        self.store.update_project(project)
         return project
 
     def create_task(self, task: Task) -> Task:

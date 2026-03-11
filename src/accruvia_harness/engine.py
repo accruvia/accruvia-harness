@@ -139,6 +139,33 @@ class HarnessEngine:
             base_branch=base_branch,
         )
 
+    def update_project(
+        self,
+        project_id: str,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        adapter_name: str | None = None,
+        workspace_policy: WorkspacePolicy | None = None,
+        promotion_mode: PromotionMode | None = None,
+        repo_provider: RepoProvider | None = None,
+        repo_name: str | None = None,
+        base_branch: str | None = None,
+        max_concurrent_tasks: int | None = None,
+    ):
+        return self.tasks.update_project(
+            project_id,
+            name=name,
+            description=description,
+            adapter_name=adapter_name,
+            workspace_policy=workspace_policy,
+            promotion_mode=promotion_mode,
+            repo_provider=repo_provider,
+            repo_name=repo_name,
+            base_branch=base_branch,
+            max_concurrent_tasks=max_concurrent_tasks,
+        )
+
     def create_task(self, project_id: str, title: str, objective: str):
         return self.tasks.create_task_with_policy(
             project_id=project_id,
