@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import json
 import os
-import py_compile
-import shutil
 import subprocess
-import sys
 from pathlib import Path
 from typing import Protocol
 
+from .adapters import AdapterRegistry, build_adapter_registry
 from .config import HarnessConfig
 from .domain import Run, Task
 from .llm import LLMExecutionError, LLMInvocation, LLMRouter, build_llm_router
@@ -24,6 +22,9 @@ class WorkerExecutionError(RuntimeError):
 
 
 class LocalArtifactWorker:
+    def __init__(self, adapter_registry: AdapterRegistry | None = None) -> None:
+        self.adapter_registry = adapter_registry or build_adapter_registry()
+
     def work(self, task: Task, run: Run, workspace_root: Path) -> WorkResult:
         run_dir = workspace_root / "runs" / run.id
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -32,7 +33,8 @@ class LocalArtifactWorker:
             f"task={task.id}\nrun={run.id}\nattempt={run.attempt}\nobjective={task.objective}\n",
             encoding="utf-8",
         )
-        evidence = self._build_profile_evidence(task, run_dir)
+        adapter = self.adapter_registry.get(task.validation_profile)
+        evidence = adapter.build_evidence(task, run_dir)
         report_path = run_dir / "report.json"
         report_path.write_text(
             json.dumps(
@@ -44,7 +46,7 @@ class LocalArtifactWorker:
                     "objective": task.objective,
                     "worker_backend": "local",
                     "validation_profile": task.validation_profile,
-                    **evidence["report"],
+                    **evidence.report,
                 },
                 indent=2,
                 sort_keys=True,
@@ -57,262 +59,13 @@ class LocalArtifactWorker:
                 ("plan", str(plan_path), "Run planning artifact"),
                 ("report", str(report_path), "Structured run report"),
             ],
-            outcome="success" if evidence["passed"] else "failed",
+            outcome="success" if evidence.passed else "failed",
             diagnostics={
                 "worker_backend": "local",
                 "validation_profile": task.validation_profile,
-                **evidence["diagnostics"],
+                **evidence.diagnostics,
             },
         )
-
-    def _build_profile_evidence(self, task: Task, run_dir: Path) -> dict[str, object]:
-        if task.validation_profile == "python":
-            return self._build_python_evidence(run_dir)
-        if task.validation_profile == "javascript":
-            return self._build_javascript_evidence(run_dir)
-        if task.validation_profile == "terraform":
-            return self._build_terraform_evidence(run_dir)
-        return self._build_generic_evidence(run_dir)
-
-    def _build_python_evidence(self, run_dir: Path) -> dict[str, object]:
-        module_path = run_dir / "generated_module.py"
-        module_path.write_text(
-            "def generated_value() -> int:\n"
-            "    return 2\n",
-            encoding="utf-8",
-        )
-        test_path = run_dir / "test_generated_module.py"
-        test_path.write_text(
-            "import unittest\n\n"
-            "from generated_module import generated_value\n\n"
-            "class GeneratedModuleTests(unittest.TestCase):\n"
-            "    def test_generated_value(self) -> None:\n"
-            "        self.assertEqual(2, generated_value())\n\n"
-            "if __name__ == '__main__':\n"
-            "    unittest.main()\n",
-            encoding="utf-8",
-        )
-        compile_targets = [str(module_path), str(test_path)]
-        for target in compile_targets:
-            py_compile.compile(target, doraise=True)
-        test_completed = subprocess.run(
-            [sys.executable, "-m", "unittest", "discover", "-s", str(run_dir), "-p", "test_generated_module.py"],
-            check=False,
-            cwd=run_dir,
-            capture_output=True,
-            text=True,
-        )
-        test_output_path = run_dir / "test_output.txt"
-        test_output_path.write_text(
-            f"{test_completed.stdout}\n{test_completed.stderr}".strip(),
-            encoding="utf-8",
-        )
-        return {
-            "passed": test_completed.returncode == 0,
-            "report": {
-                "changed_files": [str(module_path), str(test_path)],
-                "test_files": [str(test_path)],
-                "compile_check": {"passed": True, "targets": compile_targets},
-                "test_check": {
-                    "passed": test_completed.returncode == 0,
-                    "framework": "unittest",
-                    "command": [
-                        sys.executable,
-                        "-m",
-                        "unittest",
-                        "discover",
-                        "-s",
-                        str(run_dir),
-                        "-p",
-                        "test_generated_module.py",
-                    ],
-                    "output_path": str(test_output_path),
-                },
-            },
-            "diagnostics": {
-                "compile_targets": compile_targets,
-                "test_output_path": str(test_output_path),
-                "test_returncode": test_completed.returncode,
-            },
-        }
-
-    def _build_javascript_evidence(self, run_dir: Path) -> dict[str, object]:
-        source_path = run_dir / "generated-module.js"
-        source_path.write_text(
-            "export function generatedValue() {\n"
-            "  return 2;\n"
-            "}\n",
-            encoding="utf-8",
-        )
-        test_path = run_dir / "generated-module.test.js"
-        test_path.write_text(
-            "import test from 'node:test';\n"
-            "import assert from 'node:assert/strict';\n"
-            "import { generatedValue } from './generated-module.js';\n\n"
-            "test('generatedValue returns 2', () => {\n"
-            "  assert.equal(generatedValue(), 2);\n"
-            "});\n",
-            encoding="utf-8",
-        )
-        compile_output_path = run_dir / "compile_output.txt"
-        test_output_path = run_dir / "test_output.txt"
-        changed_files = [str(source_path), str(test_path)]
-        node_path = shutil.which("node")
-        if node_path:
-            compile_completed = subprocess.run(
-                [node_path, "--check", str(source_path)],
-                check=False,
-                cwd=run_dir,
-                capture_output=True,
-                text=True,
-            )
-            compile_output_path.write_text(
-                f"{compile_completed.stdout}\n{compile_completed.stderr}".strip(),
-                encoding="utf-8",
-            )
-            test_completed = subprocess.run(
-                [node_path, "--test", str(test_path)],
-                check=False,
-                cwd=run_dir,
-                capture_output=True,
-                text=True,
-            )
-            test_output_path.write_text(
-                f"{test_completed.stdout}\n{test_completed.stderr}".strip(),
-                encoding="utf-8",
-            )
-            passed = compile_completed.returncode == 0 and test_completed.returncode == 0
-            compile_mode = "node_check"
-            test_framework = "node_test"
-            test_returncode = test_completed.returncode
-            compile_returncode = compile_completed.returncode
-        else:
-            compile_output_path.write_text("Node is not installed; javascript compile check stubbed.\n", encoding="utf-8")
-            test_output_path.write_text("Node is not installed; javascript test check stubbed.\n", encoding="utf-8")
-            passed = True
-            compile_mode = "javascript_stub"
-            test_framework = "javascript_stub"
-            test_returncode = 0
-            compile_returncode = 0
-        return {
-            "passed": passed,
-            "report": {
-                "changed_files": changed_files,
-                "test_files": [str(test_path)],
-                "compile_check": {
-                    "passed": passed if node_path else True,
-                    "targets": changed_files,
-                    "mode": compile_mode,
-                    "output_path": str(compile_output_path),
-                },
-                "test_check": {
-                    "passed": passed if node_path else True,
-                    "framework": test_framework,
-                    "output_path": str(test_output_path),
-                },
-            },
-            "diagnostics": {
-                "compile_targets": changed_files,
-                "test_output_path": str(test_output_path),
-                "compile_output_path": str(compile_output_path),
-                "test_returncode": test_returncode,
-                "compile_returncode": compile_returncode,
-            },
-        }
-
-    def _build_terraform_evidence(self, run_dir: Path) -> dict[str, object]:
-        main_tf = run_dir / "main.tf"
-        main_tf.write_text(
-            'terraform {\n  required_version = ">= 1.0.0"\n}\n\n'
-            'variable "name" {\n  type = string\n}\n',
-            encoding="utf-8",
-        )
-        vars_tf = run_dir / "terraform.tfvars"
-        vars_tf.write_text('name = "accruvia"\n', encoding="utf-8")
-        validate_output_path = run_dir / "terraform_validate.txt"
-        changed_files = [str(main_tf), str(vars_tf)]
-        terraform_path = shutil.which("terraform")
-        if terraform_path:
-            validate_completed = subprocess.run(
-                [terraform_path, "validate", "-no-color"],
-                check=False,
-                cwd=run_dir,
-                capture_output=True,
-                text=True,
-            )
-            validate_output_path.write_text(
-                f"{validate_completed.stdout}\n{validate_completed.stderr}".strip(),
-                encoding="utf-8",
-            )
-            passed = validate_completed.returncode == 0
-            compile_mode = "terraform_validate"
-            test_framework = "terraform_validate"
-            validate_returncode = validate_completed.returncode
-        else:
-            validate_output_path.write_text("Terraform is not installed; terraform validate stubbed.\n", encoding="utf-8")
-            passed = True
-            compile_mode = "terraform_stub"
-            test_framework = "terraform_stub"
-            validate_returncode = 0
-        return {
-            "passed": passed,
-            "report": {
-                "changed_files": changed_files,
-                "test_files": [],
-                "compile_check": {
-                    "passed": passed if terraform_path else True,
-                    "targets": changed_files,
-                    "mode": compile_mode,
-                    "output_path": str(validate_output_path),
-                },
-                "test_check": {
-                    "passed": passed if terraform_path else True,
-                    "framework": test_framework,
-                    "output_path": str(validate_output_path),
-                },
-                "terraform_validate": {
-                    "passed": passed if terraform_path else True,
-                    "output_path": str(validate_output_path),
-                },
-            },
-            "diagnostics": {
-                "compile_targets": changed_files,
-                "terraform_validate_output_path": str(validate_output_path),
-                "test_returncode": validate_returncode,
-            },
-        }
-
-    def _build_generic_evidence(self, run_dir: Path) -> dict[str, object]:
-        source_path = run_dir / "generated_artifact.txt"
-        source_path.write_text("generic source artifact\n", encoding="utf-8")
-        test_path = run_dir / "generated_validation.txt"
-        test_path.write_text("generic validation evidence\n", encoding="utf-8")
-        check_output_path = run_dir / "generic_check.txt"
-        check_output_path.write_text("Generic validation passed.\n", encoding="utf-8")
-        changed_files = [str(source_path), str(test_path)]
-        return {
-            "passed": True,
-            "report": {
-                "changed_files": changed_files,
-                "test_files": [str(test_path)],
-                "compile_check": {
-                    "passed": True,
-                    "targets": changed_files,
-                    "mode": "generic_stub",
-                    "output_path": str(check_output_path),
-                },
-                "test_check": {
-                    "passed": True,
-                    "framework": "generic_stub",
-                    "output_path": str(check_output_path),
-                },
-            },
-            "diagnostics": {
-                "compile_targets": changed_files,
-                "test_output_path": str(check_output_path),
-                "test_returncode": 0,
-            },
-        }
 
 
 class CommandWorker:
@@ -523,6 +276,9 @@ def build_worker(backend: str, shell_command: str | None = None) -> WorkerBacken
 
 
 def build_worker_from_config(config: HarnessConfig) -> WorkerBackend:
+    adapter_registry = build_adapter_registry(config.adapter_modules)
     if config.worker_backend == "llm":
         return LLMTaskWorker(build_llm_router(config), model=config.llm_model)
+    if config.worker_backend == "local":
+        return LocalArtifactWorker(adapter_registry=adapter_registry)
     return build_worker(config.worker_backend, config.worker_command)

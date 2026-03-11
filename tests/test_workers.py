@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from accruvia_harness.adapters import build_adapter_registry
 from accruvia_harness.config import HarnessConfig
 from accruvia_harness.domain import Run, RunStatus, Task, new_id
 from accruvia_harness.llm import build_llm_router, parse_affirmation_response
@@ -69,6 +71,47 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual("terraform", payload["validation_profile"])
         self.assertIn("terraform_validate", payload)
         self.assertTrue(payload["terraform_validate"]["passed"])
+
+    def test_local_worker_can_load_external_adapter_module(self) -> None:
+        plugin_root = self.base / "plugins"
+        plugin_root.mkdir()
+        module_path = plugin_root / "private_adapter.py"
+        module_path.write_text(
+            "from pathlib import Path\n\n"
+            "from accruvia_harness.adapters.base import AdapterEvidence\n\n"
+            "class PrivateAdapter:\n"
+            "    profile = 'private_profile'\n\n"
+            "    def build_evidence(self, task, run_dir: Path):\n"
+            "        artifact = run_dir / 'private.txt'\n"
+            "        artifact.write_text('private adapter output\\n', encoding='utf-8')\n"
+            "        return AdapterEvidence(\n"
+            "            passed=True,\n"
+            "            report={\n"
+            "                'changed_files': [str(artifact)],\n"
+            "                'test_files': [],\n"
+            "                'compile_check': {'passed': True, 'targets': [str(artifact)]},\n"
+            "                'test_check': {'passed': True, 'framework': 'private'},\n"
+            "            },\n"
+            "            diagnostics={'adapter': 'private_profile'},\n"
+            "        )\n\n"
+            "def register_adapters(registry):\n"
+            "    registry.register(PrivateAdapter())\n",
+            encoding="utf-8",
+        )
+        sys.path.insert(0, str(plugin_root))
+        self.addCleanup(lambda: sys.path.remove(str(plugin_root)))
+
+        self.task.validation_profile = "private_profile"
+        worker = LocalArtifactWorker(
+            adapter_registry=build_adapter_registry(("private_adapter",))
+        )
+        result = worker.work(self.task, self.run, self.base)
+
+        self.assertEqual("success", result.outcome)
+        report_path = self.base / "runs" / self.run.id / "report.json"
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual("private_profile", payload["validation_profile"])
+        self.assertEqual("private_profile", result.diagnostics["adapter"])
 
     def test_shell_worker_executes_command(self) -> None:
         worker = ShellCommandWorker("printf 'hello from shell worker' > output.txt")

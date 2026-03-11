@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -24,6 +24,7 @@ class HarnessConfig:
     llm_codex_command: str | None
     llm_claude_command: str | None
     llm_accruvia_client_command: str | None
+    adapter_modules: tuple[str, ...] = field(default_factory=tuple)
 
     @classmethod
     def from_env(
@@ -56,4 +57,9 @@ class HarnessConfig:
             llm_codex_command=os.environ.get("ACCRUVIA_LLM_CODEX_COMMAND"),
             llm_claude_command=os.environ.get("ACCRUVIA_LLM_CLAUDE_COMMAND"),
             llm_accruvia_client_command=os.environ.get("ACCRUVIA_LLM_ACCRUVIA_CLIENT_COMMAND"),
+            adapter_modules=tuple(
+                item.strip()
+                for item in os.environ.get("ACCRUVIA_ADAPTER_MODULES", "").split(",")
+                if item.strip()
+            ),
         )

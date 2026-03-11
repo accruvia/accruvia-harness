@@ -115,6 +115,7 @@ This repo now contains a minimal durable harness foundation:
 - a GitHub adapter for importing issues and reporting results back out
 - worker backends for `local`, `shell`, `agent`, and routed `llm`
 - an LLM executor/router layer that can choose local CLI tools or `accruvia-client`
+- an adapter registry for built-in workload adapters plus externally supplied adapter modules
 - a profile-aware local worker that emits deterministic evidence for `generic`, `python`, `javascript`, and `terraform` tasks
 - a read-only interrogation surface for summaries, context packets, and task reports
 - an operational report for pending affirmations and profile-aware workload metrics
@@ -170,6 +171,30 @@ PYTHONPATH=src python3 -m accruvia_harness process-next --worker-id worker-a --l
 ```
 
 On GitHub Actions, `auto` prefers `accruvia-client` when configured. Outside CI, it prefers a local CLI executor such as Codex first, then Claude, then `accruvia-client`, then a generic command executor.
+
+### Workload Adapters
+
+This repo owns the adapter interface, registry, and a small set of built-in adapters.
+
+- built-in adapters belong here when they are generic and reusable
+- project-specific adapters generally should not live here
+- private or repo-specific workloads should provide their own adapter module and load it with `ACCRUVIA_ADAPTER_MODULES`
+
+Example:
+
+```bash
+export ACCRUVIA_ADAPTER_MODULES='my_private_project.harness_adapters'
+PYTHONPATH=src python3 -m accruvia_harness config
+```
+
+External adapter modules are expected to expose:
+
+```python
+def register_adapters(registry) -> None:
+    ...
+```
+
+That keeps the harness core generic while letting each project define its own workspace setup, evidence generation, and validation expectations.
 
 ## Phase 1 Status
 

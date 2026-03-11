@@ -30,6 +30,7 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
             "llm_codex_command": config.llm_codex_command,
             "llm_claude_command": config.llm_claude_command,
             "llm_accruvia_client_command": config.llm_accruvia_client_command,
+            "adapter_modules": list(config.adapter_modules),
         })
         return True
     if args.command == "create-project":
