@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ..domain import Event, Project, Task, new_id
+from ..domain import Event, Project, PromotionMode, RepoProvider, Task, WorkspacePolicy, new_id
 from ..store import SQLiteHarnessStore
 from .common import task_created_payload
 
@@ -9,8 +9,28 @@ class TaskService:
     def __init__(self, store: SQLiteHarnessStore) -> None:
         self.store = store
 
-    def create_project(self, name: str, description: str, adapter_name: str = "generic") -> Project:
-        project = Project(id=new_id("project"), name=name, description=description, adapter_name=adapter_name)
+    def create_project(
+        self,
+        name: str,
+        description: str,
+        adapter_name: str = "generic",
+        workspace_policy: WorkspacePolicy = WorkspacePolicy.ISOLATED_REQUIRED,
+        promotion_mode: PromotionMode = PromotionMode.BRANCH_AND_PR,
+        repo_provider: RepoProvider | None = None,
+        repo_name: str | None = None,
+        base_branch: str = "main",
+    ) -> Project:
+        project = Project(
+            id=new_id("project"),
+            name=name,
+            description=description,
+            adapter_name=adapter_name,
+            workspace_policy=workspace_policy,
+            promotion_mode=promotion_mode,
+            repo_provider=repo_provider,
+            repo_name=repo_name,
+            base_branch=base_branch,
+        )
         self.store.create_project(project)
         return project
 

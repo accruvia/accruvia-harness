@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import subprocess
 
 from ..domain import Event, PromotionRecord, PromotionStatus, RunStatus, TaskStatus, new_id
 from ..llm import LLMInvocation, LLMRouter, parse_affirmation_response
 from ..store import SQLiteHarnessStore
 from ..validation import PromotionValidator, PromotionValidatorRegistry, ValidationIssue, default_promotion_validators
+from .repository_promotion_service import RepositoryPromotionService
 from .task_service import TaskService
 
 
@@ -26,6 +28,7 @@ class PromotionService:
         validator_registry: PromotionValidatorRegistry | None = None,
         llm_router: LLMRouter | None = None,
         telemetry=None,
+        repository_promotions: RepositoryPromotionService | None = None,
     ) -> None:
         self.store = store
         self.task_service = task_service
@@ -34,6 +37,7 @@ class PromotionService:
         self.validator_registry = validator_registry
         self.llm_router = llm_router
         self.telemetry = telemetry
+        self.repository_promotions = repository_promotions or RepositoryPromotionService()
 
     def review_task(self, task_id: str, run_id: str | None = None, create_follow_on: bool = True) -> PromotionReviewResult:
         task = self.store.get_task(task_id)
@@ -191,13 +195,14 @@ class PromotionService:
         }
         follow_on_task_id: str | None = None
         if approved:
+            applyback = self._apply_approved_promotion(task, run)
             promotion = PromotionRecord(
                 id=promotion.id,
                 task_id=promotion.task_id,
                 run_id=promotion.run_id,
                 status=PromotionStatus.APPROVED,
                 summary="Promotion affirmed by deterministic gates and LLM review.",
-                details=details,
+                details={**details, "applyback": applyback},
                 created_at=promotion.created_at,
             )
             self.store.update_promotion(promotion)
@@ -210,6 +215,16 @@ class PromotionService:
                     payload={"promotion_id": promotion.id, "run_id": run.id, "llm_backend": routed_backend},
                 )
             )
+            if applyback.get("status") == "applied":
+                self.store.create_event(
+                    Event(
+                        id=new_id("event"),
+                        entity_type="task",
+                        entity_id=task.id,
+                        event_type="promotion_applied",
+                        payload={"promotion_id": promotion.id, "run_id": run.id, **applyback},
+                    )
+                )
             if self.telemetry is not None:
                 self.telemetry.metric(
                     "promotion_approved",
@@ -284,6 +299,43 @@ class PromotionService:
                 llm_backend=routed_backend,
             )
         return PromotionReviewResult(promotion=promotion, follow_on_task_id=follow_on_task_id)
+
+    def _apply_approved_promotion(self, task, run) -> dict[str, object]:
+        project = self.store.get_project(task.project_id)
+        if project is None:
+            raise ValueError(f"Unknown project for task: {task.project_id}")
+        workspace_details = self._workspace_details_for_run(run.id)
+        if workspace_details is None:
+            return {"status": "skipped", "reason": "missing_workspace_details"}
+        if workspace_details.get("workspace_mode") not in {"git_worktree", "git_clone"}:
+            return {
+                "status": "skipped",
+                "reason": "non_git_workspace",
+                "workspace_mode": workspace_details.get("workspace_mode"),
+            }
+        try:
+            apply_result = self.repository_promotions.apply(project, task, Path(workspace_details["project_root"]))
+        except subprocess.CalledProcessError:
+            return {
+                "status": "skipped",
+                "reason": "non_git_workspace",
+                "workspace_mode": workspace_details.get("workspace_mode"),
+            }
+        return {
+            "status": "applied",
+            "branch_name": apply_result.branch_name,
+            "commit_sha": apply_result.commit_sha,
+            "pushed_ref": apply_result.pushed_ref,
+            "pr_url": apply_result.pr_url,
+            "promotion_mode": project.promotion_mode.value,
+        }
+
+    def _workspace_details_for_run(self, run_id: str) -> dict[str, object] | None:
+        events = self.store.list_events(entity_type="run", entity_id=run_id)
+        for event in reversed(events):
+            if event.event_type == "project_workspace_prepared":
+                return dict(event.payload)
+        return None
 
     def rereview_task(
         self,

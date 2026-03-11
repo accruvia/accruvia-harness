@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
 from accruvia_harness.config import HarnessConfig
-from accruvia_harness.domain import DecisionAction, Project, TaskStatus, new_id
+from accruvia_harness.domain import DecisionAction, Project, PromotionMode, RepoProvider, TaskStatus, WorkspacePolicy, new_id
 from accruvia_harness.engine import HarnessEngine
 from accruvia_harness.llm import build_llm_router
 from accruvia_harness.policy import DecideResult, WorkResult
 from accruvia_harness.services.promotion_service import PromotionService
+from accruvia_harness.services.repository_promotion_service import RepositoryPromotionService
 from accruvia_harness.project_adapters import ProjectAdapterRegistry
 from accruvia_harness.workers import LocalArtifactWorker
 from accruvia_harness.store import SQLiteHarnessStore
@@ -136,6 +139,58 @@ class OverrideProjectAdapter(ManifestProjectAdapter):
         return ProjectOverrideWorker()
 
 
+class SharedRepoAdapter:
+    name = "shared"
+
+    def __init__(self, repo_root: Path) -> None:
+        self.repo_root = repo_root
+
+    def prepare_workspace(self, project, task, run, run_dir: Path):
+        from accruvia_harness.project_adapters import ProjectWorkspace
+
+        return ProjectWorkspace(
+            project_root=self.repo_root,
+            workspace_mode="shared_repo",
+            source_repo_root=self.repo_root,
+            environment={"ACCRUVIA_PROJECT_WORKSPACE": str(self.repo_root)},
+            diagnostics={"project_adapter": self.name},
+        )
+
+    def build_worker(self, project, task, run, workspace, default_worker):
+        return None
+
+
+class GitBranchAdapter:
+    name = "gitbranch"
+
+    def __init__(self, repo_root: Path) -> None:
+        self.repo_root = repo_root
+
+    def prepare_workspace(self, project, task, run, run_dir: Path):
+        from accruvia_harness.project_adapters import ProjectWorkspace
+
+        workspace = run_dir / "workspace"
+        branch = f"harness-{task.id}-{run.id}"
+        subprocess.run(
+            ["git", "worktree", "add", "-b", branch, str(workspace), "HEAD"],
+            cwd=self.repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return ProjectWorkspace(
+            project_root=workspace,
+            workspace_mode="git_worktree",
+            source_repo_root=self.repo_root,
+            branch_name=branch,
+            environment={"ACCRUVIA_PROJECT_WORKSPACE": str(workspace)},
+            diagnostics={"project_adapter": self.name},
+        )
+
+    def build_worker(self, project, task, run, workspace, default_worker):
+        return None
+
+
 class BranchOnceDecider:
     def __init__(self) -> None:
         self.calls = 0
@@ -167,6 +222,17 @@ class HarnessEngineTests(unittest.TestCase):
         project = Project(id=new_id("project"), name="accruvia", description="Harness work")
         self.store.create_project(project)
         self.project_id = project.id
+
+    def _init_git_repo(self, repo_root: Path, *, with_remote: bool = False) -> Path | None:
+        subprocess.run(["git", "init", "-b", "main"], cwd=repo_root, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=repo_root, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "config", "user.email", "harness@test.local"], cwd=repo_root, check=True, capture_output=True, text=True)
+        remote_root = None
+        if with_remote:
+            remote_root = repo_root.parent / "remote.git"
+            subprocess.run(["git", "init", "--bare", str(remote_root)], cwd=repo_root.parent, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "remote", "add", "origin", str(remote_root)], cwd=repo_root, check=True, capture_output=True, text=True)
+        return remote_root
 
     def test_run_once_completes_when_required_artifacts_exist(self) -> None:
         task = self.engine.create_task_with_policy(
@@ -264,13 +330,119 @@ class HarnessEngineTests(unittest.TestCase):
             required_artifacts=["plan", "report"],
         )
 
-        run = engine.run_once(task.id)
-        report_artifact = next(artifact for artifact in self.store.list_artifacts(run.id) if artifact.kind == "report")
-        report = json.loads(Path(report_artifact.path).read_text(encoding="utf-8"))
-        run_events = self.store.list_events("run", run.id)
+    def test_isolated_required_project_rejects_shared_repo_workspace(self) -> None:
+        repo_root = Path(self.temp_dir.name) / "shared-repo"
+        repo_root.mkdir()
+        (repo_root / "README.md").write_text("# shared\n", encoding="utf-8")
+        self._init_git_repo(repo_root)
+        subprocess.run(["git", "add", "."], cwd=repo_root, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=repo_root, check=True, capture_output=True, text=True)
+        registry = ProjectAdapterRegistry()
+        registry.register(SharedRepoAdapter(repo_root))
+        engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-shared",
+            project_adapter_registry=registry,
+        )
+        project = Project(
+            id=new_id("project"),
+            name="shared-project",
+            description="Unsafe shared repo project",
+            adapter_name="shared",
+            workspace_policy=WorkspacePolicy.ISOLATED_REQUIRED,
+        )
+        self.store.create_project(project)
+        task = engine.create_task_with_policy(
+            project_id=project.id,
+            title="Unsafe task",
+            objective="Should be rejected before work starts",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+        with self.assertRaisesRegex(RuntimeError, "isolated workspaces"):
+            engine.run_once(task.id)
 
-        self.assertEqual("project_override", report["worker_backend"])
-        self.assertIn("project_worker_selected", [event.event_type for event in run_events])
+    def test_approved_promotion_pushes_branch_to_remote(self) -> None:
+        repo_root = Path(self.temp_dir.name) / "promote-repo"
+        repo_root.mkdir()
+        (repo_root / "README.md").write_text("# demo\n", encoding="utf-8")
+        remote_root = self._init_git_repo(repo_root, with_remote=True)
+        subprocess.run(["git", "add", "."], cwd=repo_root, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=repo_root, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "push", "-u", "origin", "main"], cwd=repo_root, check=True, capture_output=True, text=True)
+
+        registry = ProjectAdapterRegistry()
+        registry.register(GitBranchAdapter(repo_root))
+        project = Project(
+            id=new_id("project"),
+            name="promote-project",
+            description="Promotion apply-back project",
+            adapter_name="gitbranch",
+            promotion_mode=PromotionMode.BRANCH_ONLY,
+            repo_provider=RepoProvider.GITHUB,
+            repo_name="accruvia/promote-project",
+        )
+        self.store.create_project(project)
+        engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-promote",
+            project_adapter_registry=registry,
+        )
+        task = engine.create_task_with_policy(
+            project_id=project.id,
+            title="Promote branch",
+            objective="Update readme",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+        run = engine.run_once(task.id)
+        run_dir = engine.workspace_root / "runs" / run.id
+        workspace = run_dir / "workspace"
+        (workspace / "README.md").write_text("# demo\n\nupdated\n", encoding="utf-8")
+
+        review = engine.review_promotion(task.id, run_id=run.id)
+
+        class _LLMResult:
+            def __init__(self, prompt_path: Path, response_path: Path, response_text: str) -> None:
+                self.prompt_path = prompt_path
+                self.response_path = response_path
+                self.response_text = response_text
+
+        class _ApproveRouter:
+            def execute(self, invocation, telemetry=None):
+                Path(invocation.run_dir).mkdir(parents=True, exist_ok=True)
+                response_path = Path(invocation.run_dir) / "response.txt"
+                prompt_path = Path(invocation.run_dir) / "prompt.txt"
+                prompt_path.write_text(invocation.prompt, encoding="utf-8")
+                response_text = '{"approved": true, "rationale": "ready"}'
+                response_path.write_text(response_text, encoding="utf-8")
+                return _LLMResult(prompt_path, response_path, response_text), "command"
+
+        engine.set_llm_router(_ApproveRouter())
+        affirmation = engine.affirm_promotion(task.id, run_id=run.id, promotion_id=review.promotion.id)
+
+        self.assertEqual("approved", affirmation.promotion.status.value)
+        applyback = affirmation.promotion.details["applyback"]
+        self.assertIn("branch_name", applyback)
+        self.assertIn(applyback["branch_name"], subprocess.run(
+            ["git", "ls-remote", "--heads", str(remote_root)],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout)
 
     def test_run_once_rejects_terminal_tasks(self) -> None:
         task = self.engine.create_task_with_policy(

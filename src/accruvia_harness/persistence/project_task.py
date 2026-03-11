@@ -12,21 +12,46 @@ class ProjectTaskStoreMixin:
     def create_project(self, project: Project) -> None:
         with self.connect() as connection:
             connection.execute(
-                "INSERT INTO projects (id, name, description, adapter_name, max_concurrent_tasks, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (project.id, project.name, project.description, project.adapter_name, project.max_concurrent_tasks, project.created_at.isoformat()),
+                """
+                INSERT INTO projects (
+                    id, name, description, adapter_name, workspace_policy, promotion_mode,
+                    repo_provider, repo_name, base_branch, max_concurrent_tasks, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    project.id,
+                    project.name,
+                    project.description,
+                    project.adapter_name,
+                    project.workspace_policy.value,
+                    project.promotion_mode.value,
+                    project.repo_provider.value if project.repo_provider is not None else None,
+                    project.repo_name,
+                    project.base_branch,
+                    project.max_concurrent_tasks,
+                    project.created_at.isoformat(),
+                ),
             )
 
     def list_projects(self) -> list[Project]:
         with self.connect() as connection:
             rows = connection.execute(
-                "SELECT id, name, description, adapter_name, max_concurrent_tasks, created_at FROM projects ORDER BY created_at"
+                """
+                SELECT id, name, description, adapter_name, workspace_policy, promotion_mode,
+                       repo_provider, repo_name, base_branch, max_concurrent_tasks, created_at
+                FROM projects ORDER BY created_at
+                """
             ).fetchall()
         return [project_from_row(row) for row in rows]
 
     def get_project(self, project_id: str) -> Project | None:
         with self.connect() as connection:
             row = connection.execute(
-                "SELECT id, name, description, adapter_name, max_concurrent_tasks, created_at FROM projects WHERE id = ?",
+                """
+                SELECT id, name, description, adapter_name, workspace_policy, promotion_mode,
+                       repo_provider, repo_name, base_branch, max_concurrent_tasks, created_at
+                FROM projects WHERE id = ?
+                """,
                 (project_id,),
             ).fetchone()
         return project_from_row(row) if row else None

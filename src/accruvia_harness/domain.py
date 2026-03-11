@@ -69,12 +69,34 @@ class PromotionStatus(StrEnum):
     REJECTED = "rejected"
 
 
+class WorkspacePolicy(StrEnum):
+    ISOLATED_REQUIRED = "isolated_required"
+    ISOLATED_PREFERRED = "isolated_preferred"
+    SHARED_ALLOWED = "shared_allowed"
+
+
+class PromotionMode(StrEnum):
+    DIRECT_MAIN = "direct_main"
+    BRANCH_ONLY = "branch_only"
+    BRANCH_AND_PR = "branch_and_pr"
+
+
+class RepoProvider(StrEnum):
+    GITHUB = "github"
+    GITLAB = "gitlab"
+
+
 @dataclass(slots=True)
 class Project:
     id: str
     name: str
     description: str
     adapter_name: str = "generic"
+    workspace_policy: WorkspacePolicy = WorkspacePolicy.ISOLATED_REQUIRED
+    promotion_mode: PromotionMode = PromotionMode.BRANCH_AND_PR
+    repo_provider: RepoProvider | None = None
+    repo_name: str | None = None
+    base_branch: str = "main"
     max_concurrent_tasks: int = 0
     created_at: datetime = field(default_factory=utc_now)
 

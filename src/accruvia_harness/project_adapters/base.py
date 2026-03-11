@@ -10,6 +10,9 @@ from ..domain import Project, Run, Task
 @dataclass(slots=True)
 class ProjectWorkspace:
     project_root: Path
+    workspace_mode: str = "ephemeral_dir"
+    source_repo_root: Path | None = None
+    branch_name: str | None = None
     metadata_files: list[Path] = field(default_factory=list)
     environment: dict[str, str] = field(default_factory=dict)
     diagnostics: dict[str, object] = field(default_factory=dict)

@@ -58,6 +58,24 @@ Execution truth is internal to the harness.
 - the harness DB and event history are canonical
 - retries, promotions, branches, and follow-on work are governed by the harness
 
+## Workspace And Promotion Safety
+
+The harness now treats workspace isolation and promotion strategy as explicit project policy.
+
+- `workspace_policy` controls whether a project may run against a shared checkout
+- `promotion_mode` controls how approved isolated work is delivered:
+  - `direct_main`
+  - `branch_only`
+  - `branch_and_pr`
+
+Default posture:
+
+- isolated workspaces are required
+- approved work is delivered on a branch and opened for review
+
+This exists for one reason: blocked or failed runs must not dirty the main checkout, and successful isolated work must
+have a deliberate path back into the real repo.
+
 ## Quick Start
 
 Create a virtualenv, install the package, and initialize the harness:
@@ -77,6 +95,18 @@ make run ARGS="create-project accruvia 'Accruvia harness work'"
 make run ARGS="create-task <project_id> 'First task' 'Build the first durable loop'"
 make run ARGS="run-once <task_id>"
 make run ARGS="review-promotion <task_id>"
+```
+
+Create a project with explicit repo policy:
+
+```bash
+make run ARGS="create-project routellect 'Routellect autonomous work' \
+  --adapter-name routellect \
+  --workspace-policy isolated_required \
+  --promotion-mode branch_and_pr \
+  --repo-provider github \
+  --repo-name accruvia/routellect \
+  --base-branch main"
 ```
 
 ## Common Commands

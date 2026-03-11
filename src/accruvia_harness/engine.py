@@ -9,6 +9,7 @@ from .gitlab import GitLabCLI
 from .llm import LLMRouter
 from .policy import DefaultAnalyzer, DefaultDecider, DefaultPlanner
 from .project_adapters import ProjectAdapterRegistry, build_project_adapter_registry
+from .domain import PromotionMode, RepoProvider, WorkspacePolicy
 from .services.issue_policy import IssueStatePolicy
 from .services import (
     BranchService,
@@ -21,6 +22,7 @@ from .services import (
     SupervisorService,
     TaskService,
 )
+from .services.repository_promotion_service import RepositoryPromotionService
 from .store import SQLiteHarnessStore
 from .validation import PromotionValidatorRegistry, build_validator_registry
 from .workers import LocalArtifactWorker, WorkerBackend
@@ -55,6 +57,7 @@ class HarnessEngine:
         self.cognition_registry = cognition_registry or build_cognition_registry()
         self.issue_state_policy = issue_state_policy or IssueStatePolicy()
         self.telemetry = telemetry
+        self.repository_promotions = RepositoryPromotionService()
 
         self.tasks = TaskService(self.store)
         self.query = HarnessQueryService(self.store, telemetry=self.telemetry)
@@ -101,6 +104,7 @@ class HarnessEngine:
             validator_registry=self.validator_registry,
             llm_router=self.llm_router,
             telemetry=self.telemetry,
+            repository_promotions=self.repository_promotions,
         )
 
     def set_worker(self, worker: WorkerBackend) -> None:
@@ -111,8 +115,27 @@ class HarnessEngine:
         self.llm_router = llm_router
         self._build_services()
 
-    def create_project(self, name: str, description: str, adapter_name: str = "generic"):
-        return self.tasks.create_project(name, description, adapter_name=adapter_name)
+    def create_project(
+        self,
+        name: str,
+        description: str,
+        adapter_name: str = "generic",
+        workspace_policy: WorkspacePolicy = WorkspacePolicy.ISOLATED_REQUIRED,
+        promotion_mode: PromotionMode = PromotionMode.BRANCH_AND_PR,
+        repo_provider: RepoProvider | None = None,
+        repo_name: str | None = None,
+        base_branch: str = "main",
+    ):
+        return self.tasks.create_project(
+            name,
+            description,
+            adapter_name=adapter_name,
+            workspace_policy=workspace_policy,
+            promotion_mode=promotion_mode,
+            repo_provider=repo_provider,
+            repo_name=repo_name,
+            base_branch=base_branch,
+        )
 
     def create_task(self, project_id: str, title: str, objective: str):
         return self.tasks.create_task_with_policy(

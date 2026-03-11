@@ -18,6 +18,7 @@ from ..policy import DefaultAnalyzer, DefaultDecider, DefaultPlanner, RetryStrat
 from ..project_adapters import ProjectAdapterRegistry
 from ..store import SQLiteHarnessStore
 from ..workers import WorkerBackend
+from .workspace_policy import WorkspacePolicyEnforcer
 
 
 class RunService:
@@ -33,6 +34,7 @@ class RunService:
         task_service=None,
         retry_advisor: RetryStrategyAdvisor | None = None,
         telemetry=None,
+        workspace_policy_enforcer: WorkspacePolicyEnforcer | None = None,
     ) -> None:
         self.store = store
         self.workspace_root = workspace_root
@@ -44,6 +46,7 @@ class RunService:
         self.task_service = task_service
         self.retry_advisor = retry_advisor or RetryStrategyAdvisor()
         self.telemetry = telemetry
+        self.workspace_policy_enforcer = workspace_policy_enforcer or WorkspacePolicyEnforcer()
 
     def run_once(self, task_id: str) -> Run:
         task = self.store.get_task(task_id)
@@ -114,6 +117,7 @@ class RunService:
         run_dir.mkdir(parents=True, exist_ok=True)
         project_adapter = self.project_adapter_registry.get(project.adapter_name)
         prepared_workspace = project_adapter.prepare_workspace(project, task, run, run_dir)
+        self.workspace_policy_enforcer.validate(project, prepared_workspace)
         for metadata_path in prepared_workspace.metadata_files:
             artifact = Artifact(
                 id=new_id("artifact"),
@@ -142,6 +146,11 @@ class RunService:
                     "project_id": project.id,
                     "project_adapter": project.adapter_name,
                     "project_root": str(prepared_workspace.project_root),
+                    "workspace_mode": prepared_workspace.workspace_mode,
+                    "source_repo_root": (
+                        str(prepared_workspace.source_repo_root) if prepared_workspace.source_repo_root else None
+                    ),
+                    "branch_name": prepared_workspace.branch_name,
                     "diagnostics": prepared_workspace.diagnostics,
                 },
             )

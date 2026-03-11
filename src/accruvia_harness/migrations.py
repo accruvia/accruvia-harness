@@ -167,6 +167,17 @@ MIGRATIONS: list[Migration] = [
         ALTER TABLE tasks ADD COLUMN scope_json TEXT NOT NULL DEFAULT '{}';
         """,
     ),
+    Migration(
+        version=9,
+        name="project_workspace_and_promotion_policy",
+        sql="""
+        ALTER TABLE projects ADD COLUMN workspace_policy TEXT NOT NULL DEFAULT 'isolated_required';
+        ALTER TABLE projects ADD COLUMN promotion_mode TEXT NOT NULL DEFAULT 'branch_and_pr';
+        ALTER TABLE projects ADD COLUMN repo_provider TEXT;
+        ALTER TABLE projects ADD COLUMN repo_name TEXT;
+        ALTER TABLE projects ADD COLUMN base_branch TEXT NOT NULL DEFAULT 'main';
+        """,
+    ),
 ]
 
 

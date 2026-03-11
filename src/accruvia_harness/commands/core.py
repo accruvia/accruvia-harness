@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ..domain import serialize_dataclass
+from ..domain import PromotionMode, RepoProvider, WorkspacePolicy, serialize_dataclass
 from .common import CLIContext, emit
 
 
@@ -62,10 +62,35 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
             "memory_limit_mb": config.memory_limit_mb,
             "cpu_time_limit_seconds": config.cpu_time_limit_seconds,
             "observer_webhook_url": config.observer_webhook_url,
+            "default_workspace_policy": config.default_workspace_policy,
+            "default_promotion_mode": config.default_promotion_mode,
+            "default_repo_provider": config.default_repo_provider,
+            "default_base_branch": config.default_base_branch,
         })
         return True
     if args.command == "create-project":
-        emit({"project": serialize_dataclass(engine.create_project(args.name, args.description, adapter_name=args.adapter_name))})
+        emit(
+            {
+                "project": serialize_dataclass(
+                    engine.create_project(
+                        args.name,
+                        args.description,
+                        adapter_name=args.adapter_name,
+                        workspace_policy=WorkspacePolicy(
+                            args.workspace_policy or config.default_workspace_policy
+                        ),
+                        promotion_mode=PromotionMode(
+                            args.promotion_mode or config.default_promotion_mode
+                        ),
+                        repo_provider=RepoProvider(args.repo_provider or config.default_repo_provider)
+                        if (args.repo_provider or config.default_repo_provider)
+                        else None,
+                        repo_name=args.repo_name or config.default_repo,
+                        base_branch=args.base_branch or config.default_base_branch,
+                    )
+                )
+            }
+        )
         return True
     if args.command == "create-task":
         required_artifacts = args.required_artifacts or ["plan", "report"]

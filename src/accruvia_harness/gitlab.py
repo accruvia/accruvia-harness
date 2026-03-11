@@ -77,3 +77,30 @@ class GitLabCLI:
 
     def reopen_issue(self, repo: str, issue_iid: str) -> None:
         self.runner(["glab", "issue", "reopen", issue_iid, "--repo", repo])
+
+    def create_merge_request(
+        self,
+        repo: str,
+        title: str,
+        body: str,
+        source_branch: str,
+        target_branch: str,
+    ) -> str | None:
+        raw = self.runner(
+            [
+                "glab",
+                "mr",
+                "create",
+                "--repo",
+                repo,
+                "--title",
+                title,
+                "--description",
+                body,
+                "--source-branch",
+                source_branch,
+                "--target-branch",
+                target_branch,
+            ]
+        )
+        return raw.strip() or None

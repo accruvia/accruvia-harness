@@ -6,6 +6,7 @@ from dataclasses import asdict
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
+from .domain import PromotionMode, RepoProvider, WorkspacePolicy
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,10 @@ class HarnessConfig:
     memory_limit_mb: int = 1024
     cpu_time_limit_seconds: int = 300
     observer_webhook_url: str | None = None
+    default_workspace_policy: str = WorkspacePolicy.ISOLATED_REQUIRED.value
+    default_promotion_mode: str = PromotionMode.BRANCH_AND_PR.value
+    default_repo_provider: str | None = RepoProvider.GITHUB.value
+    default_base_branch: str = "main"
 
     def to_payload(self) -> dict[str, object]:
         payload = asdict(self)
@@ -137,6 +142,12 @@ class HarnessConfig:
                 if payload.get("observer_webhook_url") is not None
                 else None
             ),
+            default_workspace_policy=str(payload.get("default_workspace_policy", WorkspacePolicy.ISOLATED_REQUIRED.value)),
+            default_promotion_mode=str(payload.get("default_promotion_mode", PromotionMode.BRANCH_AND_PR.value)),
+            default_repo_provider=(
+                str(payload["default_repo_provider"]) if payload.get("default_repo_provider") is not None else None
+            ),
+            default_base_branch=str(payload.get("default_base_branch", "main")),
         )
 
     @classmethod
@@ -216,4 +227,12 @@ class HarnessConfig:
             memory_limit_mb=_env_int("ACCRUVIA_MEMORY_LIMIT_MB", 1024),
             cpu_time_limit_seconds=_env_int("ACCRUVIA_CPU_TIME_LIMIT_SECONDS", 300),
             observer_webhook_url=os.environ.get("ACCRUVIA_OBSERVER_WEBHOOK_URL"),
+            default_workspace_policy=os.environ.get(
+                "ACCRUVIA_DEFAULT_WORKSPACE_POLICY", WorkspacePolicy.ISOLATED_REQUIRED.value
+            ),
+            default_promotion_mode=os.environ.get(
+                "ACCRUVIA_DEFAULT_PROMOTION_MODE", PromotionMode.BRANCH_AND_PR.value
+            ),
+            default_repo_provider=os.environ.get("ACCRUVIA_DEFAULT_REPO_PROVIDER", RepoProvider.GITHUB.value),
+            default_base_branch=os.environ.get("ACCRUVIA_DEFAULT_BASE_BRANCH", "main"),
         )

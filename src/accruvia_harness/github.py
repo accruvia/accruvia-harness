@@ -75,3 +75,23 @@ class GitHubCLI:
 
     def reopen_issue(self, repo: str, issue_number: str) -> None:
         self.runner(["gh", "issue", "reopen", issue_number, "--repo", repo])
+
+    def create_pull_request(self, repo: str, title: str, body: str, head: str, base: str) -> str | None:
+        raw = self.runner(
+            [
+                "gh",
+                "pr",
+                "create",
+                "--repo",
+                repo,
+                "--title",
+                title,
+                "--body",
+                body,
+                "--head",
+                head,
+                "--base",
+                base,
+            ]
+        )
+        return raw.strip() or None

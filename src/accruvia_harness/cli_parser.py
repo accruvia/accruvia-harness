@@ -19,6 +19,11 @@ def build_parser() -> argparse.ArgumentParser:
     create_project.add_argument("name")
     create_project.add_argument("description")
     create_project.add_argument("--adapter-name", default="generic")
+    create_project.add_argument("--workspace-policy", choices=["isolated_required", "isolated_preferred", "shared_allowed"])
+    create_project.add_argument("--promotion-mode", choices=["direct_main", "branch_only", "branch_and_pr"])
+    create_project.add_argument("--repo-provider", choices=["github", "gitlab"])
+    create_project.add_argument("--repo-name")
+    create_project.add_argument("--base-branch")
 
     create_task = subparsers.add_parser("create-task", help="Create a task.")
     create_task.add_argument("project_id")

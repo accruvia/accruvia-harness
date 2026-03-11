@@ -38,6 +38,7 @@ class GenericProjectAdapter:
         )
         return ProjectWorkspace(
             project_root=workspace_root,
+            workspace_mode="ephemeral_dir",
             metadata_files=[manifest_path],
             environment={
                 "ACCRUVIA_PROJECT_WORKSPACE": str(workspace_root),

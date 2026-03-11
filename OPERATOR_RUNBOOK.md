@@ -65,6 +65,36 @@ To inspect current leases:
 PYTHONPATH=src python3 -m accruvia_harness status
 ```
 
+## Workspace Safety Policy
+
+Workspace isolation is now an explicit project policy.
+
+- `isolated_required`: refuse adapters that point at a shared repo checkout
+- `isolated_preferred`: allow execution but do not require isolation
+- `shared_allowed`: permit shared-repo execution
+
+For autonomous code work, the default should stay `isolated_required`.
+
+Reason:
+
+- blocked or failed runs must not pollute the main repo
+- parallel tasks need isolated filesystem state
+- promotion should happen from isolated results back into the real branch, not by mutating the live checkout in place
+
+## Promotion Delivery Policy
+
+Approved isolated work can be delivered in one of three modes:
+
+- `direct_main`
+- `branch_only`
+- `branch_and_pr`
+
+Recommended default:
+
+- `branch_and_pr`
+
+Use `direct_main` only after a project has proven it can operate safely without routine manual rescue.
+
 ## Generated State
 
 Generated state lives under `.accruvia-harness/` and should not be committed:

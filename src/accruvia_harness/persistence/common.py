@@ -14,11 +14,14 @@ from ..domain import (
     PromotionRecord,
     PromotionStatus,
     Project,
+    PromotionMode,
     Run,
+    RepoProvider,
     RunStatus,
     Task,
     TaskLease,
     TaskStatus,
+    WorkspacePolicy,
 )
 
 logger = logging.getLogger(__name__)
@@ -85,6 +88,15 @@ def project_from_row(row: sqlite3.Row) -> Project:
         name=row["name"],
         description=row["description"],
         adapter_name=row["adapter_name"],
+        workspace_policy=WorkspacePolicy(
+            row["workspace_policy"] if "workspace_policy" in row.keys() else WorkspacePolicy.ISOLATED_REQUIRED.value
+        ),
+        promotion_mode=PromotionMode(
+            row["promotion_mode"] if "promotion_mode" in row.keys() else PromotionMode.BRANCH_AND_PR.value
+        ),
+        repo_provider=RepoProvider(row["repo_provider"]) if "repo_provider" in row.keys() and row["repo_provider"] else None,
+        repo_name=row["repo_name"] if "repo_name" in row.keys() else None,
+        base_branch=row["base_branch"] if "base_branch" in row.keys() else "main",
         max_concurrent_tasks=int(row["max_concurrent_tasks"]) if "max_concurrent_tasks" in row.keys() else 0,
         created_at=parse_dt(row["created_at"]),
     )
