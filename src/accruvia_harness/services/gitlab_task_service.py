@@ -2,14 +2,27 @@ from __future__ import annotations
 
 from ..domain import Task
 from ..gitlab import GitLabCLI
+from ..issues import ExternalIssue
 from ..store import SQLiteHarnessStore
+from .issue_policy import IssueStatePolicy
 from .issue_service import IssueTaskService
 from .task_service import TaskService
 
 
 class GitLabTaskService(IssueTaskService):
-    def __init__(self, task_service: TaskService, store: SQLiteHarnessStore) -> None:
-        super().__init__(task_service=task_service, store=store, ref_type="gitlab_issue", event_prefix="gitlab")
+    def __init__(
+        self,
+        task_service: TaskService,
+        store: SQLiteHarnessStore,
+        state_policy: IssueStatePolicy | None = None,
+    ) -> None:
+        super().__init__(
+            task_service=task_service,
+            store=store,
+            ref_type="gitlab_issue",
+            event_prefix="gitlab",
+            state_policy=state_policy,
+        )
 
     def import_issue_task(
         self,
@@ -75,8 +88,8 @@ class GitLabTaskService(IssueTaskService):
         task_id: str,
         repo: str,
         gitlab: GitLabCLI,
-        comment: str,
-        close: bool = False,
+        comment: str | None = None,
+        close: bool | None = None,
     ) -> Task:
         return self.report_task(
             task_id=task_id,
@@ -84,9 +97,14 @@ class GitLabTaskService(IssueTaskService):
             provider=gitlab,
             comment=comment,
             close=close,
+            dedupe=True,
         )
 
-    def _direct_issue(self, issue_id: str, title: str, objective: str):
-        from .issue_service import ExternalIssue
+    def sync_gitlab_issue_state(self, task_id: str, repo: str, gitlab: GitLabCLI) -> Task:
+        return self.sync_issue_state(task_id=task_id, repo=repo, provider=gitlab)
 
+    def sync_gitlab_issue_metadata(self, task_id: str, repo: str, gitlab: GitLabCLI) -> Task:
+        return self.sync_issue_metadata(task_id=task_id, repo=repo, provider=gitlab)
+
+    def _direct_issue(self, issue_id: str, title: str, objective: str):
         return ExternalIssue(issue_id=issue_id, title=title, body=objective, state="opened", url="")

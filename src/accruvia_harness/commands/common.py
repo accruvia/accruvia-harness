@@ -16,6 +16,7 @@ from ..store import SQLiteHarnessStore
 from ..telemetry import TelemetrySink
 from ..validation import build_validator_registry
 from ..llm import build_llm_router
+from ..services.issue_policy import IssueStatePolicy
 from ..workers import build_worker_from_config
 
 
@@ -39,12 +40,20 @@ def build_context(config: HarnessConfig) -> CLIContext:
     store = SQLiteHarnessStore(config.db_path)
     store.initialize()
     telemetry = TelemetrySink(config.telemetry_dir)
+    issue_policy = IssueStatePolicy(
+        close_on_completed=config.issue_close_on_completed,
+        close_only_on_approved_promotion=config.issue_close_only_on_approved_promotion,
+        reopen_on_pending=config.issue_reopen_on_pending,
+        reopen_on_active=config.issue_reopen_on_active,
+        reopen_on_failed=config.issue_reopen_on_failed,
+    )
     engine = HarnessEngine(
         store=store,
         workspace_root=config.workspace_root,
         project_adapter_registry=build_project_adapter_registry(config.project_adapter_modules),
         validator_registry=build_validator_registry(config.validator_modules),
         telemetry=telemetry,
+        issue_state_policy=issue_policy,
     )
     engine.set_llm_router(build_llm_router(config))
     engine.set_worker(build_worker_from_config(config))

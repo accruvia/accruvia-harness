@@ -35,6 +35,7 @@ class SQLiteHarnessStoreTests(unittest.TestCase):
             source_run_id="run_source",
             external_ref_type="gitlab_issue",
             external_ref_id="456",
+            external_ref_metadata={"labels": ["bug"], "milestone": "MVP", "assignees": ["sanaani"]},
             validation_profile="python",
             strategy="baseline",
             max_attempts=5,
@@ -50,6 +51,7 @@ class SQLiteHarnessStoreTests(unittest.TestCase):
         self.assertEqual("run_source", loaded.source_run_id)
         self.assertEqual("gitlab_issue", loaded.external_ref_type)
         self.assertEqual("456", loaded.external_ref_id)
+        self.assertEqual(["bug"], loaded.external_ref_metadata["labels"])
         self.assertEqual("python", loaded.validation_profile)
         self.assertEqual("baseline", loaded.strategy)
         self.assertEqual(5, loaded.max_attempts)
@@ -125,3 +127,23 @@ class SQLiteHarnessStoreTests(unittest.TestCase):
         self.store.release_task_lease(task.id, "worker-a")
         third = self.store.acquire_task_lease("worker-b", lease_seconds=60)
         self.assertEqual(task.id, third.id if third else None)
+
+    def test_update_task_external_metadata_round_trip(self) -> None:
+        project = Project(id=new_id("project"), name="accruvia", description="Harness work")
+        self.store.create_project(project)
+        task = Task(
+            id=new_id("task"),
+            project_id=project.id,
+            title="Metadata sync",
+            objective="Persist issue metadata",
+        )
+        self.store.create_task(task)
+
+        self.store.update_task_external_metadata(
+            task.id,
+            {"labels": ["bug", "triage"], "milestone": "MVP", "assignees": ["sanaani"]},
+        )
+
+        loaded = self.store.get_task(task.id)
+        assert loaded is not None
+        self.assertEqual(["bug", "triage"], loaded.external_ref_metadata["labels"])

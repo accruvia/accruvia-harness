@@ -11,6 +11,18 @@ class ExternalIssue:
     body: str
     state: str
     url: str
+    labels: list[str] | None = None
+    milestone: str | None = None
+    assignees: list[str] | None = None
+
+    def metadata(self) -> dict[str, object]:
+        return {
+            "labels": list(self.labels or []),
+            "milestone": self.milestone,
+            "assignees": list(self.assignees or []),
+            "url": self.url,
+            "state": self.state,
+        }
 
 
 class IssueProvider(Protocol):

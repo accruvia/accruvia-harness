@@ -11,32 +11,47 @@ def _default_runner(args: list[str]) -> str:
     return completed.stdout
 
 
+def _issue_from_payload(payload: dict[str, object]) -> ExternalIssue:
+    labels = [
+        str(item.get("name"))
+        for item in payload.get("labels", [])
+        if isinstance(item, dict) and item.get("name")
+    ]
+    milestone = None
+    if isinstance(payload.get("milestone"), dict):
+        title = payload["milestone"].get("title")
+        if title:
+            milestone = str(title)
+    assignees = [
+        str(item.get("login"))
+        for item in payload.get("assignees", [])
+        if isinstance(item, dict) and item.get("login")
+    ]
+    return ExternalIssue(
+        issue_id=str(payload["number"]),
+        title=str(payload["title"]),
+        body=str(payload.get("body") or ""),
+        state=str(payload["state"]),
+        url=str(payload.get("html_url") or ""),
+        labels=labels,
+        milestone=milestone,
+        assignees=assignees,
+    )
+
+
 class GitHubCLI:
     def __init__(self, runner: Callable[[list[str]], str] | None = None) -> None:
         self.runner = runner or _default_runner
 
     def fetch_issue(self, repo: str, issue_number: str) -> ExternalIssue:
         raw = self.runner(["gh", "api", f"repos/{repo}/issues/{issue_number}"])
-        payload = json.loads(raw)
-        return ExternalIssue(
-            issue_id=str(payload["number"]),
-            title=payload["title"],
-            body=payload.get("body") or "",
-            state=payload["state"],
-            url=payload.get("html_url") or "",
-        )
+        return _issue_from_payload(json.loads(raw))
 
     def list_open_issues(self, repo: str, limit: int) -> list[ExternalIssue]:
         raw = self.runner(["gh", "api", f"repos/{repo}/issues?state=open&per_page={limit}"])
         payload = json.loads(raw)
         return [
-            ExternalIssue(
-                issue_id=str(item["number"]),
-                title=item["title"],
-                body=item.get("body") or "",
-                state=item["state"],
-                url=item.get("html_url") or "",
-            )
+            _issue_from_payload(item)
             for item in payload
             if "pull_request" not in item
         ]

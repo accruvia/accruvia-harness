@@ -144,6 +144,13 @@ MIGRATIONS: list[Migration] = [
         ALTER TABLE projects ADD COLUMN adapter_name TEXT NOT NULL DEFAULT 'generic';
         """,
     ),
+    Migration(
+        version=6,
+        name="task_external_ref_metadata",
+        sql="""
+        ALTER TABLE tasks ADD COLUMN external_ref_metadata_json TEXT NOT NULL DEFAULT '{}';
+        """,
+    ),
 ]
 
 

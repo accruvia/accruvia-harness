@@ -11,6 +11,30 @@ def _default_runner(args: list[str]) -> str:
     return completed.stdout
 
 
+def _issue_from_payload(payload: dict[str, object]) -> ExternalIssue:
+    milestone = None
+    if isinstance(payload.get("milestone"), dict):
+        title = payload["milestone"].get("title")
+        if title:
+            milestone = str(title)
+    assignees = [
+        str(item.get("username") or item.get("name"))
+        for item in payload.get("assignees", [])
+        if isinstance(item, dict) and (item.get("username") or item.get("name"))
+    ]
+    labels = [str(item) for item in payload.get("labels", [])]
+    return ExternalIssue(
+        issue_id=str(payload["iid"]),
+        title=str(payload["title"]),
+        body=str(payload.get("description") or ""),
+        state=str(payload["state"]),
+        url=str(payload.get("web_url") or ""),
+        labels=labels,
+        milestone=milestone,
+        assignees=assignees,
+    )
+
+
 class GitLabCLI:
     def __init__(self, runner: Callable[[list[str]], str] | None = None) -> None:
         self.runner = runner or _default_runner
@@ -18,14 +42,7 @@ class GitLabCLI:
     def fetch_issue(self, repo: str, issue_iid: str) -> ExternalIssue:
         encoded_repo = quote(repo, safe="")
         raw = self.runner(["glab", "api", f"projects/{encoded_repo}/issues/{issue_iid}"])
-        payload = json.loads(raw)
-        return ExternalIssue(
-            issue_id=str(payload["iid"]),
-            title=payload["title"],
-            body=payload.get("description") or "",
-            state=payload["state"],
-            url=payload.get("web_url") or "",
-        )
+        return _issue_from_payload(json.loads(raw))
 
     def list_open_issues(self, repo: str, limit: int) -> list[ExternalIssue]:
         encoded_repo = quote(repo, safe="")
@@ -34,13 +51,7 @@ class GitLabCLI:
         )
         payload = json.loads(raw)
         return [
-            ExternalIssue(
-                issue_id=str(item["iid"]),
-                title=item["title"],
-                body=item.get("description") or "",
-                state=item["state"],
-                url=item.get("web_url") or "",
-            )
+            _issue_from_payload(item)
             for item in payload
         ]
 
@@ -51,3 +62,6 @@ class GitLabCLI:
 
     def close_issue(self, repo: str, issue_iid: str) -> None:
         self.runner(["glab", "issue", "close", issue_iid, "--repo", repo])
+
+    def reopen_issue(self, repo: str, issue_iid: str) -> None:
+        self.runner(["glab", "issue", "reopen", issue_iid, "--repo", repo])

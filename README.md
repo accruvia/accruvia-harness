@@ -113,7 +113,7 @@ This repo now contains a minimal durable harness foundation:
 - queue selection for pending tasks by priority
 - task leasing for safe queue arbitration
 - task lineage via `parent_task_id` and `source_run_id`
-- a GitHub adapter for importing issues and reporting results back out
+- GitHub and GitLab adapters for importing issues and reporting results back out
 - a project adapter registry for preparing per-run workspaces without hardcoding private repo logic
 - a validator registry for built-in and externally supplied promotion validators
 - worker backends for `local`, `shell`, `agent`, and routed `llm`
@@ -137,9 +137,15 @@ PYTHONPATH=src python3 -m accruvia_harness create-project accruvia "Accruvia har
 PYTHONPATH=src python3 -m accruvia_harness create-task <project_id> "First task" "Build the first durable loop" --priority 200 --validation-profile generic --external-ref-type github_issue --external-ref-id 456 --strategy baseline --required-artifact plan --required-artifact report
 PYTHONPATH=src python3 -m accruvia_harness import-issue <project_id> 456 "First task" "Build the first durable loop" --priority 200 --validation-profile generic --strategy baseline --required-artifact plan --required-artifact report
 PYTHONPATH=src python3 -m accruvia_harness import-github-issue <project_id> accruvia/accruvia 456 --priority 200 --validation-profile generic --strategy baseline --required-artifact plan --required-artifact report
+PYTHONPATH=src python3 -m accruvia_harness import-gitlab-issue <project_id> group/project 456 --priority 200 --validation-profile generic --strategy baseline --required-artifact plan --required-artifact report
 PYTHONPATH=src python3 -m accruvia_harness sync-github-open <project_id> accruvia/accruvia --limit 20 --priority 200 --validation-profile generic --strategy baseline --required-artifact plan --required-artifact report
-PYTHONPATH=src python3 -m accruvia_harness report-github <task_id> accruvia/accruvia --comment "Harness completed this task." --close
+PYTHONPATH=src python3 -m accruvia_harness sync-gitlab-open <project_id> group/project --limit 20 --priority 200 --validation-profile generic --strategy baseline --required-artifact plan --required-artifact report
+PYTHONPATH=src python3 -m accruvia_harness report-github <task_id> accruvia/accruvia
+PYTHONPATH=src python3 -m accruvia_harness report-gitlab <task_id> group/project
 PYTHONPATH=src python3 -m accruvia_harness sync-github-state <task_id> accruvia/accruvia
+PYTHONPATH=src python3 -m accruvia_harness sync-gitlab-state <task_id> group/project
+PYTHONPATH=src python3 -m accruvia_harness sync-github-metadata <task_id> accruvia/accruvia
+PYTHONPATH=src python3 -m accruvia_harness sync-gitlab-metadata <task_id> group/project
 PYTHONPATH=src python3 -m accruvia_harness run-once <task_id>
 PYTHONPATH=src python3 -m accruvia_harness run-runtime <task_id>
 PYTHONPATH=src python3 -m accruvia_harness run-until-stable <task_id>
@@ -226,6 +232,25 @@ def register_validators(registry) -> None:
 ```
 
 They can register additional validators for one or more validation profiles without editing the harness source.
+
+### Issue Sync Policy
+
+Issue comments and issue state are now policy-driven for both GitHub and GitLab.
+
+- report commands can generate a structured status comment from canonical harness state
+- duplicate reports are deduped across both providers
+- close/reopen behavior is configurable
+- labels, milestone, assignees, and issue URL/state are synced into task metadata
+
+Relevant environment variables:
+
+```bash
+export ACCRUVIA_ISSUE_CLOSE_ON_COMPLETED=true
+export ACCRUVIA_ISSUE_CLOSE_ONLY_ON_APPROVED_PROMOTION=false
+export ACCRUVIA_ISSUE_REOPEN_ON_PENDING=true
+export ACCRUVIA_ISSUE_REOPEN_ON_ACTIVE=true
+export ACCRUVIA_ISSUE_REOPEN_ON_FAILED=true
+```
 
 ### Project Adapters
 

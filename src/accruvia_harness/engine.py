@@ -7,6 +7,7 @@ from .gitlab import GitLabCLI
 from .llm import LLMRouter
 from .policy import DefaultAnalyzer, DefaultDecider, DefaultPlanner
 from .project_adapters import ProjectAdapterRegistry, build_project_adapter_registry
+from .services.issue_policy import IssueStatePolicy
 from .services import (
     GitHubTaskService,
     GitLabTaskService,
@@ -32,6 +33,7 @@ class HarnessEngine:
         llm_router: LLMRouter | None = None,
         project_adapter_registry: ProjectAdapterRegistry | None = None,
         validator_registry: PromotionValidatorRegistry | None = None,
+        issue_state_policy: IssueStatePolicy | None = None,
         telemetry=None,
     ) -> None:
         self.store = store
@@ -44,6 +46,7 @@ class HarnessEngine:
         self.llm_router = llm_router
         self.project_adapter_registry = project_adapter_registry or build_project_adapter_registry()
         self.validator_registry = validator_registry or build_validator_registry()
+        self.issue_state_policy = issue_state_policy or IssueStatePolicy()
         self.telemetry = telemetry
 
         self.tasks = TaskService(self.store)
@@ -61,8 +64,8 @@ class HarnessEngine:
             telemetry=self.telemetry,
         )
         self.queue = QueueService(self.store, self.runs)
-        self.github_tasks = GitHubTaskService(self.tasks, self.store)
-        self.gitlab_tasks = GitLabTaskService(self.tasks, self.store)
+        self.github_tasks = GitHubTaskService(self.tasks, self.store, state_policy=self.issue_state_policy)
+        self.gitlab_tasks = GitLabTaskService(self.tasks, self.store, state_policy=self.issue_state_policy)
         self.promotions = PromotionService(
             self.store,
             self.tasks,
@@ -255,8 +258,8 @@ class HarnessEngine:
         task_id: str,
         repo: str,
         gitlab: GitLabCLI,
-        comment: str,
-        close: bool = False,
+        comment: str | None = None,
+        close: bool | None = None,
     ):
         return self.gitlab_tasks.report_task_to_gitlab(
             task_id=task_id,
@@ -295,8 +298,8 @@ class HarnessEngine:
         task_id: str,
         repo: str,
         github: GitHubCLI,
-        comment: str,
-        close: bool = False,
+        comment: str | None = None,
+        close: bool | None = None,
     ):
         return self.github_tasks.report_task_to_github(
             task_id=task_id,
@@ -313,6 +316,30 @@ class HarnessEngine:
         github: GitHubCLI,
     ):
         return self.github_tasks.sync_github_issue_state(task_id=task_id, repo=repo, github=github)
+
+    def sync_gitlab_issue_state(
+        self,
+        task_id: str,
+        repo: str,
+        gitlab: GitLabCLI,
+    ):
+        return self.gitlab_tasks.sync_gitlab_issue_state(task_id=task_id, repo=repo, gitlab=gitlab)
+
+    def sync_github_issue_metadata(
+        self,
+        task_id: str,
+        repo: str,
+        github: GitHubCLI,
+    ):
+        return self.github_tasks.sync_github_issue_metadata(task_id=task_id, repo=repo, github=github)
+
+    def sync_gitlab_issue_metadata(
+        self,
+        task_id: str,
+        repo: str,
+        gitlab: GitLabCLI,
+    ):
+        return self.gitlab_tasks.sync_gitlab_issue_metadata(task_id=task_id, repo=repo, gitlab=gitlab)
 
     def create_follow_on_task(
         self,

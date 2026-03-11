@@ -33,11 +33,14 @@ PYTHONPATH=src python3 -m accruvia_harness events
 
 ```bash
 PYTHONPATH=src python3 -m accruvia_harness sync-github-open <project_id> <repo>
-PYTHONPATH=src python3 -m accruvia_harness report-github <task_id> <repo> --comment "..." --close
+PYTHONPATH=src python3 -m accruvia_harness report-github <task_id> <repo>
 PYTHONPATH=src python3 -m accruvia_harness sync-github-state <task_id> <repo>
+PYTHONPATH=src python3 -m accruvia_harness sync-github-metadata <task_id> <repo>
 PYTHONPATH=src python3 -m accruvia_harness sync-gitlab-open <project_id> <repo>
 PYTHONPATH=src python3 -m accruvia_harness process-next --worker-id worker-a --lease-seconds 300
-PYTHONPATH=src python3 -m accruvia_harness report-gitlab <task_id> <repo> --comment "..." --close
+PYTHONPATH=src python3 -m accruvia_harness report-gitlab <task_id> <repo>
+PYTHONPATH=src python3 -m accruvia_harness sync-gitlab-state <task_id> <repo>
+PYTHONPATH=src python3 -m accruvia_harness sync-gitlab-metadata <task_id> <repo>
 ```
 
 ## Queue Arbitration

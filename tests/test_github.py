@@ -8,6 +8,7 @@ from pathlib import Path
 from accruvia_harness.domain import Project, TaskStatus, new_id
 from accruvia_harness.engine import HarnessEngine
 from accruvia_harness.github import GitHubCLI
+from accruvia_harness.services.issue_policy import IssueStatePolicy
 from accruvia_harness.store import SQLiteHarnessStore
 
 
@@ -25,6 +26,9 @@ class FakeGhRunner:
                     "body": "Repair missing artifact behavior",
                     "state": "open",
                     "html_url": "https://github.com/accruvia/accruvia/issues/456",
+                    "labels": [{"name": "bug"}, {"name": "runner"}],
+                    "milestone": {"title": "MVP"},
+                    "assignees": [{"login": "sanaani"}],
                 }
             )
         if args[:3] == ["gh", "api", "repos/accruvia/accruvia/issues?state=open&per_page=2"]:
@@ -36,6 +40,9 @@ class FakeGhRunner:
                         "body": "Repair missing artifact behavior",
                         "state": "open",
                         "html_url": "https://github.com/accruvia/accruvia/issues/456",
+                        "labels": [{"name": "bug"}],
+                        "milestone": {"title": "MVP"},
+                        "assignees": [{"login": "sanaani"}],
                     },
                     {
                         "number": 457,
@@ -43,6 +50,9 @@ class FakeGhRunner:
                         "body": "Tighten promotion policy",
                         "state": "open",
                         "html_url": "https://github.com/accruvia/accruvia/issues/457",
+                        "labels": [{"name": "promotion"}],
+                        "milestone": None,
+                        "assignees": [],
                     },
                 ]
             )
@@ -54,6 +64,9 @@ class FakeGhRunner:
                     "body": "Tighten promotion policy",
                     "state": "closed",
                     "html_url": "https://github.com/accruvia/accruvia/issues/457",
+                    "labels": [{"name": "promotion"}],
+                    "milestone": None,
+                    "assignees": [],
                 }
             )
         return ""
@@ -86,6 +99,7 @@ class GitHubIntegrationTests(unittest.TestCase):
         self.assertEqual("github_issue", task.external_ref_type)
         self.assertEqual("456", task.external_ref_id)
         self.assertEqual("Fix runner", task.title)
+        self.assertEqual(["bug", "runner"], task.external_ref_metadata["labels"])
 
     def test_sync_github_open_issues_is_idempotent(self) -> None:
         first = self.engine.sync_github_open_issues(
@@ -122,18 +136,17 @@ class GitHubIntegrationTests(unittest.TestCase):
             task_id=task.id,
             repo="accruvia/accruvia",
             github=self.github,
-            comment="Harness completed the task.",
             close=True,
         )
         self.engine.report_task_to_github(
             task_id=task.id,
             repo="accruvia/accruvia",
             github=self.github,
-            comment="Harness completed the task.",
             close=True,
         )
         comment_calls = [call for call in self.runner.calls if call[:3] == ["gh", "issue", "comment"]]
         self.assertEqual(1, len(comment_calls))
+        self.assertIn("Task: Fix runner", comment_calls[0][-1])
 
     def test_sync_github_issue_state_reopens_when_task_not_completed(self) -> None:
         task = self.engine.import_github_issue(
@@ -147,3 +160,29 @@ class GitHubIntegrationTests(unittest.TestCase):
             ["gh", "issue", "reopen", "457", "--repo", "accruvia/accruvia"],
             self.runner.calls,
         )
+
+    def test_sync_github_issue_metadata_updates_task_metadata(self) -> None:
+        task = self.engine.import_github_issue(
+            project_id=self.project.id,
+            repo="accruvia/accruvia",
+            issue=self.github.fetch_issue("accruvia/accruvia", "456"),
+        )
+        updated = self.engine.sync_github_issue_metadata(task.id, "accruvia/accruvia", self.github)
+        self.assertEqual("MVP", updated.external_ref_metadata["milestone"])
+        self.assertEqual(["sanaani"], updated.external_ref_metadata["assignees"])
+
+    def test_completed_task_can_stay_open_until_promotion_approved(self) -> None:
+        engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-policy",
+            issue_state_policy=IssueStatePolicy(close_only_on_approved_promotion=True),
+        )
+        task = engine.import_github_issue(
+            project_id=self.project.id,
+            repo="accruvia/accruvia",
+            issue=self.github.fetch_issue("accruvia/accruvia", "456"),
+        )
+        self.store.update_task_status(task.id, TaskStatus.COMPLETED)
+        engine.sync_github_issue_state(task.id, "accruvia/accruvia", self.github)
+        close_calls = [call for call in self.runner.calls if call[:3] == ["gh", "issue", "close"]]
+        self.assertEqual([], close_calls)

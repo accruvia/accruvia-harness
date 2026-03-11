@@ -83,8 +83,12 @@ def handle_issue_command(args, ctx: CLIContext) -> bool:
         task = engine.report_task_to_github(args.task_id, args.repo, ctx.github, args.comment, args.close) if args.command == "report-github" else engine.report_task_to_gitlab(args.task_id, args.repo, ctx.gitlab, args.comment, args.close)
         emit({"task": serialize_dataclass(task), "reported": True, "closed": args.close})
         return True
-    if args.command == "sync-github-state":
-        task = engine.sync_github_issue_state(args.task_id, args.repo, ctx.github)
+    if args.command in {"sync-github-state", "sync-gitlab-state"}:
+        task = engine.sync_github_issue_state(args.task_id, args.repo, ctx.github) if args.command == "sync-github-state" else engine.sync_gitlab_issue_state(args.task_id, args.repo, ctx.gitlab)
+        emit({"task": serialize_dataclass(task), "synced": True})
+        return True
+    if args.command in {"sync-github-metadata", "sync-gitlab-metadata"}:
+        task = engine.sync_github_issue_metadata(args.task_id, args.repo, ctx.github) if args.command == "sync-github-metadata" else engine.sync_gitlab_issue_metadata(args.task_id, args.repo, ctx.gitlab)
         emit({"task": serialize_dataclass(task), "synced": True})
         return True
     return False

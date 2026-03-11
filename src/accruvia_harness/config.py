@@ -28,6 +28,11 @@ class HarnessConfig:
     project_adapter_modules: tuple[str, ...] = field(default_factory=tuple)
     validator_modules: tuple[str, ...] = field(default_factory=tuple)
     telemetry_dir: Path = Path(".accruvia-harness/telemetry")
+    issue_close_on_completed: bool = True
+    issue_close_only_on_approved_promotion: bool = False
+    issue_reopen_on_pending: bool = True
+    issue_reopen_on_active: bool = True
+    issue_reopen_on_failed: bool = True
     timeout_ema_alpha: float = 0.5
     timeout_min_seconds: int = 30
     timeout_max_seconds: int = 1800
@@ -83,6 +88,11 @@ class HarnessConfig:
                 for item in os.environ.get("ACCRUVIA_VALIDATOR_MODULES", "").split(",")
                 if item.strip()
             ),
+            issue_close_on_completed=os.environ.get("ACCRUVIA_ISSUE_CLOSE_ON_COMPLETED", "true").lower() == "true",
+            issue_close_only_on_approved_promotion=os.environ.get("ACCRUVIA_ISSUE_CLOSE_ONLY_ON_APPROVED_PROMOTION", "false").lower() == "true",
+            issue_reopen_on_pending=os.environ.get("ACCRUVIA_ISSUE_REOPEN_ON_PENDING", "true").lower() == "true",
+            issue_reopen_on_active=os.environ.get("ACCRUVIA_ISSUE_REOPEN_ON_ACTIVE", "true").lower() == "true",
+            issue_reopen_on_failed=os.environ.get("ACCRUVIA_ISSUE_REOPEN_ON_FAILED", "true").lower() == "true",
             timeout_ema_alpha=float(os.environ.get("ACCRUVIA_TIMEOUT_EMA_ALPHA", "0.5")),
             timeout_min_seconds=int(os.environ.get("ACCRUVIA_TIMEOUT_MIN_SECONDS", "30")),
             timeout_max_seconds=int(os.environ.get("ACCRUVIA_TIMEOUT_MAX_SECONDS", "1800")),

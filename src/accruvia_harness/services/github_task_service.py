@@ -3,13 +3,25 @@ from __future__ import annotations
 from ..domain import Task
 from ..github import GitHubCLI
 from ..store import SQLiteHarnessStore
+from .issue_policy import IssueStatePolicy
 from .issue_service import IssueTaskService
 from .task_service import TaskService
 
 
 class GitHubTaskService(IssueTaskService):
-    def __init__(self, task_service: TaskService, store: SQLiteHarnessStore) -> None:
-        super().__init__(task_service=task_service, store=store, ref_type="github_issue", event_prefix="github")
+    def __init__(
+        self,
+        task_service: TaskService,
+        store: SQLiteHarnessStore,
+        state_policy: IssueStatePolicy | None = None,
+    ) -> None:
+        super().__init__(
+            task_service=task_service,
+            store=store,
+            ref_type="github_issue",
+            event_prefix="github",
+            state_policy=state_policy,
+        )
 
     def import_github_issue(
         self,
@@ -52,8 +64,8 @@ class GitHubTaskService(IssueTaskService):
         task_id: str,
         repo: str,
         github: GitHubCLI,
-        comment: str,
-        close: bool = False,
+        comment: str | None = None,
+        close: bool | None = None,
     ) -> Task:
         return self.report_task(
             task_id=task_id,
@@ -66,3 +78,6 @@ class GitHubTaskService(IssueTaskService):
 
     def sync_github_issue_state(self, task_id: str, repo: str, github: GitHubCLI) -> Task:
         return self.sync_issue_state(task_id=task_id, repo=repo, provider=github)
+
+    def sync_github_issue_metadata(self, task_id: str, repo: str, github: GitHubCLI) -> Task:
+        return self.sync_issue_metadata(task_id=task_id, repo=repo, provider=github)
