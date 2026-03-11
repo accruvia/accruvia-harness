@@ -102,6 +102,7 @@ class CommandWorker:
             "ACCRUVIA_RUN_SUMMARY": run.summary,
             "ACCRUVIA_RUN_DIR": str(run_dir),
             "ACCRUVIA_PROJECT_WORKSPACE": str(project_workspace),
+            "ACCRUVIA_TASK_SCOPE_JSON": json.dumps(task.scope, sort_keys=True),
         }
         timeout_seconds = None
         if self.timeout_policy is not None:

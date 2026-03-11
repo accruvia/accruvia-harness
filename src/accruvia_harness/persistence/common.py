@@ -55,6 +55,7 @@ def task_from_row(row: sqlite3.Row) -> Task:
         external_ref_id=row["external_ref_id"],
         external_ref_metadata=_safe_json_loads(row["external_ref_metadata_json"], {}, column="tasks.external_ref_metadata_json"),
         validation_profile=row["validation_profile"],
+        scope=_safe_json_loads(row["scope_json"], {}, column="tasks.scope_json"),
         strategy=row["strategy"],
         max_attempts=int(row["max_attempts"]),
         max_branches=int(row["max_branches"]) if "max_branches" in row.keys() else 1,

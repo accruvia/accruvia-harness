@@ -92,6 +92,7 @@ class Task:
     external_ref_id: str | None = None
     external_ref_metadata: dict[str, Any] = field(default_factory=dict)
     validation_profile: str = "generic"
+    scope: dict[str, Any] = field(default_factory=dict)
     strategy: str = "default"
     max_attempts: int = 3
     max_branches: int = 1

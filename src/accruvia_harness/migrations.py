@@ -160,6 +160,13 @@ MIGRATIONS: list[Migration] = [
         ALTER TABLE runs ADD COLUMN branch_id TEXT;
         """,
     ),
+    Migration(
+        version=8,
+        name="task_scope",
+        sql="""
+        ALTER TABLE tasks ADD COLUMN scope_json TEXT NOT NULL DEFAULT '{}';
+        """,
+    ),
 ]
 
 

@@ -14,6 +14,15 @@ def _redact_command(value: str | None) -> str | None:
     return f"{first} [REDACTED]"
 
 
+def _task_scope_from_args(args) -> dict[str, object]:
+    scope: dict[str, object] = {}
+    if getattr(args, "allowed_paths", None):
+        scope["allowed_paths"] = list(args.allowed_paths)
+    if getattr(args, "forbidden_paths", None):
+        scope["forbidden_paths"] = list(args.forbidden_paths)
+    return scope
+
+
 def handle_core_command(args, ctx: CLIContext) -> bool:
     config = ctx.config
     store = ctx.store
@@ -60,6 +69,7 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
         return True
     if args.command == "create-task":
         required_artifacts = args.required_artifacts or ["plan", "report"]
+        scope = _task_scope_from_args(args)
         task = engine.create_task_with_policy(
             project_id=args.project_id,
             title=args.title,
@@ -70,6 +80,7 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
             external_ref_type=args.external_ref_type,
             external_ref_id=args.external_ref_id,
             validation_profile=args.validation_profile,
+            scope=scope,
             strategy=args.strategy,
             max_attempts=args.max_attempts,
             max_branches=args.max_branches,

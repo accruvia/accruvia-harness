@@ -38,10 +38,10 @@ class ProjectTaskStoreMixin:
                 INSERT INTO tasks (
                     id, project_id, title, objective, priority, parent_task_id, source_run_id,
                     external_ref_type, external_ref_id, external_ref_metadata_json,
-                    validation_profile, strategy, max_attempts, max_branches,
+                    validation_profile, scope_json, strategy, max_attempts, max_branches,
                     required_artifacts_json, status, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task.id,
@@ -55,6 +55,7 @@ class ProjectTaskStoreMixin:
                     task.external_ref_id,
                     json.dumps(task.external_ref_metadata, sort_keys=True),
                     task.validation_profile,
+                    json.dumps(task.scope, sort_keys=True),
                     task.strategy,
                     task.max_attempts,
                     task.max_branches,
@@ -68,7 +69,7 @@ class ProjectTaskStoreMixin:
     def list_tasks(self, project_id: str | None = None) -> list[Task]:
         query = """
             SELECT id, project_id, title, objective, priority, parent_task_id, source_run_id,
-                   external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile,
+                   external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile, scope_json,
                    strategy, max_attempts, max_branches, required_artifacts_json, status, created_at, updated_at
             FROM tasks
         """
@@ -86,7 +87,7 @@ class ProjectTaskStoreMixin:
             row = connection.execute(
                 """
                 SELECT id, project_id, title, objective, priority, parent_task_id, source_run_id,
-                       external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile,
+                       external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile, scope_json,
                        strategy, max_attempts, max_branches, required_artifacts_json, status, created_at, updated_at
                 FROM tasks WHERE id = ?
                 """,
@@ -99,7 +100,7 @@ class ProjectTaskStoreMixin:
             row = connection.execute(
                 """
                 SELECT id, project_id, title, objective, priority, parent_task_id, source_run_id,
-                       external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile,
+                       external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile, scope_json,
                        strategy, max_attempts, max_branches, required_artifacts_json, status, created_at, updated_at
                 FROM tasks
                 WHERE external_ref_type = ? AND external_ref_id = ?
@@ -113,7 +114,7 @@ class ProjectTaskStoreMixin:
     def next_pending_task(self, project_id: str | None = None) -> Task | None:
         query = """
             SELECT id, project_id, title, objective, priority, parent_task_id, source_run_id,
-                   external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile,
+                   external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile, scope_json,
                    strategy, max_attempts, max_branches, required_artifacts_json, status, created_at, updated_at
             FROM tasks
             WHERE status = ?
@@ -221,7 +222,7 @@ class ProjectTaskStoreMixin:
             row = connection.execute(
                 """
                 SELECT id, project_id, title, objective, priority, parent_task_id, source_run_id,
-                       external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile,
+                       external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile, scope_json,
                        strategy, max_attempts, max_branches, required_artifacts_json, status, created_at, updated_at
                 FROM tasks
                 WHERE parent_task_id = ? AND source_run_id = ?
@@ -237,7 +238,7 @@ class ProjectTaskStoreMixin:
             rows = connection.execute(
                 """
                 SELECT id, project_id, title, objective, priority, parent_task_id, source_run_id,
-                       external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile,
+                       external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile, scope_json,
                        strategy, max_attempts, max_branches, required_artifacts_json, status, created_at, updated_at
                 FROM tasks
                 WHERE parent_task_id = ?

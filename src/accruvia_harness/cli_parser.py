@@ -32,6 +32,8 @@ def build_parser() -> argparse.ArgumentParser:
     create_task.add_argument("--max-attempts", type=int, default=3)
     create_task.add_argument("--max-branches", type=int, default=1)
     create_task.add_argument("--required-artifact", action="append", dest="required_artifacts", default=None)
+    create_task.add_argument("--allowed-path", action="append", dest="allowed_paths", default=None)
+    create_task.add_argument("--forbidden-path", action="append", dest="forbidden_paths", default=None)
 
     run_once = subparsers.add_parser("run-once", help="Run one full harness cycle for a task.")
     run_once.add_argument("task_id")

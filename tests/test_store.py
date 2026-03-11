@@ -37,6 +37,7 @@ class SQLiteHarnessStoreTests(unittest.TestCase):
             external_ref_id="456",
             external_ref_metadata={"labels": ["bug"], "milestone": "MVP", "assignees": ["sanaani"]},
             validation_profile="python",
+            scope={"allowed_paths": ["src/demo.py"], "forbidden_paths": ["README.md"]},
             strategy="baseline",
             max_attempts=5,
             required_artifacts=["plan", "report", "diff"],
@@ -53,6 +54,8 @@ class SQLiteHarnessStoreTests(unittest.TestCase):
         self.assertEqual("456", loaded.external_ref_id)
         self.assertEqual(["bug"], loaded.external_ref_metadata["labels"])
         self.assertEqual("python", loaded.validation_profile)
+        self.assertEqual(["src/demo.py"], loaded.scope["allowed_paths"])
+        self.assertEqual(["README.md"], loaded.scope["forbidden_paths"])
         self.assertEqual("baseline", loaded.strategy)
         self.assertEqual(5, loaded.max_attempts)
         self.assertEqual(["plan", "report", "diff"], loaded.required_artifacts)

@@ -135,6 +135,27 @@ class CLITests(unittest.TestCase):
         self.assertEqual("idle", result["exit_reason"])
         self.assertEqual(2, summary["metrics"]["tasks_by_status"]["completed"])
 
+    def test_create_task_accepts_explicit_scope_metadata(self) -> None:
+        project = self.run_cli("create-project", "scoped", "scoped project")["project"]
+        task = self.run_cli(
+            "create-task",
+            project["id"],
+            "Scoped",
+            "Scoped objective",
+            "--allowed-path",
+            "src/routellect/protocols.py",
+            "--allowed-path",
+            "tests/test_boundary.py",
+            "--forbidden-path",
+            "README.md",
+        )["task"]
+
+        self.assertEqual(
+            ["src/routellect/protocols.py", "tests/test_boundary.py"],
+            task["scope"]["allowed_paths"],
+        )
+        self.assertEqual(["README.md"], task["scope"]["forbidden_paths"])
+
     def test_terraform_profile_runs_end_to_end_through_review(self) -> None:
         project = self.run_cli("create-project", "tf", "terraform project")["project"]
         task = self.run_cli(
