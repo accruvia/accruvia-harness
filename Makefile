@@ -2,7 +2,7 @@ PYTHON ?= .venv/bin/python
 PIP ?= .venv/bin/pip
 PYTHONPATH_VALUE := src
 
-.PHONY: help venv init install install-temporal install-observability run test test-fast test-e2e test-observer temporal-up temporal-down
+.PHONY: help venv init install install-temporal install-observability run test test-fast test-e2e test-observer test-temporal temporal-up temporal-down
 
 help:
 	@echo "Targets:"
@@ -14,6 +14,7 @@ help:
 	@echo "  make test-fast             Run the fast suite"
 	@echo "  make test                  Run the full suite"
 	@echo "  make test-e2e              Run end-to-end tests"
+	@echo "  make test-temporal         Run the Temporal runtime gate"
 	@echo "  make test-observer         Run observer tests"
 	@echo "  make temporal-up           Start Temporal dev stack"
 	@echo "  make temporal-down         Stop Temporal dev stack"
@@ -51,6 +52,12 @@ test-e2e:
 	PYTHONPATH=$(PYTHONPATH_VALUE) $(PYTHON) -m unittest \
 		tests.test_cli \
 		tests.test_llm_e2e \
+		tests.test_temporal_e2e -v
+
+test-temporal: install-temporal temporal-up
+	@trap 'docker compose -f docker-compose.temporal.yml down' EXIT; \
+	PYTHONPATH=$(PYTHONPATH_VALUE) $(PYTHON) -m unittest \
+		tests.test_runtime \
 		tests.test_temporal_e2e -v
 
 test-observer:

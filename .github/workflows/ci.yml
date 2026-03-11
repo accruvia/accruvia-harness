@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  test-fast:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install -e .
+
+      - name: Run fast suite
+        run: |
+          . .venv/bin/activate
+          make test-fast
+
+  temporal-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package with Temporal extras
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install -e '.[temporal]'
+
+      - name: Start Temporal
+        run: docker compose -f docker-compose.temporal.yml up -d
+
+      - name: Wait for Temporal
+        run: |
+          for i in $(seq 1 30); do
+            if python - <<'PY'
+import socket
+try:
+    with socket.create_connection(("127.0.0.1", 7233), timeout=1):
+        raise SystemExit(0)
+except OSError:
+    raise SystemExit(1)
+PY
+            then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Temporal did not become ready in time" >&2
+          exit 1
+
+      - name: Run Temporal gate
+        run: |
+          . .venv/bin/activate
+          make test-temporal
+
+      - name: Stop Temporal
+        if: always()
+        run: docker compose -f docker-compose.temporal.yml down

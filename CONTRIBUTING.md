@@ -23,6 +23,9 @@ The suite is intentionally split by cost:
   - CLI integration
   - routed LLM integration
   - Temporal end-to-end
+- `make test-temporal`
+  - required gate for Temporal/runtime changes
+  - starts local Temporal, runs runtime + Temporal E2E coverage, and tears the stack down
 - `make test`
   - full suite
 
@@ -32,7 +35,7 @@ Current timing profile is roughly:
 - `tests.test_temporal_e2e`: moderate
 - most unit-style modules: fast
 
-So if you are iterating on core logic, start with `make test-fast`. Use `make test-e2e` when changing CLI, LLM routing, or Temporal behavior.
+So if you are iterating on core logic, start with `make test-fast`. Use `make test-e2e` when changing CLI or LLM routing. Use `make test-temporal` for any change touching `runtime.py`, `temporal_backend.py`, `bootstrap.py`, `config.py`, or run-loop semantics.
 
 ## Development Guidelines
 
