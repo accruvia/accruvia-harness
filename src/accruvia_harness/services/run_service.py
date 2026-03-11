@@ -355,5 +355,30 @@ class RunService:
                 raise ValueError(f"Unknown task: {task_id}")
             if task.status in {TaskStatus.COMPLETED, TaskStatus.FAILED}:
                 break
-            completed_runs.append(self.run_once(task_id))
+            run = self.run_once(task_id)
+            completed_runs.append(run)
+            decisions = self.store.list_decisions(run.id)
+            latest_decision = decisions[-1] if decisions else None
+            if latest_decision is not None and latest_decision.action == DecisionAction.BRANCH:
+                branch_result = self._resolve_branching(task_id)
+                completed_runs.extend(branch_result)
         return completed_runs
+
+    def _resolve_branching(self, task_id: str) -> list[Run]:
+        from .branch_service import BranchService
+
+        branch_service = BranchService(
+            store=self.store,
+            workspace_root=self.workspace_root,
+            planner=self.planner,
+            worker=self.worker,
+            analyzer=self.analyzer,
+            project_adapter_registry=self.project_adapter_registry,
+            telemetry=self.telemetry,
+        )
+        branch_result = branch_service.create_branches(task_id)
+        try:
+            branch_service.select_winner(task_id, branch_result.branch_id)
+        except ValueError:
+            pass
+        return branch_result.runs

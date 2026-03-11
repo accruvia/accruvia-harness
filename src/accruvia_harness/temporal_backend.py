@@ -37,7 +37,7 @@ def _load_config(config_payload: str | dict[str, object]) -> HarnessConfig:
 
 def _task_to_stable_timeout_seconds(config_payload: str | dict[str, object]) -> int:
     config = _load_config(config_payload)
-    return max(300, (config.timeout_max_seconds * 2) + 60)
+    return max(300, config.timeout_max_seconds + 60)
 
 
 def _process_next_timeout_seconds(
@@ -46,6 +46,40 @@ def _process_next_timeout_seconds(
 ) -> int:
     config = _load_config(config_payload)
     return max(300, config.timeout_max_seconds + max(lease_seconds, 0) + 60)
+
+
+def _task_runtime_budget_seconds(config_payload: str | dict[str, object], task_id: str) -> int:
+    config = _load_config(config_payload)
+    engine = _build_engine(config_payload)
+    task = engine.store.get_task(task_id)
+    if task is None:
+        return _task_to_stable_timeout_seconds(config_payload)
+    max_attempts = max(task.max_attempts, 1)
+    max_branches = max(task.max_branches, 1)
+    branch_budget = config.timeout_max_seconds * max_branches if max_branches > 1 else 0
+    return max(
+        300,
+        (config.timeout_max_seconds * max_attempts) + branch_budget + (60 * max_attempts),
+    )
+
+
+def _next_task_runtime_budget_seconds(
+    config_payload: str | dict[str, object],
+    project_id: str | None,
+    lease_seconds: int,
+) -> int:
+    config = _load_config(config_payload)
+    engine = _build_engine(config_payload)
+    task = engine.store.next_pending_task(project_id)
+    if task is None:
+        return _process_next_timeout_seconds(config_payload, lease_seconds)
+    max_attempts = max(task.max_attempts, 1)
+    max_branches = max(task.max_branches, 1)
+    branch_budget = config.timeout_max_seconds * max_branches if max_branches > 1 else 0
+    return max(
+        300,
+        (config.timeout_max_seconds * max_attempts) + branch_budget + max(lease_seconds, 0) + (60 * max_attempts),
+    )
 
 
 def _import_temporal_modules() -> tuple[Any, Any, Any]:
@@ -113,11 +147,11 @@ if activity is not None and workflow is not None:
     @workflow.defn(name="task_to_stable_workflow")
     class TaskToStableWorkflow:
         @workflow.run
-        async def run(self, config: str, task_id: str) -> dict[str, object]:
+        async def run(self, config: str, task_id: str, activity_timeout_seconds: int) -> dict[str, object]:
             return await workflow.execute_activity(
                 "task_to_stable_activity",
                 args=[config, task_id],
-                start_to_close_timeout=timedelta(seconds=_task_to_stable_timeout_seconds(config)),
+                start_to_close_timeout=timedelta(seconds=activity_timeout_seconds),
                 retry_policy=RetryPolicy(maximum_attempts=1),
             )
 
@@ -131,13 +165,12 @@ if activity is not None and workflow is not None:
             project_id: str | None = None,
             worker_id: str = "local-worker",
             lease_seconds: int = 300,
+            activity_timeout_seconds: int = 300,
         ) -> dict[str, object] | None:
             return await workflow.execute_activity(
                 "process_next_task_activity",
                 args=[config, project_id, worker_id, lease_seconds],
-                start_to_close_timeout=timedelta(
-                    seconds=_process_next_timeout_seconds(config, lease_seconds)
-                ),
+                start_to_close_timeout=timedelta(seconds=activity_timeout_seconds),
                 retry_policy=RetryPolicy(maximum_attempts=1),
             )
 

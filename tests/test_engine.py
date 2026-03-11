@@ -6,10 +6,10 @@ import unittest
 from pathlib import Path
 
 from accruvia_harness.config import HarnessConfig
-from accruvia_harness.domain import Project, TaskStatus, new_id
+from accruvia_harness.domain import DecisionAction, Project, TaskStatus, new_id
 from accruvia_harness.engine import HarnessEngine
 from accruvia_harness.llm import build_llm_router
-from accruvia_harness.policy import WorkResult
+from accruvia_harness.policy import DecideResult, WorkResult
 from accruvia_harness.services.promotion_service import PromotionService
 from accruvia_harness.project_adapters import ProjectAdapterRegistry
 from accruvia_harness.workers import LocalArtifactWorker
@@ -82,6 +82,23 @@ class ManifestProjectAdapter:
             metadata_files=[manifest],
             environment={"ACCRUVIA_PROJECT_WORKSPACE": str(workspace)},
             diagnostics={"project_adapter": self.name},
+        )
+
+
+class BranchOnceDecider:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def decide(self, analysis, run, task):
+        self.calls += 1
+        if self.calls == 1:
+            return DecideResult(
+                action=DecisionAction.BRANCH,
+                rationale="Branch for speculative resolution.",
+            )
+        return DecideResult(
+            action=DecisionAction.PROMOTE,
+            rationale="Promote after branch winner selection.",
         )
 
 
@@ -218,6 +235,34 @@ class HarnessEngineTests(unittest.TestCase):
         self.assertEqual("incomplete", last_eval.verdict)
         self.assertEqual("fail", last_decision.action.value)
         self.assertEqual(["report"], last_eval.details["missing_required_artifacts"])
+
+    def test_run_until_stable_resolves_branching_without_infinite_loop(self) -> None:
+        branching_engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-branching",
+            decider=BranchOnceDecider(),
+        )
+        task = branching_engine.create_task_with_policy(
+            project_id=self.project_id,
+            title="Branch until stable",
+            objective="Resolve branching automatically",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=1,
+            max_branches=2,
+            required_artifacts=["plan", "report"],
+        )
+
+        runs = branching_engine.run_until_stable(task.id)
+        task_after = self.store.get_task(task.id)
+
+        self.assertEqual(TaskStatus.COMPLETED, task_after.status if task_after else None)
+        self.assertEqual(3, len(runs))
+        self.assertEqual(2, len([run for run in runs if run.branch_id is not None]))
 
     def test_retry_strategy_is_recorded_from_previous_evaluation(self) -> None:
         failing_engine = HarnessEngine(

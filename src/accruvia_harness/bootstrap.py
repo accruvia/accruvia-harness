@@ -23,6 +23,7 @@ def build_telemetry(config: HarnessConfig) -> TelemetrySink:
         config.telemetry_dir,
         service_name=config.otel_service_name,
         otlp_endpoint=config.otel_exporter_otlp_endpoint,
+        fsync_writes=config.telemetry_fsync_writes,
     )
 
 

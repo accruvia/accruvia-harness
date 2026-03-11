@@ -38,6 +38,7 @@ class Phase1Tests(unittest.TestCase):
         self.assertEqual("local", config.runtime_backend)
         self.assertEqual(1024, config.memory_limit_mb)
         self.assertEqual(300, config.cpu_time_limit_seconds)
+        self.assertFalse(config.telemetry_fsync_writes)
         self.assertEqual("accruvia-harness", config.otel_service_name)
         self.assertIsNone(config.otel_exporter_otlp_endpoint)
         self.assertEqual((), config.env_passthrough)
@@ -112,6 +113,17 @@ class Phase1Tests(unittest.TestCase):
         self.assertEqual(config.workspace_root, restored.workspace_root)
         self.assertEqual(config.runtime_backend, restored.runtime_backend)
         self.assertEqual(config.timeout_multiplier, restored.timeout_multiplier)
+        self.assertEqual(config.telemetry_fsync_writes, restored.telemetry_fsync_writes)
+
+    def test_config_reads_telemetry_fsync_flag(self) -> None:
+        with unittest.mock.patch.dict(
+            os.environ,
+            {"ACCRUVIA_TELEMETRY_FSYNC_WRITES": "true"},
+            clear=False,
+        ):
+            config = HarnessConfig.from_env()
+
+        self.assertTrue(config.telemetry_fsync_writes)
 
     def test_redact_command_hides_command_tail(self) -> None:
         self.assertEqual("codex [REDACTED]", _redact_command("codex exec --api-key secret"))

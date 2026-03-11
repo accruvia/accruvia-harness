@@ -153,7 +153,7 @@ class HarnessQueryService:
             "leases": [
                 asdict(lease)
                 | {"lease_expires_at": lease.lease_expires_at.isoformat(), "created_at": lease.created_at.isoformat()}
-                for lease in self.store.list_task_leases()
+                for lease in self.store.list_task_leases(project_id)
             ],
         }
 
@@ -190,7 +190,9 @@ class HarnessQueryService:
             "recent_blocked_runs": blocked_runs,
             "recent_failed_runs": failed_runs,
             "dashboard": {
-                "queue_depth": sum(operations["metrics"]["tasks_by_status"].values()),
+                "queue_depth": operations["metrics"]["tasks_by_status"].get("pending", 0)
+                + operations["metrics"]["tasks_by_status"].get("active", 0),
+                "total_tasks": sum(operations["metrics"]["tasks_by_status"].values()),
                 "pending_promotions": operations["metrics"]["pending_promotions"],
                 "active_leases": operations["metrics"]["active_leases"],
                 "retry_rate": operations["metrics"]["retry_rate"],

@@ -56,6 +56,7 @@ class HarnessConfig:
     project_adapter_modules: tuple[str, ...] = field(default_factory=tuple)
     validator_modules: tuple[str, ...] = field(default_factory=tuple)
     telemetry_dir: Path = Path(".accruvia-harness/telemetry")
+    telemetry_fsync_writes: bool = False
     otel_service_name: str = "accruvia-harness"
     otel_exporter_otlp_endpoint: str | None = None
     issue_close_on_completed: bool = True
@@ -87,6 +88,7 @@ class HarnessConfig:
             workspace_root=Path(str(payload["workspace_root"])),
             log_path=Path(str(payload["log_path"])),
             telemetry_dir=Path(str(payload["telemetry_dir"])),
+            telemetry_fsync_writes=bool(payload.get("telemetry_fsync_writes", False)),
             default_project_name=str(payload["default_project_name"]),
             default_repo=str(payload["default_repo"]),
             runtime_backend=str(payload["runtime_backend"]),
@@ -158,6 +160,7 @@ class HarnessConfig:
             workspace_root=resolved_workspace,
             log_path=resolved_log,
             telemetry_dir=resolved_telemetry,
+            telemetry_fsync_writes=os.environ.get("ACCRUVIA_TELEMETRY_FSYNC_WRITES", "false").lower() == "true",
             otel_service_name=os.environ.get("ACCRUVIA_OTEL_SERVICE_NAME", "accruvia-harness"),
             otel_exporter_otlp_endpoint=os.environ.get("ACCRUVIA_OTEL_EXPORTER_OTLP_ENDPOINT") or None,
             default_project_name=os.environ.get("ACCRUVIA_HARNESS_PROJECT", "accruvia"),

@@ -203,13 +203,17 @@ class ProjectTaskStoreMixin:
                 (task_id, worker_id),
             )
 
-    def list_task_leases(self) -> list[TaskLease]:
+    def list_task_leases(self, project_id: str | None = None) -> list[TaskLease]:
         now = datetime.now(UTC).isoformat()
         with self.connect() as connection:
             connection.execute("DELETE FROM task_leases WHERE lease_expires_at <= ?", (now,))
-            rows = connection.execute(
-                "SELECT task_id, worker_id, lease_expires_at, created_at FROM task_leases ORDER BY created_at"
-            ).fetchall()
+            query = "SELECT l.task_id, l.worker_id, l.lease_expires_at, l.created_at FROM task_leases l"
+            params: tuple[str, ...] = ()
+            if project_id:
+                query += " JOIN tasks t ON t.id = l.task_id WHERE t.project_id = ?"
+                params = (project_id,)
+            query += " ORDER BY l.created_at"
+            rows = connection.execute(query, params).fetchall()
         return [task_lease_from_row(row) for row in rows]
 
     def find_follow_on_task(self, parent_task_id: str, source_run_id: str) -> Task | None:

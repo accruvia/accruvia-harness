@@ -12,6 +12,8 @@ from accruvia_harness.domain import EvaluationVerdict, Project, RunStatus, new_i
 from accruvia_harness.engine import HarnessEngine
 from accruvia_harness.temporal_backend import (
     _build_engine,
+    _next_task_runtime_budget_seconds,
+    _task_runtime_budget_seconds,
     _process_next_timeout_seconds,
     _task_to_stable_timeout_seconds,
 )
@@ -208,8 +210,34 @@ class RuntimeTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(2460, _task_to_stable_timeout_seconds(config.to_payload()))
+        self.assertEqual(1260, _task_to_stable_timeout_seconds(config.to_payload()))
         self.assertEqual(1560, _process_next_timeout_seconds(config.to_payload(), 300))
+
+    def test_temporal_task_budget_uses_task_retry_and_branch_policy(self) -> None:
+        config = HarnessConfig.from_payload(
+            {
+                **self.config.to_payload(),
+                "timeout_max_seconds": 600,
+                "db_path": str(self.store.db_path),
+            }
+        )
+        task = self.engine.create_task_with_policy(
+            project_id=self.project_id,
+            title="Budgeted task",
+            objective="Budget actual policy",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=4,
+            max_branches=3,
+            required_artifacts=["plan", "report"],
+        )
+
+        self.assertEqual(4440, _task_runtime_budget_seconds(config.to_payload(), task.id))
+        self.assertEqual(4740, _next_task_runtime_budget_seconds(config.to_payload(), self.project_id, 300))
 
     def test_blocked_run_uses_explicit_run_status_enum(self) -> None:
         task = self.engine.create_task_with_policy(

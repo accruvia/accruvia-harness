@@ -53,6 +53,7 @@ class TelemetrySink:
     root: Path
     service_name: str = "accruvia-harness"
     otlp_endpoint: str | None = None
+    fsync_writes: bool = False
     metrics_path: Path = field(init=False)
     spans_path: Path = field(init=False)
     warnings_path: Path = field(init=False)
@@ -189,7 +190,8 @@ class TelemetrySink:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
                 handle.write(json.dumps(payload, sort_keys=True) + "\n")
                 handle.flush()
-                os.fsync(handle.fileno())
+                if self.fsync_writes:
+                    os.fsync(handle.fileno())
                 if fcntl is not None:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 

@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from accruvia_harness.domain import Project, new_id
+from accruvia_harness.domain import Project, TaskStatus, new_id
 from accruvia_harness.engine import HarnessEngine
 from accruvia_harness.interrogation import HarnessQueryService, InterrogationService
 from accruvia_harness.llm import LLMExecutionResult
@@ -187,6 +187,92 @@ class HarnessQueryServiceTests(unittest.TestCase):
         self.assertIn("telemetry", dashboard)
         self.assertIn("dashboard", dashboard)
         self.assertIn("slowest_operations_ms", dashboard["dashboard"])
+
+    def test_context_packet_scopes_leases_by_project(self) -> None:
+        other_project = Project(id=new_id("project"), name="other", description="Other project")
+        self.store.create_project(other_project)
+        task_a = self.engine.create_task_with_policy(
+            project_id=self.project.id,
+            title="Lease A",
+            objective="Lease A",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+        task_b = self.engine.create_task_with_policy(
+            project_id=other_project.id,
+            title="Lease B",
+            objective="Lease B",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+        self.store.acquire_task_lease("worker-a", 300, project_id=self.project.id)
+        self.store.acquire_task_lease("worker-b", 300, project_id=other_project.id)
+
+        packet = self.query.context_packet(self.project.id)
+
+        self.assertEqual(1, len(packet["leases"]))
+        self.assertEqual(task_a.id, packet["leases"][0]["task_id"])
+        self.assertNotEqual(task_b.id, packet["leases"][0]["task_id"])
+
+    def test_dashboard_queue_depth_counts_only_pending_and_active(self) -> None:
+        completed = self.engine.create_task_with_policy(
+            project_id=self.project.id,
+            title="Completed task",
+            objective="Completed task",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+        self.engine.run_until_stable(completed.id)
+        pending = self.engine.create_task_with_policy(
+            project_id=self.project.id,
+            title="Pending task",
+            objective="Pending task",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+        active = self.engine.create_task_with_policy(
+            project_id=self.project.id,
+            title="Active task",
+            objective="Active task",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+        self.store.update_task_status(active.id, TaskStatus.ACTIVE)
+
+        dashboard = self.query.dashboard_report(self.project.id)
+
+        self.assertEqual(2, dashboard["dashboard"]["queue_depth"])
+        self.assertEqual(3, dashboard["dashboard"]["total_tasks"])
 
     def test_query_service_uses_read_only_store_wrapper(self) -> None:
         with self.assertRaises(AttributeError):
