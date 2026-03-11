@@ -10,7 +10,11 @@ from unittest.mock import AsyncMock
 from accruvia_harness.config import HarnessConfig
 from accruvia_harness.domain import EvaluationVerdict, Project, RunStatus, new_id
 from accruvia_harness.engine import HarnessEngine
-from accruvia_harness.temporal_backend import _build_engine
+from accruvia_harness.temporal_backend import (
+    _build_engine,
+    _process_next_timeout_seconds,
+    _task_to_stable_timeout_seconds,
+)
 from accruvia_harness.runtime import LocalWorkflowRuntime, build_runtime
 from accruvia_harness.store import SQLiteHarnessStore
 
@@ -195,6 +199,17 @@ class RuntimeTests(unittest.TestCase):
         run = engine.run_once(task.id)
 
         self.assertEqual(RunStatus.COMPLETED, run.status)
+
+    def test_temporal_timeouts_are_derived_from_config(self) -> None:
+        config = HarnessConfig.from_payload(
+            {
+                **self.config.to_payload(),
+                "timeout_max_seconds": 1200,
+            }
+        )
+
+        self.assertEqual(2460, _task_to_stable_timeout_seconds(config.to_payload()))
+        self.assertEqual(1560, _process_next_timeout_seconds(config.to_payload(), 300))
 
     def test_blocked_run_uses_explicit_run_status_enum(self) -> None:
         task = self.engine.create_task_with_policy(

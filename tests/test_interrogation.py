@@ -6,7 +6,8 @@ from pathlib import Path
 
 from accruvia_harness.domain import Project, new_id
 from accruvia_harness.engine import HarnessEngine
-from accruvia_harness.interrogation import HarnessQueryService
+from accruvia_harness.interrogation import HarnessQueryService, InterrogationService
+from accruvia_harness.llm import LLMExecutionResult
 from accruvia_harness.policy import WorkResult
 from accruvia_harness.store import SQLiteHarnessStore
 from accruvia_harness.telemetry import TelemetrySink
@@ -194,3 +195,50 @@ class HarnessQueryServiceTests(unittest.TestCase):
     def test_query_service_read_only_store_blocks_low_level_connection_access(self) -> None:
         with self.assertRaises(AttributeError):
             self.query.store.connect()
+
+    def test_explanation_artifacts_use_unique_paths_per_call(self) -> None:
+        class FakeExecutor:
+            backend_name = "fake"
+
+            def execute(self, invocation):
+                prompt_path = invocation.run_dir / "llm_prompt.txt"
+                response_path = invocation.run_dir / "llm_response.md"
+                prompt_path.write_text(invocation.prompt, encoding="utf-8")
+                response_path.write_text("explanation", encoding="utf-8")
+                return LLMExecutionResult(
+                    backend="fake",
+                    response_text="explanation",
+                    prompt_path=prompt_path,
+                    response_path=response_path,
+                    diagnostics={},
+                )
+
+        class FakeRouter:
+            def resolve(self):
+                return FakeExecutor(), "fake"
+
+        task = self.engine.import_issue_task(
+            project_id=self.project.id,
+            issue_id="504",
+            title="Explain me",
+            objective="Exercise explanation output",
+            priority=100,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+        self.engine.run_until_stable(task.id)
+
+        service = InterrogationService(
+            query_service=self.query,
+            workspace_root=Path(self.temp_dir.name) / "workspace",
+            llm_router=FakeRouter(),
+            telemetry=self.telemetry,
+        )
+
+        first = service.explain_task(task.id)
+        second = service.explain_task(task.id)
+
+        self.assertNotEqual(first["explanation_path"], second["explanation_path"])
+        self.assertTrue(Path(first["explanation_path"]).exists())
+        self.assertTrue(Path(second["explanation_path"]).exists())

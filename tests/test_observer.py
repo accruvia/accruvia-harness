@@ -316,6 +316,16 @@ class TelegramAdapterTests(unittest.TestCase):
             adapter._submit_question(1, "hello", 99)
         adapter._send_message.assert_called_once()
 
+    def test_send_message_uses_plain_text_by_default(self) -> None:
+        agent = MagicMock(spec=ObserverAgent)
+        adapter = TelegramAdapter("token", agent)
+        with patch.object(adapter, "_api_call") as mock_call:
+            adapter._send_message(1, "hello_[world]", reply_to=9)
+
+        payload = mock_call.call_args[0][1]
+        self.assertEqual("hello_[world]", payload["text"])
+        self.assertNotIn("parse_mode", payload)
+
 
 class ObserverConfigTests(unittest.TestCase):
     def test_config_includes_observer_webhook_url(self) -> None:

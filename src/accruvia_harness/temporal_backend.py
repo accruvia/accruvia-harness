@@ -29,6 +29,25 @@ def _build_engine(config_payload: str | dict[str, object]) -> HarnessEngine:
     return build_engine_from_config(config)
 
 
+def _load_config(config_payload: str | dict[str, object]) -> HarnessConfig:
+    if isinstance(config_payload, str):
+        return HarnessConfig.from_json(config_payload)
+    return HarnessConfig.from_payload(config_payload)
+
+
+def _task_to_stable_timeout_seconds(config_payload: str | dict[str, object]) -> int:
+    config = _load_config(config_payload)
+    return max(300, (config.timeout_max_seconds * 2) + 60)
+
+
+def _process_next_timeout_seconds(
+    config_payload: str | dict[str, object],
+    lease_seconds: int,
+) -> int:
+    config = _load_config(config_payload)
+    return max(300, config.timeout_max_seconds + max(lease_seconds, 0) + 60)
+
+
 def _import_temporal_modules() -> tuple[Any, Any, Any]:
     if activity is None or workflow is None or Client is None or RetryPolicy is None:
         raise ModuleNotFoundError("temporalio is not installed")
@@ -98,7 +117,7 @@ if activity is not None and workflow is not None:
             return await workflow.execute_activity(
                 "task_to_stable_activity",
                 args=[config, task_id],
-                start_to_close_timeout=timedelta(seconds=300),
+                start_to_close_timeout=timedelta(seconds=_task_to_stable_timeout_seconds(config)),
                 retry_policy=RetryPolicy(maximum_attempts=1),
             )
 
@@ -116,7 +135,9 @@ if activity is not None and workflow is not None:
             return await workflow.execute_activity(
                 "process_next_task_activity",
                 args=[config, project_id, worker_id, lease_seconds],
-                start_to_close_timeout=timedelta(seconds=300),
+                start_to_close_timeout=timedelta(
+                    seconds=_process_next_timeout_seconds(config, lease_seconds)
+                ),
                 retry_policy=RetryPolicy(maximum_attempts=1),
             )
 

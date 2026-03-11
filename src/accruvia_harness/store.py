@@ -24,6 +24,9 @@ class SQLiteHarnessStore(ProjectTaskStoreMixin, RunRecordsStoreMixin, EventsMetr
         connection = sqlite3.connect(self.db_path, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA journal_mode = WAL")
+        connection.execute("PRAGMA synchronous = NORMAL")
+        connection.execute("PRAGMA busy_timeout = 30000")
         return connection
 
     def initialize(self) -> None:

@@ -237,7 +237,7 @@ class InterrogationService:
         if self.llm_router is None:
             raise ValueError("No LLM router configured for interrogation")
         executor, backend = self.llm_router.resolve()
-        run_dir = self.workspace_root / "interrogation" / f"{subject_type}_{subject_id}"
+        run_dir = self.workspace_root / "interrogation" / f"{subject_type}_{subject_id}" / new_id("explain")
         run_dir.mkdir(parents=True, exist_ok=True)
         task = Task(
             id=new_id("interrogation_task"),

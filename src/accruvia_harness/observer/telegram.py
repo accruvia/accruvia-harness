@@ -67,11 +67,20 @@ class TelegramAdapter:
             self._offset = max(u["update_id"] for u in updates) + 1
         return updates
 
-    def _send_message(self, chat_id: int, text: str, reply_to: int | None = None) -> None:
+    def _send_message(
+        self,
+        chat_id: int,
+        text: str,
+        reply_to: int | None = None,
+        *,
+        parse_mode: str | None = None,
+    ) -> None:
         # Telegram limits messages to 4096 chars
         chunks = [text[i:i + 4000] for i in range(0, len(text), 4000)]
         for chunk in chunks:
-            payload: dict = {"chat_id": chat_id, "text": chunk, "parse_mode": "Markdown"}
+            payload: dict = {"chat_id": chat_id, "text": chunk}
+            if parse_mode:
+                payload["parse_mode"] = parse_mode
             if reply_to:
                 payload["reply_to_message_id"] = reply_to
                 reply_to = None  # only reply to first chunk

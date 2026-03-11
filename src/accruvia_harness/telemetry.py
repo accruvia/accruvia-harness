@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +28,13 @@ def _sanitize_attributes(attributes: dict[str, Any]) -> dict[str, str | int | fl
         else:
             sanitized[key] = str(value)
     return sanitized
+
+
+def _coerce_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _otlp_signal_endpoints(endpoint: str | None) -> tuple[str | None, str | None]:
@@ -112,7 +125,7 @@ class TelemetrySink:
         }
         for item in metrics:
             name = str(item["name"])
-            value = float(item["value"])
+            value = _coerce_float(item["value"])
             metric_totals[name] = metric_totals.get(name, 0.0) + value
             metric_series.setdefault(name, []).append(value)
             if name in {"llm_cost_usd", "llm_prompt_tokens", "llm_completion_tokens", "llm_total_tokens"}:
@@ -124,7 +137,7 @@ class TelemetrySink:
             name = str(item["name"])
             span_counts[name] = span_counts.get(name, 0) + 1
             if "duration_ms" in item:
-                span_durations.setdefault(name, []).append(float(item["duration_ms"]))
+                span_durations.setdefault(name, []).append(_coerce_float(item["duration_ms"]))
         span_average_ms = {
             name: (sum(values) / len(values)) for name, values in span_durations.items() if values
         }
@@ -172,7 +185,13 @@ class TelemetrySink:
     def _append(self, path: Path, payload: dict[str, Any]) -> None:
         with self._append_lock:
             with path.open("a", encoding="utf-8") as handle:
+                if fcntl is not None:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
                 handle.write(json.dumps(payload, sort_keys=True) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+                if fcntl is not None:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def warn(self, category: str, message: str, **attributes: Any) -> None:
         payload = {
@@ -188,13 +207,20 @@ class TelemetrySink:
         if not path.exists():
             return []
         records: list[dict[str, Any]] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
+        with path.open("r", encoding="utf-8") as handle:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
             try:
-                records.append(json.loads(line))
-            except json.JSONDecodeError as exc:
-                logger.warning("Skipping corrupt telemetry JSONL line in %s: %s", path, exc)
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    try:
+                        records.append(json.loads(line))
+                    except json.JSONDecodeError as exc:
+                        logger.warning("Skipping corrupt telemetry JSONL line in %s: %s", path, exc)
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         return records
 
     def load_metrics(self) -> list[dict[str, Any]]:

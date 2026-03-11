@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import os
 import tempfile
 import unittest
@@ -11,6 +12,12 @@ from accruvia_harness.commands.core import _redact_command
 from accruvia_harness.logging_utils import HarnessLogger, classify_error
 from accruvia_harness.store import SQLiteHarnessStore
 from accruvia_harness.telemetry import TelemetrySink, _otlp_signal_endpoints
+
+
+def _write_telemetry_metric(root: str, prefix: str, count: int) -> None:
+    telemetry = TelemetrySink(Path(root))
+    for index in range(count):
+        telemetry.metric(f"{prefix}_{index}", index + 1)
 
 
 class Phase1Tests(unittest.TestCase):
@@ -167,3 +174,34 @@ class Phase1Tests(unittest.TestCase):
         summary = telemetry.summary()
 
         self.assertTrue(any(item["category"] == "otel_metric_export" for item in summary["warnings"]))
+
+    def test_telemetry_supports_multi_process_appends(self) -> None:
+        telemetry_root = self.base / "telemetry"
+        ctx = multiprocessing.get_context("spawn")
+        first = ctx.Process(target=_write_telemetry_metric, args=(str(telemetry_root), "a", 20))
+        second = ctx.Process(target=_write_telemetry_metric, args=(str(telemetry_root), "b", 20))
+
+        first.start()
+        second.start()
+        first.join(timeout=10)
+        second.join(timeout=10)
+
+        self.assertEqual(0, first.exitcode)
+        self.assertEqual(0, second.exitcode)
+
+        telemetry = TelemetrySink(telemetry_root)
+        metrics = telemetry.load_metrics()
+
+        self.assertEqual(40, len(metrics))
+        self.assertEqual(40, len({item["name"] for item in metrics}))
+
+    def test_store_enables_sqlite_wal_and_busy_timeout(self) -> None:
+        store = SQLiteHarnessStore(self.base / "harness.db")
+        store.initialize()
+
+        with store.connect() as connection:
+            journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+            busy_timeout = connection.execute("PRAGMA busy_timeout").fetchone()[0]
+
+        self.assertEqual("wal", str(journal_mode).lower())
+        self.assertEqual(30000, int(busy_timeout))
