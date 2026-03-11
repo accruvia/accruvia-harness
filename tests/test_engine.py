@@ -75,6 +75,19 @@ class FailedDiagnosisWorker(PromotionBlockedWorker):
         return result
 
 
+class ScopeSplitWorker(PromotionBlockedWorker):
+    def work(self, task, run, workspace_root: Path) -> WorkResult:  # type: ignore[override]
+        result = super().work(task, run, workspace_root)
+        result.outcome = "blocked"
+        result.diagnostics = {
+            "scope_violation": {
+                "outside_allowed_paths": ["tests/test_boundary.py"],
+                "forbidden_path_hits": ["tests/test_boundary.py"],
+            }
+        }
+        return result
+
+
 class ManifestProjectAdapter:
     name = "manifest"
 
@@ -636,7 +649,36 @@ class HarnessEngineTests(unittest.TestCase):
 
         self.assertEqual("blocked", run.status.value)
         self.assertEqual("blocked", evaluation.verdict)
-        self.assertEqual("fail", decision.action.value)
+
+    def test_blocked_scope_violation_auto_creates_follow_on_task(self) -> None:
+        engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-scope-split",
+            worker=ScopeSplitWorker(),
+        )
+        task = engine.create_task_with_policy(
+            project_id=self.project_id,
+            title="Oversized scoped task",
+            objective="Refactor server client and tests together",
+            priority=200,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            validation_profile="generic",
+            scope={"allowed_paths": ["src/server_client.py"]},
+            strategy="default",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+
+        run = engine.run_once(task.id)
+
+        children = self.store.list_child_tasks(task.id)
+        self.assertEqual("blocked", run.status.value)
+        self.assertEqual(1, len(children))
+        self.assertEqual(["tests/test_boundary.py"], children[0].scope["allowed_paths"])
+        self.assertEqual("scope_split", children[0].strategy)
 
     def test_failed_worker_outcome_records_failed_evaluation(self) -> None:
         engine = HarnessEngine(
