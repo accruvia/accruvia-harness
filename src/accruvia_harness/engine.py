@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .cognition import CognitionAdapterRegistry, build_cognition_registry
+from .interrogation import HarnessQueryService
 from .github import GitHubCLI
 from .gitlab import GitLabCLI
 from .llm import LLMRouter
@@ -10,6 +12,7 @@ from .project_adapters import ProjectAdapterRegistry, build_project_adapter_regi
 from .services.issue_policy import IssueStatePolicy
 from .services import (
     BranchService,
+    CognitionService,
     GitHubTaskService,
     GitLabTaskService,
     PromotionService,
@@ -34,6 +37,7 @@ class HarnessEngine:
         llm_router: LLMRouter | None = None,
         project_adapter_registry: ProjectAdapterRegistry | None = None,
         validator_registry: PromotionValidatorRegistry | None = None,
+        cognition_registry: CognitionAdapterRegistry | None = None,
         issue_state_policy: IssueStatePolicy | None = None,
         telemetry=None,
     ) -> None:
@@ -47,10 +51,12 @@ class HarnessEngine:
         self.llm_router = llm_router
         self.project_adapter_registry = project_adapter_registry or build_project_adapter_registry()
         self.validator_registry = validator_registry or build_validator_registry()
+        self.cognition_registry = cognition_registry or build_cognition_registry()
         self.issue_state_policy = issue_state_policy or IssueStatePolicy()
         self.telemetry = telemetry
 
         self.tasks = TaskService(self.store)
+        self.query = HarnessQueryService(self.store, telemetry=self.telemetry)
         self._build_services()
 
     def _build_services(self) -> None:
@@ -76,6 +82,14 @@ class HarnessEngine:
         self.queue = QueueService(self.store, self.runs)
         self.github_tasks = GitHubTaskService(self.tasks, self.store, state_policy=self.issue_state_policy)
         self.gitlab_tasks = GitLabTaskService(self.tasks, self.store, state_policy=self.issue_state_policy)
+        self.cognition = CognitionService(
+            store=self.store,
+            query_service=self.query,
+            workspace_root=self.workspace_root,
+            cognition_registry=self.cognition_registry,
+            llm_router=self.llm_router,
+            telemetry=self.telemetry,
+        )
         self.promotions = PromotionService(
             self.store,
             self.tasks,
@@ -175,6 +189,9 @@ class HarnessEngine:
             worker_id=worker_id,
             lease_seconds=lease_seconds,
         )
+
+    def heartbeat(self, project_id: str):
+        return self.cognition.heartbeat(project_id)
 
     def import_issue_task(
         self,

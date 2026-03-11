@@ -26,6 +26,9 @@ def handle_interrogation_command(args, ctx: CLIContext) -> bool:
     if args.command == "dashboard-report":
         emit(ctx.query_service.dashboard_report(args.project_id))
         return True
+    if args.command == "heartbeat":
+        emit(ctx.engine.heartbeat(args.project_id).__dict__)
+        return True
     if args.command == "explain-system":
         emit(ctx.interrogation_service.explain_system(args.project_id))
         return True

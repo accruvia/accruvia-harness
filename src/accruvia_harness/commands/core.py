@@ -45,6 +45,7 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
             "adapter_modules": list(config.adapter_modules),
             "project_adapter_modules": list(config.project_adapter_modules),
             "validator_modules": list(config.validator_modules),
+            "cognition_modules": list(config.cognition_modules),
             "timeout_ema_alpha": config.timeout_ema_alpha,
             "timeout_min_seconds": config.timeout_min_seconds,
             "timeout_max_seconds": config.timeout_max_seconds,

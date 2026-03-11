@@ -153,6 +153,8 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("telemetry-report", help="Show aggregated telemetry counters and span timings.")
     dashboard_report = subparsers.add_parser("dashboard-report", help="Show a small operational dashboard export.")
     dashboard_report.add_argument("--project-id")
+    heartbeat = subparsers.add_parser("heartbeat", help="Run a project heartbeat using the configured cognition adapter.")
+    heartbeat.add_argument("project_id")
     explain_system = subparsers.add_parser("explain-system", help="Use the configured LLM executor to explain the current system state from read-only evidence.")
     explain_system.add_argument("--project-id")
     lineage_report = subparsers.add_parser("lineage-report", help="Show ancestors and spawned child tasks for a task.")

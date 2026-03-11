@@ -5,6 +5,7 @@ import multiprocessing
 import os
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from accruvia_harness.config import HarnessConfig
@@ -92,7 +93,7 @@ class Phase1Tests(unittest.TestCase):
             "ACCRUVIA_TIMEOUT_MIN_SECONDS": "oops",
             "ACCRUVIA_MEMORY_LIMIT_MB": "nah",
         }
-        with unittest.mock.patch.dict(os.environ, env, clear=False):
+        with mock.patch.dict(os.environ, env, clear=False):
             config = HarnessConfig.from_env()
 
         self.assertEqual(0.5, config.timeout_ema_alpha)
@@ -116,7 +117,7 @@ class Phase1Tests(unittest.TestCase):
         self.assertEqual(config.telemetry_fsync_writes, restored.telemetry_fsync_writes)
 
     def test_config_reads_telemetry_fsync_flag(self) -> None:
-        with unittest.mock.patch.dict(
+        with mock.patch.dict(
             os.environ,
             {"ACCRUVIA_TELEMETRY_FSYNC_WRITES": "true"},
             clear=False,
@@ -140,7 +141,7 @@ class Phase1Tests(unittest.TestCase):
         )
 
     def test_telemetry_summary_surfaces_otel_setup_warning(self) -> None:
-        with unittest.mock.patch(
+        with mock.patch(
             "accruvia_harness.telemetry._OpenTelemetryBridge.build",
             return_value=(None, "error", "OpenTelemetry import/setup failed: boom"),
         ):

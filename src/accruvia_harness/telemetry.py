@@ -213,6 +213,7 @@ class TelemetrySink:
         if not path.exists():
             return []
         records: list[dict[str, Any]] = []
+        seen_record_ids: set[str] = set()
         with path.open("r", encoding="utf-8") as handle:
             if fcntl is not None:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
@@ -221,9 +222,16 @@ class TelemetrySink:
                     if not line.strip():
                         continue
                     try:
-                        records.append(json.loads(line))
+                        payload = json.loads(line)
                     except json.JSONDecodeError as exc:
                         logger.warning("Skipping corrupt telemetry JSONL line in %s: %s", path, exc)
+                        continue
+                    record_id = payload.get("_record_id")
+                    if isinstance(record_id, str):
+                        if record_id in seen_record_ids:
+                            continue
+                        seen_record_ids.add(record_id)
+                    records.append(payload)
             finally:
                 if fcntl is not None:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
@@ -232,7 +240,7 @@ class TelemetrySink:
     def _record(self, channel: str, payload: dict[str, Any], *, export_to_otel: bool = True) -> None:
         with self._append_lock:
             state = self._load_state()
-            sequence = int(state.get("last_sequence", 0)) + 1
+            sequence = max(int(state.get("last_sequence", 0)) + 1, time.time_ns())
             envelope = {
                 "sequence": sequence,
                 "record_id": f"telemetry_{uuid4().hex}",
@@ -281,6 +289,8 @@ class TelemetrySink:
     def _materialize_envelope(self, envelope: dict[str, Any], *, export_to_otel: bool) -> None:
         channel = str(envelope["channel"])
         payload = dict(envelope["payload"])
+        payload["_record_id"] = str(envelope["record_id"])
+        payload["_sequence"] = int(envelope["sequence"])
         if channel == "metric":
             self._append_without_lock(self.metrics_path, payload, fsync=False)
             if export_to_otel and self._otel is not None:
@@ -350,11 +360,25 @@ class TelemetrySink:
         }
 
     def _write_state(self, state: dict[str, int]) -> None:
-        payload = json.dumps(state, sort_keys=True)
-        with self.state_path.open("w", encoding="utf-8") as handle:
+        merged = dict(state)
+        with self.state_path.open("a+", encoding="utf-8") as handle:
             if fcntl is not None:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            handle.write(payload)
+            handle.seek(0)
+            current_text = handle.read()
+            if current_text.strip():
+                try:
+                    current = json.loads(current_text)
+                except json.JSONDecodeError:
+                    current = {}
+                merged["last_sequence"] = max(int(current.get("last_sequence", 0)), int(state.get("last_sequence", 0)))
+                merged["last_materialized_sequence"] = max(
+                    int(current.get("last_materialized_sequence", 0)),
+                    int(state.get("last_materialized_sequence", 0)),
+                )
+            handle.seek(0)
+            handle.truncate(0)
+            handle.write(json.dumps(merged, sort_keys=True))
             handle.flush()
             if self.fsync_writes:
                 os.fsync(handle.fileno())

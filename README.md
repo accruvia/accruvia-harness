@@ -128,6 +128,7 @@ The observer path is intentionally read-only.
 - `summary`
 - `ops-report`
 - `dashboard-report`
+- `heartbeat`
 - `explain-system`
 - `explain-task`
 
@@ -159,8 +160,9 @@ Extension points:
 - `ACCRUVIA_ADAPTER_MODULES`
 - `ACCRUVIA_PROJECT_ADAPTER_MODULES`
 - `ACCRUVIA_VALIDATOR_MODULES`
+- `ACCRUVIA_COGNITION_MODULES`
 
-That lets a private project supply its own workspace preparation, workload evidence generation, and promotion checks without editing the harness source.
+That lets a project supply its own workspace preparation, workload evidence generation, promotion checks, and heartbeat logic without editing the harness source.
 
 ## Other Docs
 
@@ -168,3 +170,5 @@ That lets a private project supply its own workspace preparation, workload evide
 - [ENGINEERING_CHECKLIST.md](/home/soverton/accruvia-harness/ENGINEERING_CHECKLIST.md)
 - [OPERATOR_RUNBOOK.md](/home/soverton/accruvia-harness/OPERATOR_RUNBOOK.md)
 - [CONTRIBUTING.md](/home/soverton/accruvia-harness/CONTRIBUTING.md)
+- [specs/routellect-extraction.md](/home/soverton/accruvia-harness/specs/routellect-extraction.md)
+- [specs/routellect-extraction.md](/home/soverton/accruvia-harness/specs/routellect-extraction.md)

@@ -55,6 +55,7 @@ class HarnessConfig:
     adapter_modules: tuple[str, ...] = field(default_factory=tuple)
     project_adapter_modules: tuple[str, ...] = field(default_factory=tuple)
     validator_modules: tuple[str, ...] = field(default_factory=tuple)
+    cognition_modules: tuple[str, ...] = field(default_factory=tuple)
     telemetry_dir: Path = Path(".accruvia-harness/telemetry")
     telemetry_fsync_writes: bool = False
     otel_service_name: str = "accruvia-harness"
@@ -111,6 +112,7 @@ class HarnessConfig:
             adapter_modules=tuple(str(item) for item in payload.get("adapter_modules", ())),
             project_adapter_modules=tuple(str(item) for item in payload.get("project_adapter_modules", ())),
             validator_modules=tuple(str(item) for item in payload.get("validator_modules", ())),
+            cognition_modules=tuple(str(item) for item in payload.get("cognition_modules", ())),
             otel_service_name=str(payload.get("otel_service_name", "accruvia-harness")),
             otel_exporter_otlp_endpoint=(
                 str(payload["otel_exporter_otlp_endpoint"])
@@ -195,6 +197,11 @@ class HarnessConfig:
             validator_modules=tuple(
                 item.strip()
                 for item in os.environ.get("ACCRUVIA_VALIDATOR_MODULES", "").split(",")
+                if item.strip()
+            ),
+            cognition_modules=tuple(
+                item.strip()
+                for item in os.environ.get("ACCRUVIA_COGNITION_MODULES", "").split(",")
                 if item.strip()
             ),
             issue_close_on_completed=os.environ.get("ACCRUVIA_ISSUE_CLOSE_ON_COMPLETED", "true").lower() == "true",

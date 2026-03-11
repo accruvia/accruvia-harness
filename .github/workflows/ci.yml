@@ -53,13 +53,13 @@ jobs:
         run: |
           for i in $(seq 1 30); do
             if python - <<'PY'
-import socket
-try:
-    with socket.create_connection(("127.0.0.1", 7233), timeout=1):
-        raise SystemExit(0)
-except OSError:
-    raise SystemExit(1)
-PY
+              import socket
+              try:
+                  with socket.create_connection(("127.0.0.1", 7233), timeout=1):
+                      raise SystemExit(0)
+              except OSError:
+                  raise SystemExit(1)
+              PY
             then
               exit 0
             fi

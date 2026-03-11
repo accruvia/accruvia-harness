@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .cognition import build_cognition_registry
 from .config import HarnessConfig
 from .engine import HarnessEngine
 from .llm import build_llm_router
@@ -50,6 +51,7 @@ def build_engine_from_config(
         workspace_root=config.workspace_root,
         project_adapter_registry=build_project_adapter_registry(config.project_adapter_modules),
         validator_registry=build_validator_registry(config.validator_modules),
+        cognition_registry=build_cognition_registry(config.cognition_modules),
         telemetry=resolved_telemetry,
         issue_state_policy=build_issue_state_policy(config),
     )

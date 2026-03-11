@@ -1,4 +1,5 @@
 from .branch_service import BranchResult, BranchService, WinnerResult
+from .cognition_service import CognitionService
 from .github_task_service import GitHubTaskService
 from .gitlab_task_service import GitLabTaskService
 from .promotion_service import PromotionReviewResult, PromotionService
@@ -9,6 +10,7 @@ from .task_service import TaskService
 __all__ = [
     "BranchResult",
     "BranchService",
+    "CognitionService",
     "GitHubTaskService",
     "GitLabTaskService",
     "PromotionReviewResult",
