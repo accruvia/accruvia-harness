@@ -39,6 +39,7 @@ def task_from_row(row: sqlite3.Row) -> Task:
         validation_profile=row["validation_profile"],
         strategy=row["strategy"],
         max_attempts=int(row["max_attempts"]),
+        max_branches=int(row["max_branches"]) if "max_branches" in row.keys() else 1,
         required_artifacts=json.loads(row["required_artifacts_json"]),
         status=TaskStatus(row["status"]),
         created_at=parse_dt(row["created_at"]),
@@ -53,6 +54,7 @@ def run_from_row(row: sqlite3.Row) -> Run:
         status=RunStatus(row["status"]),
         attempt=int(row["attempt"]),
         summary=row["summary"],
+        branch_id=row["branch_id"] if "branch_id" in row.keys() else None,
         created_at=parse_dt(row["created_at"]),
         updated_at=parse_dt(row["updated_at"]),
     )
@@ -64,6 +66,7 @@ def project_from_row(row: sqlite3.Row) -> Project:
         name=row["name"],
         description=row["description"],
         adapter_name=row["adapter_name"],
+        max_concurrent_tasks=int(row["max_concurrent_tasks"]) if "max_concurrent_tasks" in row.keys() else 0,
         created_at=parse_dt(row["created_at"]),
     )
 

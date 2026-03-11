@@ -14,5 +14,6 @@ def task_created_payload(task: Task) -> dict[str, object]:
         "validation_profile": task.validation_profile,
         "strategy": task.strategy,
         "max_attempts": task.max_attempts,
+        "max_branches": task.max_branches,
         "required_artifacts": task.required_artifacts,
     }

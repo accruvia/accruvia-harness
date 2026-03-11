@@ -144,6 +144,15 @@ MIGRATIONS: list[Migration] = [
         ALTER TABLE projects ADD COLUMN adapter_name TEXT NOT NULL DEFAULT 'generic';
         """,
     ),
+    Migration(
+        version=6,
+        name="parallel_execution",
+        sql="""
+        ALTER TABLE projects ADD COLUMN max_concurrent_tasks INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE tasks ADD COLUMN max_branches INTEGER NOT NULL DEFAULT 1;
+        ALTER TABLE runs ADD COLUMN branch_id TEXT;
+        """,
+    ),
 ]
 
 

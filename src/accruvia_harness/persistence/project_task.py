@@ -11,21 +11,21 @@ class ProjectTaskStoreMixin:
     def create_project(self, project: Project) -> None:
         with self.connect() as connection:
             connection.execute(
-                "INSERT INTO projects (id, name, description, adapter_name, created_at) VALUES (?, ?, ?, ?, ?)",
-                (project.id, project.name, project.description, project.adapter_name, project.created_at.isoformat()),
+                "INSERT INTO projects (id, name, description, adapter_name, max_concurrent_tasks, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (project.id, project.name, project.description, project.adapter_name, project.max_concurrent_tasks, project.created_at.isoformat()),
             )
 
     def list_projects(self) -> list[Project]:
         with self.connect() as connection:
             rows = connection.execute(
-                "SELECT id, name, description, adapter_name, created_at FROM projects ORDER BY created_at"
+                "SELECT id, name, description, adapter_name, max_concurrent_tasks, created_at FROM projects ORDER BY created_at"
             ).fetchall()
         return [project_from_row(row) for row in rows]
 
     def get_project(self, project_id: str) -> Project | None:
         with self.connect() as connection:
             row = connection.execute(
-                "SELECT id, name, description, adapter_name, created_at FROM projects WHERE id = ?",
+                "SELECT id, name, description, adapter_name, max_concurrent_tasks, created_at FROM projects WHERE id = ?",
                 (project_id,),
             ).fetchone()
         return project_from_row(row) if row else None
@@ -37,9 +37,10 @@ class ProjectTaskStoreMixin:
                 INSERT INTO tasks (
                     id, project_id, title, objective, priority, parent_task_id, source_run_id,
                     external_ref_type, external_ref_id,
-                    validation_profile, strategy, max_attempts, required_artifacts_json, status, created_at, updated_at
+                    validation_profile, strategy, max_attempts, max_branches,
+                    required_artifacts_json, status, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task.id,
@@ -54,6 +55,7 @@ class ProjectTaskStoreMixin:
                     task.validation_profile,
                     task.strategy,
                     task.max_attempts,
+                    task.max_branches,
                     json.dumps(task.required_artifacts, sort_keys=True),
                     task.status.value,
                     task.created_at.isoformat(),
@@ -65,7 +67,7 @@ class ProjectTaskStoreMixin:
         query = """
             SELECT id, project_id, title, objective, priority, parent_task_id, source_run_id,
                    external_ref_type, external_ref_id, validation_profile,
-                   strategy, max_attempts, required_artifacts_json, status, created_at, updated_at
+                   strategy, max_attempts, max_branches, required_artifacts_json, status, created_at, updated_at
             FROM tasks
         """
         params: tuple[str, ...] = ()
@@ -83,7 +85,7 @@ class ProjectTaskStoreMixin:
                 """
                 SELECT id, project_id, title, objective, priority, parent_task_id, source_run_id,
                        external_ref_type, external_ref_id, validation_profile, strategy, max_attempts,
-                       required_artifacts_json, status, created_at, updated_at
+                       max_branches, required_artifacts_json, status, created_at, updated_at
                 FROM tasks WHERE id = ?
                 """,
                 (task_id,),
@@ -96,7 +98,7 @@ class ProjectTaskStoreMixin:
                 """
                 SELECT id, project_id, title, objective, priority, parent_task_id, source_run_id,
                        external_ref_type, external_ref_id, validation_profile, strategy, max_attempts,
-                       required_artifacts_json, status, created_at, updated_at
+                       max_branches, required_artifacts_json, status, created_at, updated_at
                 FROM tasks
                 WHERE external_ref_type = ? AND external_ref_id = ?
                 ORDER BY created_at
@@ -110,7 +112,7 @@ class ProjectTaskStoreMixin:
         query = """
             SELECT id, project_id, title, objective, priority, parent_task_id, source_run_id,
                    external_ref_type, external_ref_id, validation_profile, strategy, max_attempts,
-                   required_artifacts_json, status, created_at, updated_at
+                   max_branches, required_artifacts_json, status, created_at, updated_at
             FROM tasks
             WHERE status = ?
         """
@@ -136,7 +138,7 @@ class ProjectTaskStoreMixin:
         with self.connect() as connection:
             connection.execute("DELETE FROM task_leases WHERE lease_expires_at <= ?", (now.isoformat(),))
             query = """
-                SELECT t.id
+                SELECT t.id, t.project_id
                 FROM tasks t
                 LEFT JOIN task_leases l ON l.task_id = t.id
                 WHERE t.status = ? AND l.task_id IS NULL
@@ -145,11 +147,31 @@ class ProjectTaskStoreMixin:
             if project_id:
                 query += " AND t.project_id = ?"
                 params.append(project_id)
-            query += " ORDER BY t.priority DESC, t.created_at LIMIT 1"
-            row = connection.execute(query, tuple(params)).fetchone()
-            if row is None:
+            query += " ORDER BY t.priority DESC, t.created_at"
+            candidates = connection.execute(query, tuple(params)).fetchall()
+            task_id: str | None = None
+            for candidate in candidates:
+                cand_project_id = candidate["project_id"]
+                project_row = connection.execute(
+                    "SELECT max_concurrent_tasks FROM projects WHERE id = ?",
+                    (cand_project_id,),
+                ).fetchone()
+                max_concurrent = int(project_row["max_concurrent_tasks"]) if project_row else 0
+                if max_concurrent > 0:
+                    active_count = connection.execute(
+                        """
+                        SELECT COUNT(*) AS cnt FROM task_leases l
+                        JOIN tasks t ON t.id = l.task_id
+                        WHERE t.project_id = ?
+                        """,
+                        (cand_project_id,),
+                    ).fetchone()["cnt"]
+                    if active_count >= max_concurrent:
+                        continue
+                task_id = candidate["id"]
+                break
+            if task_id is None:
                 return None
-            task_id = row["id"]
             connection.execute(
                 """
                 INSERT OR REPLACE INTO task_leases (task_id, worker_id, lease_expires_at, created_at)
@@ -184,7 +206,7 @@ class ProjectTaskStoreMixin:
                 """
                 SELECT id, project_id, title, objective, priority, parent_task_id, source_run_id,
                        external_ref_type, external_ref_id, validation_profile, strategy, max_attempts,
-                       required_artifacts_json, status, created_at, updated_at
+                       max_branches, required_artifacts_json, status, created_at, updated_at
                 FROM tasks
                 WHERE parent_task_id = ? AND source_run_id = ?
                 ORDER BY created_at
@@ -200,7 +222,7 @@ class ProjectTaskStoreMixin:
                 """
                 SELECT id, project_id, title, objective, priority, parent_task_id, source_run_id,
                        external_ref_type, external_ref_id, validation_profile, strategy, max_attempts,
-                       required_artifacts_json, status, created_at, updated_at
+                       max_branches, required_artifacts_json, status, created_at, updated_at
                 FROM tasks
                 WHERE parent_task_id = ?
                 ORDER BY created_at

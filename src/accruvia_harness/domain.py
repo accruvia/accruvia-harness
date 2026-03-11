@@ -30,6 +30,7 @@ class RunStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     BLOCKED = "blocked"
+    DISPOSED = "disposed"
 
 
 class EvaluationVerdict(StrEnum):
@@ -58,6 +59,7 @@ class Project:
     name: str
     description: str
     adapter_name: str = "generic"
+    max_concurrent_tasks: int = 0
     created_at: datetime = field(default_factory=utc_now)
 
 
@@ -75,6 +77,7 @@ class Task:
     validation_profile: str = "generic"
     strategy: str = "default"
     max_attempts: int = 3
+    max_branches: int = 1
     required_artifacts: list[str] = field(default_factory=lambda: ["plan", "report"])
     status: TaskStatus = TaskStatus.PENDING
     created_at: datetime = field(default_factory=utc_now)
@@ -88,6 +91,7 @@ class Run:
     status: RunStatus
     attempt: int
     summary: str
+    branch_id: str | None = None
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)
 

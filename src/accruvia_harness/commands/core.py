@@ -48,18 +48,19 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
     if args.command == "create-task":
         required_artifacts = args.required_artifacts or ["plan", "report"]
         task = engine.create_task_with_policy(
-            args.project_id,
-            args.title,
-            args.objective,
-            args.priority,
-            None,
-            None,
-            args.external_ref_type,
-            args.external_ref_id,
-            args.validation_profile,
-            args.strategy,
-            args.max_attempts,
-            required_artifacts,
+            project_id=args.project_id,
+            title=args.title,
+            objective=args.objective,
+            priority=args.priority,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=args.external_ref_type,
+            external_ref_id=args.external_ref_id,
+            validation_profile=args.validation_profile,
+            strategy=args.strategy,
+            max_attempts=args.max_attempts,
+            max_branches=args.max_branches,
+            required_artifacts=required_artifacts,
         )
         emit({"task": serialize_dataclass(task)})
         return True
@@ -105,7 +106,11 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
     if args.command == "smoke-test":
         project = engine.create_project(args.project_name, "Local smoke-test project", adapter_name="generic")
         task = engine.create_task_with_policy(
-            project.id, args.task_title, args.objective, 100, None, None, None, None, "generic", "smoke", 2, ["plan", "report"]
+            project_id=project.id, title=args.task_title, objective=args.objective,
+            priority=100, parent_task_id=None, source_run_id=None,
+            external_ref_type=None, external_ref_id=None,
+            validation_profile="generic", strategy="smoke", max_attempts=2,
+            required_artifacts=["plan", "report"],
         )
         runs = engine.run_until_stable(task.id)
         emit({"project": serialize_dataclass(project), "task": serialize_dataclass(store.get_task(task.id)), "runs": [serialize_dataclass(r) for r in runs], "events": [serialize_dataclass(i) for i in store.list_events("task", task.id)]})

@@ -30,6 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     create_task.add_argument("--validation-profile", default="generic")
     create_task.add_argument("--strategy", default="default")
     create_task.add_argument("--max-attempts", type=int, default=3)
+    create_task.add_argument("--max-branches", type=int, default=1)
     create_task.add_argument("--required-artifact", action="append", dest="required_artifacts", default=None)
 
     run_once = subparsers.add_parser("run-once", help="Run one full harness cycle for a task.")
