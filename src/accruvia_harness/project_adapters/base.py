@@ -25,3 +25,12 @@ class ProjectAdapter(Protocol):
         run: Run,
         run_dir: Path,
     ) -> ProjectWorkspace: ...
+
+    def build_worker(
+        self,
+        project: Project,
+        task: Task,
+        run: Run,
+        workspace: ProjectWorkspace,
+        default_worker,
+    ): ...

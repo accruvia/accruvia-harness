@@ -197,6 +197,10 @@ class CommandWorker:
             ),
             encoding="utf-8",
         )
+        plan_artifact = []
+        plan_path = run_dir / "plan.txt"
+        if plan_path.exists():
+            plan_artifact.append(("plan", str(plan_path), "Structured plan artifact"))
         reported_outcome = payload.get("worker_outcome")
         blocked = payload.get("blocked") is True or payload.get("promotion_blocked") is True
         if isinstance(reported_outcome, str) and reported_outcome in {"success", "failed", "blocked"}:
@@ -208,6 +212,7 @@ class CommandWorker:
         return WorkResult(
             summary=f"Executed {self.backend_name} worker command and captured output.",
             artifacts=[
+                *plan_artifact,
                 ("worker_stdout", str(stdout_path), "Captured shell worker stdout"),
                 ("worker_stderr", str(stderr_path), "Captured shell worker stderr"),
                 ("report", str(report_path), "Structured run report"),

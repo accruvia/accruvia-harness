@@ -84,6 +84,36 @@ class ManifestProjectAdapter:
             diagnostics={"project_adapter": self.name},
         )
 
+    def build_worker(self, project, task, run, workspace, default_worker):
+        return None
+
+
+class ProjectOverrideWorker(LocalArtifactWorker):
+    def work(self, task, run, workspace_root: Path) -> WorkResult:  # type: ignore[override]
+        run_dir = workspace_root / "runs" / run.id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        plan_path = run_dir / "plan.txt"
+        plan_path.write_text("override plan\n", encoding="utf-8")
+        report_path = run_dir / "report.json"
+        report_path.write_text(
+            json.dumps({"worker_backend": "project_override", "worker_outcome": "success"}),
+            encoding="utf-8",
+        )
+        return WorkResult(
+            summary="Used project-specific worker override.",
+            artifacts=[
+                ("plan", str(plan_path), "Override plan"),
+                ("report", str(report_path), "Override report"),
+            ],
+        )
+
+
+class OverrideProjectAdapter(ManifestProjectAdapter):
+    name = "override"
+
+    def build_worker(self, project, task, run, workspace, default_worker):
+        return ProjectOverrideWorker()
+
 
 class BranchOnceDecider:
     def __init__(self) -> None:
@@ -183,6 +213,43 @@ class HarnessEngineTests(unittest.TestCase):
         self.assertIn("workspace_metadata", artifact_paths)
         self.assertTrue(Path(artifact_paths["workspace_metadata"]).exists())
         self.assertIn("project_workspace_prepared", [event.event_type for event in events])
+
+    def test_project_adapter_can_supply_real_worker_override(self) -> None:
+        registry = ProjectAdapterRegistry()
+        registry.register(OverrideProjectAdapter())
+        engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-override",
+            project_adapter_registry=registry,
+        )
+        project = Project(
+            id=new_id("project"),
+            name="override-project",
+            description="Uses custom project worker",
+            adapter_name="override",
+        )
+        self.store.create_project(project)
+        task = engine.create_task_with_policy(
+            project_id=project.id,
+            title="Use override worker",
+            objective="Ensure project adapter worker executes",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+
+        run = engine.run_once(task.id)
+        report_artifact = next(artifact for artifact in self.store.list_artifacts(run.id) if artifact.kind == "report")
+        report = json.loads(Path(report_artifact.path).read_text(encoding="utf-8"))
+        run_events = self.store.list_events("run", run.id)
+
+        self.assertEqual("project_override", report["worker_backend"])
+        self.assertIn("project_worker_selected", [event.event_type for event in run_events])
 
     def test_run_once_rejects_terminal_tasks(self) -> None:
         task = self.engine.create_task_with_policy(

@@ -144,6 +144,24 @@ class RunService:
                 },
             )
         )
+        worker = self.worker
+        build_worker = getattr(project_adapter, "build_worker", None)
+        if callable(build_worker):
+            override_worker = build_worker(project, task, run, prepared_workspace, self.worker)
+            if override_worker is not None:
+                worker = override_worker
+                self.store.create_event(
+                    Event(
+                        id=new_id("event"),
+                        entity_type="run",
+                        entity_id=run.id,
+                        event_type="project_worker_selected",
+                        payload={
+                            "project_adapter": project.adapter_name,
+                            "worker_backend": type(worker).__name__,
+                        },
+                    )
+                )
 
         if self.telemetry is not None:
             with self.telemetry.timed(
@@ -184,11 +202,11 @@ class RunService:
                 run_id=run.id,
                 attempt=attempt,
                 validation_profile=task.validation_profile,
-                worker_backend=type(self.worker).__name__,
+                worker_backend=type(worker).__name__,
             ):
-                work = self.worker.work(task, run, self.workspace_root)
+                work = worker.work(task, run, self.workspace_root)
         else:
-            work = self.worker.work(task, run, self.workspace_root)
+            work = worker.work(task, run, self.workspace_root)
         self.store.create_event(
             Event(
                 id=new_id("event"),
