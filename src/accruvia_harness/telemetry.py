@@ -46,8 +46,8 @@ class TelemetrySink:
         return _TimedSpan(self, name, attributes)
 
     def summary(self) -> dict[str, object]:
-        metrics = self._load(self.metrics_path)
-        spans = self._load(self.spans_path)
+        metrics = self.load_metrics()
+        spans = self.load_spans()
         by_name: dict[str, float] = {}
         for item in metrics:
             by_name[item["name"]] = by_name.get(item["name"], 0.0) + float(item["value"])
@@ -81,6 +81,12 @@ class TelemetrySink:
                 continue
             records.append(json.loads(line))
         return records
+
+    def load_metrics(self) -> list[dict[str, Any]]:
+        return self._load(self.metrics_path)
+
+    def load_spans(self) -> list[dict[str, Any]]:
+        return self._load(self.spans_path)
 
 
 class _TimedSpan:

@@ -11,6 +11,8 @@ from accruvia_harness.adapters import build_adapter_registry
 from accruvia_harness.config import HarnessConfig
 from accruvia_harness.domain import Run, RunStatus, Task, new_id
 from accruvia_harness.llm import build_llm_router, parse_affirmation_response
+from accruvia_harness.telemetry import TelemetrySink
+from accruvia_harness.timeout_policy import ExecutionTimeoutPolicy
 from accruvia_harness.workers import (
     AgentCommandWorker,
     LocalArtifactWorker,
@@ -120,6 +122,22 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(["report", "worker_stderr", "worker_stdout"], kinds)
         self.assertEqual("success", result.outcome)
         self.assertTrue((self.base / "runs" / self.run.id / "output.txt").exists())
+
+    def test_shell_worker_times_out_with_policy(self) -> None:
+        telemetry = TelemetrySink(self.base / "telemetry")
+        timeout_policy = ExecutionTimeoutPolicy(
+            telemetry,
+            min_seconds=1,
+            max_seconds=1,
+            multiplier=1.0,
+        )
+        worker = ShellCommandWorker("sleep 2", timeout_policy=timeout_policy)
+
+        result = worker.work(self.task, self.run, self.base)
+
+        self.assertEqual("failed", result.outcome)
+        self.assertTrue(result.diagnostics["timed_out"])
+        self.assertEqual(1, result.diagnostics["timeout_seconds"])
 
     def test_agent_worker_captures_failure_without_raising(self) -> None:
         worker = AgentCommandWorker("printf 'boom' >&2; exit 7")

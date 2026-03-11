@@ -33,6 +33,12 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
             "llm_accruvia_client_command": config.llm_accruvia_client_command,
             "adapter_modules": list(config.adapter_modules),
             "project_adapter_modules": list(config.project_adapter_modules),
+            "timeout_ema_alpha": config.timeout_ema_alpha,
+            "timeout_min_seconds": config.timeout_min_seconds,
+            "timeout_max_seconds": config.timeout_max_seconds,
+            "timeout_multiplier": config.timeout_multiplier,
+            "memory_limit_mb": config.memory_limit_mb,
+            "cpu_time_limit_seconds": config.cpu_time_limit_seconds,
         })
         return True
     if args.command == "create-project":

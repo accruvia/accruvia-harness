@@ -1,0 +1,54 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+from .telemetry import TelemetrySink
+
+
+@dataclass(slots=True)
+class ExecutionTimeoutPolicy:
+    telemetry: TelemetrySink
+    alpha: float = 0.5
+    min_seconds: int = 30
+    max_seconds: int = 1800
+    multiplier: float = 2.5
+
+    def timeout_seconds(self, validation_profile: str, worker_backend: str) -> int:
+        spans = self.telemetry.load_spans()
+        durations = [
+            float(item["duration_ms"]) / 1000.0
+            for item in spans
+            if item.get("name") == "work"
+            and item.get("attributes", {}).get("validation_profile") == validation_profile
+            and "duration_ms" in item
+            and not item.get("attributes", {}).get("error")
+        ]
+        if not durations:
+            durations = [
+                float(item["duration_ms"]) / 1000.0
+                for item in spans
+                if item.get("name") == "work"
+                and item.get("attributes", {}).get("worker_backend") == worker_backend
+                and "duration_ms" in item
+                and not item.get("attributes", {}).get("error")
+            ]
+        if not durations:
+            return self.min_seconds
+        ema = durations[0]
+        for sample in durations[1:]:
+            ema = self.alpha * sample + (1.0 - self.alpha) * ema
+        timeout = int(max(self.min_seconds, min(self.max_seconds, ema * self.multiplier)))
+        return timeout
+
+    def describe(self, validation_profile: str, worker_backend: str) -> dict[str, Any]:
+        timeout_seconds = self.timeout_seconds(validation_profile, worker_backend)
+        return {
+            "validation_profile": validation_profile,
+            "worker_backend": worker_backend,
+            "timeout_seconds": timeout_seconds,
+            "alpha": self.alpha,
+            "multiplier": self.multiplier,
+            "min_seconds": self.min_seconds,
+            "max_seconds": self.max_seconds,
+        }

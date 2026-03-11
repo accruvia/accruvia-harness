@@ -6,6 +6,7 @@ from ..domain import (
     Artifact,
     Decision,
     DecisionAction,
+    EvaluationVerdict,
     Event,
     Evaluation,
     Run,
@@ -215,9 +216,15 @@ class RunService:
                 attempt=attempt,
                 outcome=work.outcome,
             ):
-                analysis = self.analyzer.analyze(task, run, self.store.list_artifacts(run.id))
+                if work.outcome == "blocked":
+                    analysis = self.analyzer.blocked(task, run, work.diagnostics)
+                else:
+                    analysis = self.analyzer.analyze(task, run, self.store.list_artifacts(run.id))
         else:
-            analysis = self.analyzer.analyze(task, run, self.store.list_artifacts(run.id))
+            if work.outcome == "blocked":
+                analysis = self.analyzer.blocked(task, run, work.diagnostics)
+            else:
+                analysis = self.analyzer.analyze(task, run, self.store.list_artifacts(run.id))
         evaluation = Evaluation(
             id=new_id("evaluation"),
             run_id=run.id,
@@ -275,6 +282,8 @@ class RunService:
         )
 
         final_status = RunStatus.COMPLETED if decision_result.action == DecisionAction.PROMOTE else RunStatus.FAILED
+        if analysis.verdict == EvaluationVerdict.BLOCKED:
+            final_status = RunStatus.BLOCKED
         task_status = TaskStatus.COMPLETED if decision_result.action == DecisionAction.PROMOTE else TaskStatus.PENDING
         if decision_result.action == DecisionAction.FAIL:
             task_status = TaskStatus.FAILED

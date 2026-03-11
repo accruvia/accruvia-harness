@@ -134,6 +134,8 @@ def build_parser() -> argparse.ArgumentParser:
     ops_report = subparsers.add_parser("ops-report", help="Show operational backlog and profile-aware promotion metrics.")
     ops_report.add_argument("--project-id")
     subparsers.add_parser("telemetry-report", help="Show aggregated telemetry counters and span timings.")
+    lineage_report = subparsers.add_parser("lineage-report", help="Show ancestors and spawned child tasks for a task.")
+    lineage_report.add_argument("task_id")
     task_report = subparsers.add_parser("task-report", help="Show task lineage and evidence.")
     task_report.add_argument("task_id")
     events = subparsers.add_parser("events", help="Show recorded harness events.")

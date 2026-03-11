@@ -27,6 +27,12 @@ class HarnessConfig:
     adapter_modules: tuple[str, ...] = field(default_factory=tuple)
     project_adapter_modules: tuple[str, ...] = field(default_factory=tuple)
     telemetry_dir: Path = Path(".accruvia-harness/telemetry")
+    timeout_ema_alpha: float = 0.5
+    timeout_min_seconds: int = 30
+    timeout_max_seconds: int = 1800
+    timeout_multiplier: float = 2.5
+    memory_limit_mb: int = 1024
+    cpu_time_limit_seconds: int = 300
 
     @classmethod
     def from_env(
@@ -71,4 +77,10 @@ class HarnessConfig:
                 for item in os.environ.get("ACCRUVIA_PROJECT_ADAPTER_MODULES", "").split(",")
                 if item.strip()
             ),
+            timeout_ema_alpha=float(os.environ.get("ACCRUVIA_TIMEOUT_EMA_ALPHA", "0.5")),
+            timeout_min_seconds=int(os.environ.get("ACCRUVIA_TIMEOUT_MIN_SECONDS", "30")),
+            timeout_max_seconds=int(os.environ.get("ACCRUVIA_TIMEOUT_MAX_SECONDS", "1800")),
+            timeout_multiplier=float(os.environ.get("ACCRUVIA_TIMEOUT_MULTIPLIER", "2.5")),
+            memory_limit_mb=int(os.environ.get("ACCRUVIA_MEMORY_LIMIT_MB", "1024")),
+            cpu_time_limit_seconds=int(os.environ.get("ACCRUVIA_CPU_TIME_LIMIT_SECONDS", "300")),
         )

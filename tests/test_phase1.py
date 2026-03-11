@@ -26,6 +26,8 @@ class Phase1Tests(unittest.TestCase):
         self.assertEqual(self.base / "workspace", config.workspace_root)
         self.assertEqual(self.base / "logs" / "harness.jsonl", config.log_path)
         self.assertEqual("local", config.runtime_backend)
+        self.assertEqual(1024, config.memory_limit_mb)
+        self.assertEqual(300, config.cpu_time_limit_seconds)
 
     def test_logger_writes_jsonl(self) -> None:
         logger = HarnessLogger(self.base / "logs" / "harness.jsonl")

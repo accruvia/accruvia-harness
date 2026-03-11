@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest import mock
 from unittest.mock import AsyncMock
 
-from accruvia_harness.domain import Project, new_id
+from accruvia_harness.domain import EvaluationVerdict, Project, RunStatus, new_id
 from accruvia_harness.engine import HarnessEngine
 from accruvia_harness.runtime import LocalWorkflowRuntime, build_runtime
 from accruvia_harness.store import SQLiteHarnessStore
@@ -113,3 +113,61 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(task.id, result["task"].id)
         self.assertEqual(run.id, result["runs"][0].id)
+
+    def test_blocked_run_uses_explicit_run_status_enum(self) -> None:
+        task = self.engine.create_task_with_policy(
+            project_id=self.project_id,
+            title="Blocked status task",
+            objective="Surface blocked run status",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+        report_dir = Path(self.temp_dir.name) / "workspace" / "runs"
+
+        class BlockedWorker:
+            def work(self, task, run, workspace_root):
+                run_dir = workspace_root / "runs" / run.id
+                run_dir.mkdir(parents=True, exist_ok=True)
+                (run_dir / "plan.txt").write_text("plan\n", encoding="utf-8")
+                (run_dir / "report.json").write_text('{"worker_outcome":"blocked"}', encoding="utf-8")
+                from accruvia_harness.policy import WorkResult
+                return WorkResult(
+                    summary="blocked",
+                    artifacts=[
+                        ("plan", str(run_dir / "plan.txt"), "Plan"),
+                        ("report", str(run_dir / "report.json"), "Report"),
+                    ],
+                    outcome="blocked",
+                    diagnostics={"reason": "blocked"},
+                )
+
+        blocked_engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-blocked-runtime",
+            worker=BlockedWorker(),
+        )
+        task = blocked_engine.create_task_with_policy(
+            project_id=self.project_id,
+            title="Blocked status task",
+            objective="Surface blocked run status",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+
+        run = blocked_engine.run_once(task.id)
+        evaluation = self.store.list_evaluations(run.id)[0]
+
+        self.assertEqual(RunStatus.BLOCKED, run.status)
+        self.assertEqual(EvaluationVerdict.BLOCKED, evaluation.verdict)

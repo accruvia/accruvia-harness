@@ -39,9 +39,11 @@ class LLMExecutionError(RuntimeError):
 
 
 class CommandLLMExecutor:
-    def __init__(self, backend_name: str, command: str) -> None:
+    def __init__(self, backend_name: str, command: str, timeout_policy=None, resource_policy=None) -> None:
         self.backend_name = backend_name
         self.command = command
+        self.timeout_policy = timeout_policy
+        self.resource_policy = resource_policy
 
     def execute(self, invocation: LLMInvocation) -> LLMExecutionResult:
         invocation.run_dir.mkdir(parents=True, exist_ok=True)
@@ -65,15 +67,29 @@ class CommandLLMExecutor:
         if invocation.model:
             env["ACCRUVIA_LLM_MODEL"] = invocation.model
 
-        completed = subprocess.run(
-            self.command,
-            shell=True,
-            check=False,
-            cwd=invocation.run_dir,
-            capture_output=True,
-            text=True,
-            env=env,
-        )
+        timeout_seconds = None
+        if self.timeout_policy is not None:
+            timeout_seconds = self.timeout_policy.timeout_seconds(
+                invocation.task.validation_profile, self.backend_name
+            )
+        try:
+            completed = subprocess.run(
+                self.command,
+                shell=True,
+                check=False,
+                cwd=invocation.run_dir,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=timeout_seconds,
+                preexec_fn=self.resource_policy.preexec_fn() if self.resource_policy is not None else None,
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout_path.write_text(exc.stdout or "", encoding="utf-8")
+            stderr_path.write_text(exc.stderr or "", encoding="utf-8")
+            raise LLMExecutionError(
+                f"{self.backend_name} executor timed out after {timeout_seconds} seconds"
+            ) from exc
         stdout_path.write_text(completed.stdout, encoding="utf-8")
         stderr_path.write_text(completed.stderr, encoding="utf-8")
 
@@ -99,6 +115,9 @@ class CommandLLMExecutor:
                 "returncode": completed.returncode,
                 "stdout_path": str(stdout_path),
                 "stderr_path": str(stderr_path),
+                "timeout_seconds": timeout_seconds,
+                "memory_limit_mb": getattr(self.resource_policy, "memory_limit_mb", None),
+                "cpu_time_limit_seconds": getattr(self.resource_policy, "cpu_time_limit_seconds", None),
             },
         )
 
@@ -131,16 +150,49 @@ class LLMRouter:
 
 
 def build_llm_router(config: HarnessConfig) -> LLMRouter:
+    from .telemetry import TelemetrySink
+    from .resource_limits import ResourceLimitPolicy
+    from .timeout_policy import ExecutionTimeoutPolicy
+
+    timeout_policy = ExecutionTimeoutPolicy(
+        TelemetrySink(config.telemetry_dir),
+        alpha=config.timeout_ema_alpha,
+        min_seconds=config.timeout_min_seconds,
+        max_seconds=config.timeout_max_seconds,
+        multiplier=config.timeout_multiplier,
+    )
+    resource_policy = ResourceLimitPolicy(
+        memory_limit_mb=config.memory_limit_mb,
+        cpu_time_limit_seconds=config.cpu_time_limit_seconds,
+    )
     executors: dict[str, LLMExecutor] = {}
     if config.llm_command:
-        executors["command"] = CommandLLMExecutor("command", config.llm_command)
+        executors["command"] = CommandLLMExecutor(
+            "command",
+            config.llm_command,
+            timeout_policy=timeout_policy,
+            resource_policy=resource_policy,
+        )
     if config.llm_codex_command:
-        executors["codex"] = CommandLLMExecutor("codex", config.llm_codex_command)
+        executors["codex"] = CommandLLMExecutor(
+            "codex",
+            config.llm_codex_command,
+            timeout_policy=timeout_policy,
+            resource_policy=resource_policy,
+        )
     if config.llm_claude_command:
-        executors["claude"] = CommandLLMExecutor("claude", config.llm_claude_command)
+        executors["claude"] = CommandLLMExecutor(
+            "claude",
+            config.llm_claude_command,
+            timeout_policy=timeout_policy,
+            resource_policy=resource_policy,
+        )
     if config.llm_accruvia_client_command:
         executors["accruvia_client"] = CommandLLMExecutor(
-            "accruvia_client", config.llm_accruvia_client_command
+            "accruvia_client",
+            config.llm_accruvia_client_command,
+            timeout_policy=timeout_policy,
+            resource_policy=resource_policy,
         )
     return LLMRouter(config.llm_backend, executors)
 

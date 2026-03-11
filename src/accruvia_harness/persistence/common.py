@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from ..domain import (
     Decision,
     DecisionAction,
+    EvaluationVerdict,
     Event,
     Evaluation,
     PromotionRecord,
@@ -80,7 +81,7 @@ def evaluation_from_row(row: sqlite3.Row) -> Evaluation:
     return Evaluation(
         id=row["id"],
         run_id=row["run_id"],
-        verdict=row["verdict"],
+        verdict=EvaluationVerdict(row["verdict"]),
         confidence=float(row["confidence"]),
         summary=row["summary"],
         details=json.loads(row["details_json"]),

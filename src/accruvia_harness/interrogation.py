@@ -63,6 +63,39 @@ class HarnessQueryService:
             "runs": run_reports,
             "promotions": [serialize_dataclass(item) for item in self.store.list_promotions(task.id)],
             "events": [serialize_dataclass(event) for event in events],
+            "lineage": self.task_lineage(task_id),
+        }
+
+    def task_lineage(self, task_id: str) -> dict[str, object]:
+        task = self.store.get_task(task_id)
+        if task is None:
+            raise ValueError(f"Unknown task: {task_id}")
+
+        ancestors = []
+        current = task
+        while current.parent_task_id:
+            parent = self.store.get_task(current.parent_task_id)
+            if parent is None:
+                break
+            ancestors.append(serialize_dataclass(parent))
+            current = parent
+        ancestors.reverse()
+
+        def descendants(parent_id: str) -> list[dict[str, object]]:
+            children = self.store.list_child_tasks(parent_id)
+            payload = []
+            for child in children:
+                payload.append(
+                    {
+                        "task": serialize_dataclass(child),
+                        "children": descendants(child.id),
+                    }
+                )
+            return payload
+
+        return {
+            "ancestors": ancestors,
+            "children": descendants(task.id),
         }
 
     def context_packet(self, project_id: str | None = None) -> dict[str, object]:

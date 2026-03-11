@@ -58,6 +58,14 @@ class PromotionBlockedWorker(LocalArtifactWorker):
         )
 
 
+class BlockedDiagnosisWorker(PromotionBlockedWorker):
+    def work(self, task, run, workspace_root: Path) -> WorkResult:  # type: ignore[override]
+        result = super().work(task, run, workspace_root)
+        result.outcome = "blocked"
+        result.diagnostics = {"blocked_reason": "Generated candidate lacks required test coverage."}
+        return result
+
+
 class ManifestProjectAdapter:
     name = "manifest"
 
@@ -461,6 +469,34 @@ class HarnessEngineTests(unittest.TestCase):
         self.assertEqual(task.id, follow_on.parent_task_id if follow_on else None)
         self.assertEqual(run.id, follow_on.source_run_id if follow_on else None)
         self.assertEqual("failed", self.store.get_task(task.id).status.value)
+
+    def test_blocked_worker_outcome_records_blocked_evaluation(self) -> None:
+        engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-blocked-outcome",
+            worker=BlockedDiagnosisWorker(),
+        )
+        task = engine.create_task_with_policy(
+            project_id=self.project_id,
+            title="Blocked outcome",
+            objective="Surface blocked diagnosis explicitly",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+
+        run = engine.run_once(task.id)
+        evaluation = self.store.list_evaluations(run.id)[0]
+        decision = self.store.list_decisions(run.id)[0]
+
+        self.assertEqual("blocked", run.status.value)
+        self.assertEqual("blocked", evaluation.verdict)
+        self.assertEqual("fail", decision.action.value)
 
     def test_review_promotion_dedupes_follow_on_for_same_run(self) -> None:
         engine = HarnessEngine(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .domain import Artifact, DecisionAction, Run, Task
+from .domain import Artifact, DecisionAction, EvaluationVerdict, Run, Task
 
 
 @dataclass(slots=True)
@@ -22,7 +22,7 @@ class WorkResult:
 
 @dataclass(slots=True)
 class AnalyzeResult:
-    verdict: str
+    verdict: EvaluationVerdict
     confidence: float
     summary: str
     details: dict[str, object]
@@ -79,14 +79,14 @@ class DefaultAnalyzer:
         artifact_count = len(artifacts)
         if artifact_count == 0:
             return AnalyzeResult(
-                verdict="failed",
+                verdict=EvaluationVerdict.FAILED,
                 confidence=0.95,
                 summary="Run produced no artifacts.",
                 details={"artifact_count": artifact_count},
             )
         if missing:
             return AnalyzeResult(
-                verdict="incomplete",
+                verdict=EvaluationVerdict.INCOMPLETE,
                 confidence=0.9,
                 summary="Run is missing required artifacts.",
                 details={
@@ -96,7 +96,7 @@ class DefaultAnalyzer:
                 },
             )
         return AnalyzeResult(
-            verdict="acceptable",
+            verdict=EvaluationVerdict.ACCEPTABLE,
             confidence=0.8,
             summary="Run produced the required durable artifacts.",
             details={
@@ -107,13 +107,29 @@ class DefaultAnalyzer:
             },
         )
 
+    def blocked(self, task: Task, run: Run, diagnostics: dict[str, object] | None = None) -> AnalyzeResult:
+        details = {"task_title": task.title, "strategy": task.strategy}
+        if diagnostics:
+            details["diagnostics"] = diagnostics
+        return AnalyzeResult(
+            verdict=EvaluationVerdict.BLOCKED,
+            confidence=0.95,
+            summary="Run ended with a blocked diagnosis.",
+            details=details,
+        )
+
 
 class DefaultDecider:
     def decide(self, analysis: AnalyzeResult, run: Run, task: Task) -> DecideResult:
-        if analysis.verdict == "acceptable":
+        if analysis.verdict == EvaluationVerdict.ACCEPTABLE:
             return DecideResult(
                 action=DecisionAction.PROMOTE,
                 rationale="Required artifacts exist and analysis passed.",
+            )
+        if analysis.verdict == EvaluationVerdict.BLOCKED:
+            return DecideResult(
+                action=DecisionAction.FAIL,
+                rationale="Worker reported a blocked diagnosis.",
             )
         if run.attempt >= task.max_attempts:
             return DecideResult(
@@ -146,7 +162,7 @@ class RetryStrategyAdvisor:
                 missing_list = [str(item) for item in missing]
                 focus = f"producing the missing required artifacts: {', '.join(missing_list)}"
                 details["missing_required_artifacts"] = missing_list
-            elif verdict == "failed":
+            elif verdict == EvaluationVerdict.FAILED:
                 focus = "producing at least one valid report and plan artifact before deeper changes"
             else:
                 artifact_kinds = previous_evaluation.details.get("artifact_kinds")

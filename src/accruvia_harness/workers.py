@@ -52,6 +52,7 @@ class LocalArtifactWorker:
                     "objective": task.objective,
                     "worker_backend": "local",
                     "validation_profile": task.validation_profile,
+                    "worker_outcome": "success" if evidence.passed else "failed",
                     **evidence.report,
                 },
                 indent=2,
@@ -76,9 +77,11 @@ class LocalArtifactWorker:
 
 
 class CommandWorker:
-    def __init__(self, command: str, backend_name: str) -> None:
+    def __init__(self, command: str, backend_name: str, timeout_policy=None, resource_policy=None) -> None:
         self.command = command
         self.backend_name = backend_name
+        self.timeout_policy = timeout_policy
+        self.resource_policy = resource_policy
 
     def work(self, task: Task, run: Run, workspace_root: Path) -> WorkResult:
         run_dir = workspace_root / "runs" / run.id
@@ -92,15 +95,68 @@ class CommandWorker:
             "ACCRUVIA_RUN_DIR": str(run_dir),
             "ACCRUVIA_PROJECT_WORKSPACE": str(project_workspace),
         }
-        completed = subprocess.run(
-            self.command,
-            shell=True,
-            check=False,
-            cwd=project_workspace,
-            capture_output=True,
-            text=True,
-            env={**os.environ, **env},
-        )
+        timeout_seconds = None
+        if self.timeout_policy is not None:
+            timeout_seconds = self.timeout_policy.timeout_seconds(
+                task.validation_profile, self.backend_name
+            )
+        try:
+            completed = subprocess.run(
+                self.command,
+                shell=True,
+                check=False,
+                cwd=project_workspace,
+                capture_output=True,
+                text=True,
+                env={**os.environ, **env},
+                timeout=timeout_seconds,
+                preexec_fn=self.resource_policy.preexec_fn() if self.resource_policy is not None else None,
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout_path = run_dir / "worker.stdout.txt"
+            stdout_path.write_text(exc.stdout or "", encoding="utf-8")
+            stderr_path = run_dir / "worker.stderr.txt"
+            stderr_path.write_text(exc.stderr or "", encoding="utf-8")
+            report_path = run_dir / "report.json"
+            report_path.write_text(
+                json.dumps(
+                    {
+                        "task_id": task.id,
+                        "run_id": run.id,
+                        "attempt": run.attempt,
+                        "strategy": task.strategy,
+                        "objective": task.objective,
+                        "worker_backend": self.backend_name,
+                        "validation_profile": task.validation_profile,
+                        "command": self.command,
+                        "timeout_seconds": timeout_seconds,
+                        "timed_out": True,
+                        "memory_limit_mb": getattr(self.resource_policy, "memory_limit_mb", None),
+                        "cpu_time_limit_seconds": getattr(self.resource_policy, "cpu_time_limit_seconds", None),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            return WorkResult(
+                summary=f"Executed {self.backend_name} worker command and timed out.",
+                artifacts=[
+                    ("worker_stdout", str(stdout_path), "Captured shell worker stdout"),
+                    ("worker_stderr", str(stderr_path), "Captured shell worker stderr"),
+                    ("report", str(report_path), "Structured run report"),
+                ],
+                outcome="failed",
+                diagnostics={
+                    "worker_backend": self.backend_name,
+                    "command": self.command,
+                    "timed_out": True,
+                    "timeout_seconds": timeout_seconds,
+                    "memory_limit_mb": getattr(self.resource_policy, "memory_limit_mb", None),
+                    "cpu_time_limit_seconds": getattr(self.resource_policy, "cpu_time_limit_seconds", None),
+                    "project_workspace": str(project_workspace),
+                },
+            )
         stdout_path = run_dir / "worker.stdout.txt"
         stdout_path.write_text(completed.stdout, encoding="utf-8")
         stderr_path = run_dir / "worker.stderr.txt"
@@ -124,14 +180,23 @@ class CommandWorker:
                     "worker_backend": self.backend_name,
                     "validation_profile": task.validation_profile,
                     "command": self.command,
-                    "returncode": completed.returncode,
-                },
+                        "returncode": completed.returncode,
+                        "memory_limit_mb": getattr(self.resource_policy, "memory_limit_mb", None),
+                        "cpu_time_limit_seconds": getattr(self.resource_policy, "cpu_time_limit_seconds", None),
+                    },
                 indent=2,
                 sort_keys=True,
             ),
             encoding="utf-8",
         )
-        outcome = "success" if completed.returncode == 0 else "failed"
+        reported_outcome = payload.get("worker_outcome")
+        blocked = payload.get("blocked") is True or payload.get("promotion_blocked") is True
+        if isinstance(reported_outcome, str) and reported_outcome in {"success", "failed", "blocked"}:
+            outcome = reported_outcome
+        elif blocked:
+            outcome = "blocked"
+        else:
+            outcome = "success" if completed.returncode == 0 else "failed"
         return WorkResult(
             summary=f"Executed {self.backend_name} worker command and captured output.",
             artifacts=[
@@ -144,19 +209,32 @@ class CommandWorker:
                 "worker_backend": self.backend_name,
                 "command": self.command,
                 "returncode": completed.returncode,
+                "timeout_seconds": timeout_seconds,
+                "memory_limit_mb": getattr(self.resource_policy, "memory_limit_mb", None),
+                "cpu_time_limit_seconds": getattr(self.resource_policy, "cpu_time_limit_seconds", None),
                 "project_workspace": str(project_workspace),
             },
         )
 
 
 class ShellCommandWorker(CommandWorker):
-    def __init__(self, command: str) -> None:
-        super().__init__(command=command, backend_name="shell")
+    def __init__(self, command: str, timeout_policy=None, resource_policy=None) -> None:
+        super().__init__(
+            command=command,
+            backend_name="shell",
+            timeout_policy=timeout_policy,
+            resource_policy=resource_policy,
+        )
 
 
 class AgentCommandWorker(CommandWorker):
-    def __init__(self, command: str) -> None:
-        super().__init__(command=command, backend_name="agent")
+    def __init__(self, command: str, timeout_policy=None, resource_policy=None) -> None:
+        super().__init__(
+            command=command,
+            backend_name="agent",
+            timeout_policy=timeout_policy,
+            resource_policy=resource_policy,
+        )
 
 
 class LLMTaskWorker:
@@ -197,11 +275,12 @@ class LLMTaskWorker:
                         "strategy": task.strategy,
                         "objective": task.objective,
                     "worker_backend": "llm",
-                    "llm_backend": routed_backend,
-                    "error": str(exc),
-                    "validation_profile": task.validation_profile,
-                    "project_workspace": str(project_workspace),
-                },
+                        "llm_backend": routed_backend,
+                        "error": str(exc),
+                        "validation_profile": task.validation_profile,
+                        "project_workspace": str(project_workspace),
+                        "worker_outcome": "failed",
+                    },
                     indent=2,
                     sort_keys=True,
                 ),
@@ -244,6 +323,7 @@ class LLMTaskWorker:
                     "llm_model": self.model,
                     "validation_profile": task.validation_profile,
                     "project_workspace": str(project_workspace),
+                    "worker_outcome": payload.get("worker_outcome", "success"),
                 },
                 indent=2,
                 sort_keys=True,
@@ -292,9 +372,40 @@ def build_worker(backend: str, shell_command: str | None = None) -> WorkerBacken
 
 
 def build_worker_from_config(config: HarnessConfig) -> WorkerBackend:
+    from .telemetry import TelemetrySink
+    from .resource_limits import ResourceLimitPolicy
+    from .timeout_policy import ExecutionTimeoutPolicy
+
     adapter_registry = build_adapter_registry(config.adapter_modules)
+    timeout_policy = ExecutionTimeoutPolicy(
+        TelemetrySink(config.telemetry_dir),
+        alpha=config.timeout_ema_alpha,
+        min_seconds=config.timeout_min_seconds,
+        max_seconds=config.timeout_max_seconds,
+        multiplier=config.timeout_multiplier,
+    )
+    resource_policy = ResourceLimitPolicy(
+        memory_limit_mb=config.memory_limit_mb,
+        cpu_time_limit_seconds=config.cpu_time_limit_seconds,
+    )
     if config.worker_backend == "llm":
         return LLMTaskWorker(build_llm_router(config), model=config.llm_model)
     if config.worker_backend == "local":
         return LocalArtifactWorker(adapter_registry=adapter_registry)
+    if config.worker_backend == "shell":
+        if not config.worker_command:
+            raise ValueError("Shell worker backend requires ACCRUVIA_WORKER_COMMAND")
+        return ShellCommandWorker(
+            config.worker_command,
+            timeout_policy=timeout_policy,
+            resource_policy=resource_policy,
+        )
+    if config.worker_backend == "agent":
+        if not config.worker_command:
+            raise ValueError("Agent worker backend requires ACCRUVIA_WORKER_COMMAND")
+        return AgentCommandWorker(
+            config.worker_command,
+            timeout_policy=timeout_policy,
+            resource_policy=resource_policy,
+        )
     return build_worker(config.worker_backend, config.worker_command)

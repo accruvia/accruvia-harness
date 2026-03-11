@@ -131,3 +131,36 @@ class HarnessQueryServiceTests(unittest.TestCase):
         self.assertEqual(1, report["metrics"]["pending_promotions"])
         self.assertEqual(1, report["metrics"]["tasks_by_validation_profile"]["python"])
         self.assertEqual(1, len(report["pending_affirmations"]))
+
+    def test_task_lineage_reports_ancestors_and_children(self) -> None:
+        parent = self.engine.create_task_with_policy(
+            project_id=self.project.id,
+            title="Parent",
+            objective="Parent task",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+        run = self.engine.run_once(parent.id)
+        child = self.engine.create_follow_on_task(
+            parent_task_id=parent.id,
+            source_run_id=run.id,
+            title="Child",
+            objective="Child task",
+        )
+        grandchild = self.engine.create_follow_on_task(
+            parent_task_id=child.id,
+            source_run_id=run.id,
+            title="Grandchild",
+            objective="Grandchild task",
+        )
+
+        lineage = self.query.task_lineage(child.id)
+
+        self.assertEqual(parent.id, lineage["ancestors"][0]["id"])
+        self.assertEqual(grandchild.id, lineage["children"][0]["task"]["id"])

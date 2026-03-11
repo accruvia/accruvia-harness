@@ -193,3 +193,18 @@ class ProjectTaskStoreMixin:
                 (parent_task_id, source_run_id),
             ).fetchone()
         return task_from_row(row) if row else None
+
+    def list_child_tasks(self, parent_task_id: str) -> list[Task]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, project_id, title, objective, priority, parent_task_id, source_run_id,
+                       external_ref_type, external_ref_id, validation_profile, strategy, max_attempts,
+                       required_artifacts_json, status, created_at, updated_at
+                FROM tasks
+                WHERE parent_task_id = ?
+                ORDER BY created_at
+                """,
+                (parent_task_id,),
+            ).fetchall()
+        return [task_from_row(row) for row in rows]

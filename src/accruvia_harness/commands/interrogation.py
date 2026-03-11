@@ -23,6 +23,9 @@ def handle_interrogation_command(args, ctx: CLIContext) -> bool:
     if args.command == "telemetry-report":
         emit(ctx.telemetry.summary())
         return True
+    if args.command == "lineage-report":
+        emit(ctx.query_service.task_lineage(args.task_id))
+        return True
     if args.command == "task-report":
         emit(ctx.query_service.task_report(args.task_id))
         return True

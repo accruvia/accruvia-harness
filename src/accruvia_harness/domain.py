@@ -29,6 +29,14 @@ class RunStatus(StrEnum):
     DECIDING = "deciding"
     COMPLETED = "completed"
     FAILED = "failed"
+    BLOCKED = "blocked"
+
+
+class EvaluationVerdict(StrEnum):
+    ACCEPTABLE = "acceptable"
+    INCOMPLETE = "incomplete"
+    FAILED = "failed"
+    BLOCKED = "blocked"
 
 
 class DecisionAction(StrEnum):
@@ -98,7 +106,7 @@ class Artifact:
 class Evaluation:
     id: str
     run_id: str
-    verdict: str
+    verdict: EvaluationVerdict
     confidence: float
     summary: str
     details: dict[str, Any]
