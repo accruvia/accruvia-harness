@@ -23,6 +23,7 @@ observability = [
 
 [project.scripts]
 accruvia-harness = "accruvia_harness.cli:main"
+accruvia-observer = "accruvia_harness.observer.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

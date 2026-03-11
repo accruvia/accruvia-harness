@@ -12,6 +12,10 @@ from pathlib import Path
 
 def _temporal_available() -> bool:
     try:
+        import temporalio  # noqa: F401
+    except ModuleNotFoundError:
+        return False
+    try:
         with socket.create_connection(("127.0.0.1", 7233), timeout=1):
             return True
     except OSError:

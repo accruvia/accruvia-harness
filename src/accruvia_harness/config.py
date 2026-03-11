@@ -42,6 +42,7 @@ class HarnessConfig:
     timeout_multiplier: float = 2.5
     memory_limit_mb: int = 1024
     cpu_time_limit_seconds: int = 300
+    observer_webhook_url: str | None = None
 
     @classmethod
     def from_env(
@@ -109,4 +110,5 @@ class HarnessConfig:
             timeout_multiplier=float(os.environ.get("ACCRUVIA_TIMEOUT_MULTIPLIER", "2.5")),
             memory_limit_mb=int(os.environ.get("ACCRUVIA_MEMORY_LIMIT_MB", "1024")),
             cpu_time_limit_seconds=int(os.environ.get("ACCRUVIA_CPU_TIME_LIMIT_SECONDS", "300")),
+            observer_webhook_url=os.environ.get("ACCRUVIA_OBSERVER_WEBHOOK_URL"),
         )

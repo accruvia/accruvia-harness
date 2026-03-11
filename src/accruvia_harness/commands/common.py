@@ -40,6 +40,7 @@ class CLIContext:
 def build_context(config: HarnessConfig) -> CLIContext:
     store = SQLiteHarnessStore(config.db_path)
     store.initialize()
+    store.observer_webhook_url = config.observer_webhook_url
     telemetry = TelemetrySink(
         config.telemetry_dir,
         service_name=config.otel_service_name,

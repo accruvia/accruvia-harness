@@ -7,6 +7,8 @@ from ..domain import Event
 
 
 class EventsMetricsStoreMixin:
+    observer_webhook_url: str | None = None
+
     def create_event(self, event: Event) -> None:
         with self.connect() as connection:
             connection.execute(
@@ -20,6 +22,9 @@ class EventsMetricsStoreMixin:
                     event.created_at.isoformat(),
                 ),
             )
+        if self.observer_webhook_url:
+            from ..observer_hook import notify_observer
+            notify_observer(self.observer_webhook_url, event.event_type, event.entity_type, event.entity_id, event.payload)
 
     def list_events(self, entity_type: str | None = None, entity_id: str | None = None) -> list[Event]:
         query = "SELECT id, entity_type, entity_id, event_type, payload_json, created_at FROM events"

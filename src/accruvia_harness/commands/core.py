@@ -51,6 +51,7 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
             "timeout_multiplier": config.timeout_multiplier,
             "memory_limit_mb": config.memory_limit_mb,
             "cpu_time_limit_seconds": config.cpu_time_limit_seconds,
+            "observer_webhook_url": config.observer_webhook_url,
         })
         return True
     if args.command == "create-project":
