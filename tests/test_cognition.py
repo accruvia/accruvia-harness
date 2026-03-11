@@ -135,8 +135,113 @@ class CognitionTests(unittest.TestCase):
         self.assertTrue(Path(heartbeat.response_path).exists())
         self.assertEqual("extract routing core", heartbeat.analysis["priority_focus"])
         self.assertEqual(1, len(heartbeat.analysis["proposed_tasks"]))
+        self.assertEqual(1, len(heartbeat.created_tasks))
+        self.assertEqual("Extract docs", heartbeat.created_tasks[0]["title"])
         events = store.list_events("project", project.id)
         self.assertIn("heartbeat_completed", [event.event_type for event in events])
+        tasks = store.list_tasks(project.id)
+        self.assertEqual(2, len(tasks))
+
+    def test_heartbeat_dedupes_proposed_tasks(self) -> None:
+        os.environ["DEMO_REPO_ROOT"] = str(self.repo_root)
+        self.addCleanup(lambda: os.environ.pop("DEMO_REPO_ROOT", None))
+
+        store = SQLiteHarnessStore(self.base / "dedupe.db")
+        store.initialize()
+        llm_script = self.base / "fake_llm_dedupe.sh"
+        config = HarnessConfig.from_payload(
+            {
+                **HarnessConfig.from_env(
+                    db_path=self.base / "dedupe.db",
+                    workspace_root=self.base / "workspace-dedupe",
+                    log_path=self.base / "harness-dedupe.log",
+                ).to_payload(),
+                "project_adapter_modules": (self.module_name,),
+                "cognition_modules": (self.module_name,),
+                "llm_backend": "command",
+                "llm_command": str(llm_script),
+            }
+        )
+        engine = HarnessEngine(
+            store=store,
+            workspace_root=config.workspace_root,
+            project_adapter_registry=build_project_adapter_registry(config.project_adapter_modules),
+            cognition_registry=build_cognition_registry(config.cognition_modules),
+        )
+        from accruvia_harness.llm import build_llm_router
+
+        engine.set_llm_router(build_llm_router(config))
+        project = engine.create_project("Routellect", "Demo project", adapter_name="demo")
+        seed = engine.create_task_with_policy(
+            project_id=project.id,
+            title="Seed task",
+            objective="Broad work",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            validation_profile="generic",
+            strategy="default",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+        llm_script.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '{\"summary\":\"Split broad work\",\"priority_focus\":\"split boundary work\",\"issue_creation_needed\":true,"
+            f"\\\"proposed_tasks\\\":[{{\\\"title\\\":\\\"Split boundary docs\\\",\\\"objective\\\":\\\"Narrow docs cleanup\\\",\\\"priority\\\":140,\\\"rationale\\\":\\\"Keep issue atomic\\\",\\\"split_of_task_id\\\":\\\"{seed.id}\\\",\\\"allowed_paths\\\":[\\\"README.md\\\"]}}]}}' > \"$ACCRUVIA_LLM_RESPONSE_PATH\"\n",
+            encoding="utf-8",
+        )
+        llm_script.chmod(0o755)
+
+        first = engine.heartbeat(project.id)
+        second = engine.heartbeat(project.id)
+
+        self.assertEqual(1, len(first.created_tasks))
+        self.assertEqual(0, len(second.created_tasks))
+        self.assertEqual("duplicate_task", second.skipped_tasks[0]["reason"])
+
+    def test_heartbeat_accepts_priority_labels(self) -> None:
+        llm_script = self.base / "fake_llm_priority.sh"
+        llm_script.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '{\"summary\":\"Split broad work\",\"priority_focus\":\"split boundary work\",\"issue_creation_needed\":true,"
+            "\\\"proposed_tasks\\\":[{\\\"title\\\":\\\"Priority label task\\\",\\\"objective\\\":\\\"Use a labeled priority\\\",\\\"priority\\\":\\\"P0\\\",\\\"rationale\\\":\\\"Keep issue atomic\\\"}]}' > \"$ACCRUVIA_LLM_RESPONSE_PATH\"\n",
+            encoding="utf-8",
+        )
+        llm_script.chmod(0o755)
+        os.environ["DEMO_REPO_ROOT"] = str(self.repo_root)
+        self.addCleanup(lambda: os.environ.pop("DEMO_REPO_ROOT", None))
+
+        store = SQLiteHarnessStore(self.base / "priority.db")
+        store.initialize()
+        config = HarnessConfig.from_payload(
+            {
+                **HarnessConfig.from_env(
+                    db_path=self.base / "priority.db",
+                    workspace_root=self.base / "workspace-priority",
+                    log_path=self.base / "harness-priority.log",
+                ).to_payload(),
+                "project_adapter_modules": (self.module_name,),
+                "cognition_modules": (self.module_name,),
+                "llm_backend": "command",
+                "llm_command": str(llm_script),
+            }
+        )
+        engine = HarnessEngine(
+            store=store,
+            workspace_root=config.workspace_root,
+            project_adapter_registry=build_project_adapter_registry(config.project_adapter_modules),
+            cognition_registry=build_cognition_registry(config.cognition_modules),
+        )
+        from accruvia_harness.llm import build_llm_router
+
+        engine.set_llm_router(build_llm_router(config))
+        project = engine.create_project("Routellect", "Demo project", adapter_name="demo")
+        heartbeat = engine.heartbeat(project.id)
+
+        self.assertEqual(1, len(heartbeat.created_tasks))
+        self.assertEqual(1000, heartbeat.created_tasks[0]["priority"])
 
     def test_heartbeat_caps_brain_source_payload_size(self) -> None:
         large = self.repo_root / "docs.md"

@@ -20,6 +20,7 @@ class CognitionService:
         query_service,
         workspace_root: Path,
         cognition_registry: CognitionAdapterRegistry,
+        task_service=None,
         llm_router: LLMRouter | None = None,
         telemetry=None,
     ) -> None:
@@ -27,6 +28,7 @@ class CognitionService:
         self.query_service = query_service
         self.workspace_root = workspace_root
         self.cognition_registry = cognition_registry
+        self.task_service = task_service
         self.llm_router = llm_router
         self.telemetry = telemetry
 
@@ -96,6 +98,8 @@ class CognitionService:
             analysis_path = run_dir / "heartbeat_analysis.json"
             analysis_path.write_text(json.dumps(analysis, indent=2, sort_keys=True), encoding="utf-8")
 
+        created_tasks, skipped_tasks = self._materialize_proposed_tasks(project, analysis)
+
         self.store.create_event(
             Event(
                 id=new_id("event"),
@@ -108,6 +112,8 @@ class CognitionService:
                     "run_dir": str(run_dir),
                     "issue_creation_needed": bool(analysis.get("issue_creation_needed", False)),
                     "proposed_task_count": len(list(analysis.get("proposed_tasks") or [])),
+                    "created_task_count": len(created_tasks),
+                    "skipped_task_count": len(skipped_tasks),
                     "summary": str(analysis.get("summary") or ""),
                 },
             )
@@ -126,7 +132,108 @@ class CognitionService:
             analysis=analysis,
             context=context,
             sources=[asdict(source) for source in sources],
+            created_tasks=created_tasks,
+            skipped_tasks=skipped_tasks,
         )
+
+    def _materialize_proposed_tasks(self, project: Project, analysis: dict[str, object]) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        if self.task_service is None:
+            return [], []
+        proposals = analysis.get("proposed_tasks") or []
+        if not isinstance(proposals, list):
+            return [], []
+        existing = self.store.list_tasks(project.id)
+        created: list[dict[str, object]] = []
+        skipped: list[dict[str, object]] = []
+        for item in proposals:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "").strip()
+            objective = str(item.get("objective") or "").strip()
+            if not title or not objective:
+                skipped.append({"reason": "invalid_proposal", "proposal": item})
+                continue
+            parent_task_id = item.get("split_of_task_id")
+            dedupe_match = next(
+                (
+                    task for task in existing
+                    if task.title == title
+                    and task.objective == objective
+                    and task.parent_task_id == parent_task_id
+                    and task.status in {TaskStatus.PENDING, TaskStatus.ACTIVE, TaskStatus.COMPLETED}
+                ),
+                None,
+            )
+            if dedupe_match is not None:
+                skipped.append(
+                    {
+                        "reason": "duplicate_task",
+                        "task_id": dedupe_match.id,
+                        "title": dedupe_match.title,
+                    }
+                )
+                continue
+            scope: dict[str, object] = {}
+            if isinstance(item.get("allowed_paths"), list):
+                scope["allowed_paths"] = [str(path) for path in item.get("allowed_paths") if path]
+            if isinstance(item.get("forbidden_paths"), list):
+                scope["forbidden_paths"] = [str(path) for path in item.get("forbidden_paths") if path]
+            priority = self._parse_priority(item.get("priority", 100))
+            created_task = self.task_service.create_task_with_policy(
+                project_id=project.id,
+                title=title,
+                objective=objective,
+                priority=priority,
+                parent_task_id=str(parent_task_id) if parent_task_id else None,
+                source_run_id=None,
+                external_ref_type=None,
+                external_ref_id=None,
+                validation_profile=str(item.get("validation_profile") or "generic"),
+                scope=scope,
+                strategy=str(item.get("strategy") or "heartbeat"),
+                max_attempts=int(item.get("max_attempts", 3)),
+                max_branches=int(item.get("max_branches", 1)),
+                required_artifacts=list(item.get("required_artifacts") or ["plan", "report"]),
+            )
+            existing.append(created_task)
+            self.store.create_event(
+                Event(
+                    id=new_id("event"),
+                    entity_type="task",
+                    entity_id=created_task.id,
+                    event_type="heartbeat_task_created",
+                    payload={
+                        "project_id": project.id,
+                        "source": "heartbeat",
+                        "split_of_task_id": parent_task_id,
+                    },
+                )
+            )
+            created.append(serialize_dataclass(created_task))
+        return created, skipped
+
+    @staticmethod
+    def _parse_priority(value: object) -> int:
+        if isinstance(value, (int, float)):
+            return int(value)
+        text = str(value).strip()
+        if not text:
+            return 100
+        if text.isdigit():
+            return int(text)
+        normalized = text.upper()
+        if normalized in {"P0", "CRITICAL"}:
+            return 1000
+        if normalized in {"P1", "HIGH"}:
+            return 700
+        if normalized in {"P2", "MEDIUM"}:
+            return 400
+        if normalized in {"P3", "LOW"}:
+            return 200
+        digits = "".join(ch for ch in text if ch.isdigit())
+        if digits:
+            return int(digits)
+        return 100
 
     def _load_sources(self, paths: list[Path]) -> list[BrainSource]:
         sources: list[BrainSource] = []

@@ -31,6 +31,8 @@ class HeartbeatResult:
     analysis: dict[str, Any] = field(default_factory=dict)
     context: dict[str, Any] = field(default_factory=dict)
     sources: list[dict[str, Any]] = field(default_factory=list)
+    created_tasks: list[dict[str, Any]] = field(default_factory=list)
+    skipped_tasks: list[dict[str, Any]] = field(default_factory=list)
 
 
 class CognitionAdapter(Protocol):
@@ -96,8 +98,10 @@ class GenericCognitionAdapter:
             [
                 "You are performing a project heartbeat review.",
                 "Use the provided project documents, task state, and telemetry to decide the next most important work.",
+                "Issues/tasks must be atomic. Reject broad multi-objective work and split it into smaller tasks instead.",
                 "Return strict JSON with keys: summary, priority_focus, issue_creation_needed, proposed_tasks.",
                 "Each proposed_tasks item must include title, objective, priority, rationale.",
+                "Optional proposed_tasks keys: split_of_task_id, strategy, validation_profile, allowed_paths, forbidden_paths.",
                 json.dumps(context, indent=2, sort_keys=True),
             ]
         )

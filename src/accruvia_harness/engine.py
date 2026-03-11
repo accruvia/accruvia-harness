@@ -88,6 +88,7 @@ class HarnessEngine:
             query_service=self.query,
             workspace_root=self.workspace_root,
             cognition_registry=self.cognition_registry,
+            task_service=self.tasks,
             llm_router=self.llm_router,
             telemetry=self.telemetry,
         )
