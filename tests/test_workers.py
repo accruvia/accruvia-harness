@@ -248,6 +248,67 @@ class WorkerTests(unittest.TestCase):
         summary = telemetry.summary()
         self.assertEqual(0.0, summary["cost_totals"]["cost_usd"])
 
+    def test_llm_worker_falls_back_to_next_backend_when_primary_fails(self) -> None:
+        config = HarnessConfig(
+            db_path=self.base / "harness.db",
+            workspace_root=self.base,
+            log_path=self.base / "harness.log",
+            default_project_name="demo",
+            default_repo="accruvia/accruvia",
+            runtime_backend="local",
+            temporal_target="localhost:7233",
+            temporal_namespace="default",
+            temporal_task_queue="accruvia-harness",
+            worker_backend="llm",
+            worker_command=None,
+            llm_backend="claude",
+            llm_model="sonnet",
+            llm_command=None,
+            llm_codex_command="printf 'codex response' > \"$ACCRUVIA_LLM_RESPONSE_PATH\"",
+            llm_claude_command="printf 'auth outage' >&2; exit 9",
+            llm_accruvia_client_command=None,
+        )
+
+        telemetry = TelemetrySink(self.base / "telemetry")
+        worker = build_worker_from_config(config, telemetry=telemetry)
+        result = worker.work(self.task, self.run, self.base)
+
+        self.assertEqual("success", result.outcome)
+        self.assertEqual("codex", result.diagnostics["llm_backend"])
+        summary = telemetry.summary()
+        self.assertTrue(any(item["category"] == "llm_executor_failure" for item in summary["warnings"]))
+
+    def test_llm_worker_timeout_handles_bytes_stderr_cleanly(self) -> None:
+        config = HarnessConfig(
+            db_path=self.base / "harness.db",
+            workspace_root=self.base,
+            log_path=self.base / "harness.log",
+            default_project_name="demo",
+            default_repo="accruvia/accruvia",
+            runtime_backend="local",
+            temporal_target="localhost:7233",
+            temporal_namespace="default",
+            temporal_task_queue="accruvia-harness",
+            worker_backend="llm",
+            worker_command=None,
+            llm_backend="codex",
+            llm_model="gpt-5.4-codex",
+            llm_command=None,
+            llm_codex_command="python3 - <<'PY'\nimport sys, time\nsys.stderr.buffer.write(b'partial stderr')\ntime.sleep(2)\nPY",
+            llm_claude_command=None,
+            llm_accruvia_client_command=None,
+            timeout_min_seconds=1,
+            timeout_max_seconds=1,
+            timeout_multiplier=1.0,
+        )
+
+        worker = build_worker_from_config(config, telemetry=TelemetrySink(self.base / "telemetry"))
+        result = worker.work(self.task, self.run, self.base)
+
+        self.assertEqual("failed", result.outcome)
+        error_path = self.base / "runs" / self.run.id / "llm_error.txt"
+        self.assertTrue(error_path.exists())
+
     def test_parse_affirmation_response_handles_loose_rejection_text(self) -> None:
         approved, rationale = parse_affirmation_response("I would reject this candidate.\nIt is not ready to promote.")
         self.assertFalse(approved)

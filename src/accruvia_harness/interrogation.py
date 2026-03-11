@@ -238,7 +238,6 @@ class InterrogationService:
     def _explain(self, subject_type: str, subject_id: str, payload: dict[str, Any], title: str) -> dict[str, object]:
         if self.llm_router is None:
             raise ValueError("No LLM router configured for interrogation")
-        executor, backend = self.llm_router.resolve()
         run_dir = self.workspace_root / "interrogation" / f"{subject_type}_{subject_id}" / new_id("explain")
         run_dir.mkdir(parents=True, exist_ok=True)
         task = Task(
@@ -261,11 +260,10 @@ class InterrogationService:
                 "interrogation_explain",
                 subject_type=subject_type,
                 subject_id=subject_id,
-                llm_backend=backend,
             ):
-                result = executor.execute(LLMInvocation(task=task, run=run, prompt=prompt, run_dir=run_dir))
+                result, backend = self._execute_llm(task, run, prompt, run_dir)
         else:
-            result = executor.execute(LLMInvocation(task=task, run=run, prompt=prompt, run_dir=run_dir))
+            result, backend = self._execute_llm(task, run, prompt, run_dir)
         explanation_path = run_dir / "explanation.json"
         explanation_path.write_text(
             json.dumps(
@@ -291,6 +289,14 @@ class InterrogationService:
             "explanation_path": str(explanation_path),
             "diagnostics": result.diagnostics,
         }
+
+    def _execute_llm(self, task: Task, run: Run, prompt: str, run_dir: Path):
+        invocation = LLMInvocation(task=task, run=run, prompt=prompt, run_dir=run_dir)
+        execute = getattr(self.llm_router, "execute", None)
+        if execute is not None:
+            return execute(invocation, telemetry=self.telemetry)
+        executor, backend = self.llm_router.resolve()
+        return executor.execute(invocation), backend
 
     def _build_prompt(self, subject_type: str, payload: dict[str, Any]) -> str:
         return (

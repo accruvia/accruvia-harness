@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import asdict
+
 from ..domain import serialize_dataclass
 from .common import CLIContext, emit
 
@@ -27,7 +29,7 @@ def handle_interrogation_command(args, ctx: CLIContext) -> bool:
         emit(ctx.query_service.dashboard_report(args.project_id))
         return True
     if args.command == "heartbeat":
-        emit(ctx.engine.heartbeat(args.project_id).__dict__)
+        emit(asdict(ctx.engine.heartbeat(args.project_id)))
         return True
     if args.command == "explain-system":
         emit(ctx.interrogation_service.explain_system(args.project_id))

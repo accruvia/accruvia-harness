@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -88,7 +88,7 @@ class GenericCognitionAdapter:
             },
             "project_summary": project_summary,
             "context_packet": context_packet,
-            "brain_sources": [source.__dict__ for source in source_documents],
+            "brain_sources": [asdict(source) for source in source_documents],
         }
 
     def build_prompt(self, project: Project, context: dict[str, Any]) -> str:

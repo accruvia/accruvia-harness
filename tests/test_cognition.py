@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from accruvia_harness.cognition import build_cognition_registry
+from accruvia_harness.cognition import BrainSource, GenericCognitionAdapter, build_cognition_registry
 from accruvia_harness.config import HarnessConfig
 from accruvia_harness.engine import HarnessEngine
 from accruvia_harness.project_adapters import build_project_adapter_registry
@@ -59,6 +59,18 @@ class CognitionTests(unittest.TestCase):
     def test_cognition_registry_can_load_external_module(self) -> None:
         registry = build_cognition_registry((self.module_name,))
         self.assertIn("demo", registry.names())
+
+    def test_generic_cognition_adapter_serializes_brain_sources(self) -> None:
+        adapter = GenericCognitionAdapter()
+        context = adapter.build_context(
+            project=type("ProjectStub", (), {"id": "p1", "name": "Demo", "description": "Demo", "adapter_name": "generic"})(),
+            project_root=self.repo_root,
+            project_summary={"metrics": {}},
+            context_packet={"focus_tasks": []},
+            source_documents=[BrainSource(path=str(self.repo_root / "README.md"), kind="md", summary="Demo", content="# Demo")],
+        )
+
+        self.assertEqual("Demo", context["brain_sources"][0]["summary"])
 
     def test_engine_heartbeat_uses_external_cognition_adapter(self) -> None:
         llm_script = self.base / "fake_llm.sh"
@@ -125,3 +137,33 @@ class CognitionTests(unittest.TestCase):
         self.assertEqual(1, len(heartbeat.analysis["proposed_tasks"]))
         events = store.list_events("project", project.id)
         self.assertIn("heartbeat_completed", [event.event_type for event in events])
+
+    def test_heartbeat_caps_brain_source_payload_size(self) -> None:
+        large = self.repo_root / "docs.md"
+        large.write_text("x" * 20000, encoding="utf-8")
+        os.environ["DEMO_REPO_ROOT"] = str(self.repo_root)
+        self.addCleanup(lambda: os.environ.pop("DEMO_REPO_ROOT", None))
+        store = SQLiteHarnessStore(self.base / "size.db")
+        store.initialize()
+        config = HarnessConfig.from_payload(
+            {
+                **HarnessConfig.from_env(
+                    db_path=self.base / "size.db",
+                    workspace_root=self.base / "workspace-size",
+                    log_path=self.base / "harness-size.log",
+                ).to_payload(),
+                "project_adapter_modules": (self.module_name,),
+                "cognition_modules": (self.module_name,),
+            }
+        )
+        engine = HarnessEngine(
+            store=store,
+            workspace_root=config.workspace_root,
+            project_adapter_registry=build_project_adapter_registry(config.project_adapter_modules),
+            cognition_registry=build_cognition_registry(config.cognition_modules),
+        )
+        project = engine.create_project("Routellect", "Demo project", adapter_name="demo")
+        heartbeat = engine.heartbeat(project.id)
+
+        total_bytes = sum(len(item["content"].encode("utf-8")) for item in heartbeat.sources)
+        self.assertLessEqual(total_bytes, 12000)

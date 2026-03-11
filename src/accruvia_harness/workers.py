@@ -252,21 +252,23 @@ class AgentCommandWorker(CommandWorker):
 
 
 class LLMTaskWorker:
-    def __init__(self, router: LLMRouter, model: str | None = None) -> None:
+    def __init__(self, router: LLMRouter, model: str | None = None, telemetry=None) -> None:
         self.router = router
         self.model = model
+        self.telemetry = telemetry
 
     def work(self, task: Task, run: Run, workspace_root: Path) -> WorkResult:
         run_dir = workspace_root / "runs" / run.id
         run_dir.mkdir(parents=True, exist_ok=True)
         project_workspace = _prepared_project_workspace(run_dir)
         prompt = self._build_prompt(task, run)
-        executor, routed_backend = self.router.resolve()
+        routed_backend = self.router.backend
         try:
-            result = executor.execute(
+            result, routed_backend = self.router.execute(
                 invocation=LLMInvocation(
                     task=task, run=run, prompt=prompt, run_dir=project_workspace, model=self.model
-                )
+                ),
+                telemetry=self.telemetry,
             )
             outcome = "success"
             summary = f"Executed routed LLM worker via {routed_backend}."
@@ -288,7 +290,7 @@ class LLMTaskWorker:
                         "attempt": run.attempt,
                         "strategy": task.strategy,
                         "objective": task.objective,
-                    "worker_backend": "llm",
+                        "worker_backend": "llm",
                         "llm_backend": routed_backend,
                         "error": str(exc),
                         "validation_profile": task.validation_profile,
@@ -402,7 +404,7 @@ def build_worker_from_config(config: HarnessConfig, telemetry=None) -> WorkerBac
         cpu_time_limit_seconds=config.cpu_time_limit_seconds,
     )
     if config.worker_backend == "llm":
-        return LLMTaskWorker(build_llm_router(config, telemetry=telemetry), model=config.llm_model)
+        return LLMTaskWorker(build_llm_router(config, telemetry=telemetry), model=config.llm_model, telemetry=telemetry)
     if config.worker_backend == "local":
         return LocalArtifactWorker(adapter_registry=adapter_registry)
     if config.worker_backend == "shell":

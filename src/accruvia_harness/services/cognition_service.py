@@ -10,6 +10,10 @@ from ..llm import LLMInvocation, LLMRouter
 
 
 class CognitionService:
+    _MAX_SOURCE_COUNT = 10
+    _MAX_SOURCE_BYTES = 3000
+    _MAX_TOTAL_SOURCE_BYTES = 12000
+
     def __init__(
         self,
         store,
@@ -75,12 +79,17 @@ class CognitionService:
                 attempt=1,
                 summary=f"Heartbeat analysis for {project.name}",
             )
-            executor, llm_backend = self.llm_router.resolve()
             if self.telemetry is not None:
                 with self.telemetry.timed("heartbeat_analysis", project_id=project.id, adapter_name=adapter.name):
-                    result = executor.execute(LLMInvocation(task=task, run=run, prompt=prompt, run_dir=run_dir))
+                    result, llm_backend = self.llm_router.execute(
+                        LLMInvocation(task=task, run=run, prompt=prompt, run_dir=run_dir),
+                        telemetry=self.telemetry,
+                    )
             else:
-                result = executor.execute(LLMInvocation(task=task, run=run, prompt=prompt, run_dir=run_dir))
+                result, llm_backend = self.llm_router.execute(
+                    LLMInvocation(task=task, run=run, prompt=prompt, run_dir=run_dir),
+                    telemetry=self.telemetry,
+                )
             prompt_path = result.prompt_path
             response_path = result.response_path
             analysis = adapter.parse_response(result.response_text)
@@ -121,11 +130,16 @@ class CognitionService:
 
     def _load_sources(self, paths: list[Path]) -> list[BrainSource]:
         sources: list[BrainSource] = []
-        for path in paths:
+        remaining_budget = self._MAX_TOTAL_SOURCE_BYTES
+        for path in paths[: self._MAX_SOURCE_COUNT]:
             if not path.exists() or not path.is_file():
                 continue
             kind = path.suffix.lstrip(".") or "text"
-            content = path.read_text(encoding="utf-8", errors="ignore")[:12000]
+            if remaining_budget <= 0:
+                break
+            per_file_budget = min(self._MAX_SOURCE_BYTES, remaining_budget)
+            content = path.read_text(encoding="utf-8", errors="ignore")[:per_file_budget]
+            remaining_budget -= len(content.encode("utf-8"))
             summary = content.splitlines()[0].strip() if content else path.name
             sources.append(BrainSource(path=str(path), kind=kind, summary=summary[:240], content=content))
         return sources

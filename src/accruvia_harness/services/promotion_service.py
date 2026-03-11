@@ -161,7 +161,6 @@ class PromotionService:
             raise ValueError(f"Promotion {promotion.id} is not pending affirmation")
         run = self._select_run(task_id, promotion.run_id)
         artifacts = self.store.list_artifacts(run.id)
-        executor, routed_backend = self.llm_router.resolve()
         invocation = LLMInvocation(
             task=task,
             run=run,
@@ -175,11 +174,10 @@ class PromotionService:
                 run_id=run.id,
                 promotion_id=promotion.id,
                 validation_profile=task.validation_profile,
-                llm_backend=routed_backend,
             ):
-                result = executor.execute(invocation)
+                result, routed_backend = self.llm_router.execute(invocation, telemetry=self.telemetry)
         else:
-            result = executor.execute(invocation)
+            result, routed_backend = self.llm_router.execute(invocation, telemetry=self.telemetry)
         approved, rationale = parse_affirmation_response(result.response_text)
         details = {
             **promotion.details,

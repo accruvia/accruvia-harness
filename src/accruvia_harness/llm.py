@@ -50,6 +50,14 @@ def _coerce_metric_number(value: object) -> float:
         return 0.0
 
 
+def _coerce_subprocess_output(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="ignore")
+    return str(value)
+
+
 class CommandLLMExecutor:
     def __init__(
         self,
@@ -131,8 +139,8 @@ class CommandLLMExecutor:
                     preexec_fn=self.resource_policy.preexec_fn() if self.resource_policy is not None else None,
                 )
         except subprocess.TimeoutExpired as exc:
-            stdout_path.write_text(exc.stdout or "", encoding="utf-8")
-            stderr_path.write_text(exc.stderr or "", encoding="utf-8")
+            stdout_path.write_text(_coerce_subprocess_output(exc.stdout), encoding="utf-8")
+            stderr_path.write_text(_coerce_subprocess_output(exc.stderr), encoding="utf-8")
             raise LLMExecutionError(
                 f"{self.backend_name} executor timed out after {timeout_seconds} seconds"
             ) from exc
@@ -213,6 +221,37 @@ class LLMRouter:
             available = ", ".join(sorted(self.executors))
             raise ValueError(f"Unsupported LLM backend '{backend}'. Available: {available}")
         return executor, backend
+
+    def resolve_chain(self) -> list[tuple[LLMExecutor, str]]:
+        selected = self._auto_backend() if self.backend == "auto" else self.backend
+        ordered: list[str] = []
+        if selected in self.executors:
+            ordered.append(selected)
+        for candidate in ("codex", "claude", "accruvia_client", "command"):
+            if candidate in self.executors and candidate not in ordered:
+                ordered.append(candidate)
+        if not ordered:
+            available = ", ".join(sorted(self.executors))
+            raise ValueError(f"Unsupported LLM backend '{selected}'. Available: {available}")
+        return [(self.executors[name], name) for name in ordered]
+
+    def execute(self, invocation: LLMInvocation, telemetry=None) -> tuple[LLMExecutionResult, str]:
+        failures: list[dict[str, str]] = []
+        for executor, backend in self.resolve_chain():
+            try:
+                return executor.execute(invocation), backend
+            except LLMExecutionError as exc:
+                failures.append({"backend": backend, "error": str(exc)})
+                if telemetry is not None:
+                    telemetry.warn(
+                        "llm_executor_failure",
+                        str(exc),
+                        backend=backend,
+                        task_id=invocation.task.id,
+                        run_id=invocation.run.id,
+                    )
+        details = "; ".join(f"{item['backend']}: {item['error']}" for item in failures)
+        raise LLMExecutionError(f"All configured LLM executors failed. {details}")
 
     def _auto_backend(self) -> str:
         if os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
