@@ -9,8 +9,12 @@ from accruvia_harness.domain import Artifact, Task, new_id
 from accruvia_harness.validation import (
     ChangedFilesValidator,
     CompileCheckValidator,
+    JavaScriptTestFileValidator,
+    PythonTestFileValidator,
     RequiredArtifactsValidator,
+    TerraformValidationValidator,
     TestEvidenceValidator,
+    validators_for_profile,
 )
 
 
@@ -78,3 +82,68 @@ class DeterministicValidationTests(unittest.TestCase):
         result = TestEvidenceValidator().validate(self.task, self.artifacts)
         self.assertFalse(result.ok)
         self.assertEqual("missing_test_evidence", result.issues[0].code)
+
+    def test_python_profile_validator_requires_python_tests(self) -> None:
+        self.task.validation_profile = "python"
+        self.report_path.write_text(
+            json.dumps(
+                {
+                    "validation_profile": "python",
+                    "test_files": ["tests/test_example.py"],
+                    "test_check": {"passed": True},
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.assertTrue(PythonTestFileValidator().validate(self.task, self.artifacts).ok)
+
+    def test_javascript_profile_validator_requires_js_or_ts_tests(self) -> None:
+        self.task.validation_profile = "javascript"
+        self.report_path.write_text(
+            json.dumps(
+                {
+                    "validation_profile": "javascript",
+                    "test_files": ["tests/example.test.ts"],
+                    "test_check": {"passed": True},
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.assertTrue(JavaScriptTestFileValidator().validate(self.task, self.artifacts).ok)
+
+        self.report_path.write_text(
+            json.dumps(
+                {
+                    "validation_profile": "javascript",
+                    "test_files": ["tests/test_example.py"],
+                    "test_check": {"passed": True},
+                }
+            ),
+            encoding="utf-8",
+        )
+        result = JavaScriptTestFileValidator().validate(self.task, self.artifacts)
+        self.assertFalse(result.ok)
+        self.assertEqual("javascript_test_file_mismatch", result.issues[0].code)
+
+    def test_terraform_profile_validator_requires_tf_evidence(self) -> None:
+        self.task.validation_profile = "terraform"
+        self.report_path.write_text(
+            json.dumps(
+                {
+                    "validation_profile": "terraform",
+                    "changed_files": ["infra/main.tf", "infra/vars.tfvars"],
+                    "terraform_validate": {"passed": True},
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.assertTrue(TerraformValidationValidator().validate(self.task, self.artifacts).ok)
+
+    def test_validators_for_profile_returns_profile_specific_bundles(self) -> None:
+        python_validators = [validator.__class__.__name__ for validator in validators_for_profile("python")]
+        javascript_validators = [validator.__class__.__name__ for validator in validators_for_profile("javascript")]
+        terraform_validators = [validator.__class__.__name__ for validator in validators_for_profile("terraform")]
+
+        self.assertIn("PythonTestFileValidator", python_validators)
+        self.assertIn("JavaScriptTestFileValidator", javascript_validators)
+        self.assertIn("TerraformValidationValidator", terraform_validators)

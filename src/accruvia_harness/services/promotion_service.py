@@ -28,18 +28,19 @@ class PromotionService:
         self.store = store
         self.task_service = task_service
         self.workspace_root = workspace_root
-        self.validators = validators or default_promotion_validators()
+        self.validators = validators
         self.llm_router = llm_router
 
     def review_task(self, task_id: str, run_id: str | None = None, create_follow_on: bool = True) -> PromotionReviewResult:
         task = self.store.get_task(task_id)
         if task is None:
             raise ValueError(f"Unknown task: {task_id}")
+        validators = self.validators or default_promotion_validators(task.validation_profile)
         run = self._select_run(task_id, run_id)
         if run.status != RunStatus.COMPLETED:
             raise ValueError(f"Run {run.id} is not promotion-eligible")
         artifacts = self.store.list_artifacts(run.id)
-        results = [validator.validate(task, artifacts) for validator in self.validators]
+        results = [validator.validate(task, artifacts) for validator in validators]
         issues = [issue for result in results for issue in result.issues]
         if not issues:
             promotion = PromotionRecord(

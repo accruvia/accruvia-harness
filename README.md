@@ -248,6 +248,8 @@ Current baseline profiles:
 
 - `generic`: general changed-file, build/compile, test, and artifact evidence
 - `python`: the generic gates plus Python-oriented test-file expectations
+- `javascript`: the generic gates plus JS/TS test-file expectations
+- `terraform`: Terraform file-change and `terraform validate`-style evidence
 
 This is intended to grow into project- or task-class-specific validator bundles without changing the control plane.
 

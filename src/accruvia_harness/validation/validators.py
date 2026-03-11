@@ -269,6 +269,84 @@ class PythonTestFileValidator:
         )
 
 
+class JavaScriptTestFileValidator:
+    def validate(self, task: Task, artifacts: list[Artifact]) -> ValidationResult:
+        if task.validation_profile != "javascript":
+            return ValidationResult("javascript_test_files", True, "Task is not using the javascript profile.", [])
+        payloads, issues = _report_payloads(artifacts)
+        if issues:
+            return ValidationResult(
+                "javascript_test_files",
+                False,
+                "Unable to read report artifacts for javascript test validation.",
+                issues,
+            )
+        test_files: list[str] = []
+        for payload in payloads:
+            candidate_files = payload.get("test_files")
+            if isinstance(candidate_files, list):
+                test_files.extend(str(item) for item in candidate_files if item)
+        allowed_suffixes = (".js", ".jsx", ".ts", ".tsx")
+        if test_files and all(path.endswith(allowed_suffixes) for path in test_files):
+            return ValidationResult("javascript_test_files", True, "JavaScript profile test files look correct.", [])
+        return ValidationResult(
+            "javascript_test_files",
+            False,
+            "JavaScript profile requires JS/TS test files.",
+            [
+                ValidationIssue(
+                    code="javascript_test_file_mismatch",
+                    summary="JavaScript validation profile requires JS/TS test files.",
+                    details={"test_files": test_files},
+                    follow_on_title=f"Add JavaScript test evidence for {task.title}",
+                    follow_on_objective="Regenerate the candidate with JS or TS test files that match the javascript validation profile.",
+                )
+            ],
+        )
+
+
+class TerraformValidationValidator:
+    def validate(self, task: Task, artifacts: list[Artifact]) -> ValidationResult:
+        if task.validation_profile != "terraform":
+            return ValidationResult("terraform_validate", True, "Task is not using the terraform profile.", [])
+        payloads, issues = _report_payloads(artifacts)
+        if issues:
+            return ValidationResult(
+                "terraform_validate",
+                False,
+                "Unable to read report artifacts for terraform validation.",
+                issues,
+            )
+        changed_files: list[str] = []
+        validate_checks: list[dict[str, object]] = []
+        for payload in payloads:
+            candidate_files = payload.get("changed_files")
+            if isinstance(candidate_files, list):
+                changed_files.extend(str(item) for item in candidate_files if item)
+            validate_check = payload.get("terraform_validate")
+            if isinstance(validate_check, dict):
+                validate_checks.append(validate_check)
+        tf_suffixes = (".tf", ".tfvars", ".hcl")
+        valid_files = changed_files and all(path.endswith(tf_suffixes) for path in changed_files)
+        passed = any(bool(check.get("passed")) for check in validate_checks)
+        if valid_files and passed:
+            return ValidationResult("terraform_validate", True, "Terraform validation evidence passed.", [])
+        return ValidationResult(
+            "terraform_validate",
+            False,
+            "Terraform profile requires Terraform file changes and a passing terraform validation check.",
+            [
+                ValidationIssue(
+                    code="terraform_validation_missing",
+                    summary="Terraform validation profile requires .tf/.tfvars/.hcl changes and a passing terraform validate result.",
+                    details={"changed_files": changed_files, "terraform_validate": validate_checks},
+                    follow_on_title=f"Add Terraform validation evidence for {task.title}",
+                    follow_on_objective="Regenerate the candidate with Terraform file changes and a passing terraform validation result in the structured report.",
+                )
+            ],
+        )
+
+
 def validators_for_profile(profile: str) -> list[PromotionValidator]:
     validators: list[PromotionValidator] = [
         RequiredArtifactsValidator(),
@@ -281,6 +359,10 @@ def validators_for_profile(profile: str) -> list[PromotionValidator]:
     ]
     if profile == "python":
         validators.append(PythonTestFileValidator())
+    if profile == "javascript":
+        validators.append(JavaScriptTestFileValidator())
+    if profile == "terraform":
+        validators.append(TerraformValidationValidator())
     return validators
 
 
