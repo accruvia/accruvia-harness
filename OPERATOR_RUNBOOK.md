@@ -108,6 +108,9 @@ To let the supervisor perform sparse review checks while watching the queue:
 PYTHONPATH=src python3 -m accruvia_harness supervise --watch --review-check-enabled
 ```
 
+If a PR/MR is found to be conflicted, the harness records the conflict and creates one remediation follow-on task tied to
+the original promoted run. Repeated checks do not keep spawning duplicate rebase tasks.
+
 ## Generated State
 
 Generated state lives under `.accruvia-harness/` and should not be committed:

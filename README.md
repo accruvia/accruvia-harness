@@ -79,6 +79,8 @@ have a deliberate path back into the real repo.
 
 When `supervise` is running, it can also perform sparse review checks for already-open PRs/MRs. These checks are not tied
 to every run. They only apply to promotions that already opened review branches, and by default they happen every 8 hours.
+If a merge conflict is detected, the harness records it and creates a bounded remediation follow-on task instead of polling
+aggressively or trying to force the merge.
 
 ## Quick Start
 

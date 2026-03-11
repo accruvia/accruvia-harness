@@ -98,7 +98,7 @@ class HarnessEngine:
             telemetry=self.telemetry,
         )
         self.supervisor = SupervisorService(self.store, self.queue, self.cognition)
-        self.review_watcher = ReviewWatcherService(self.store)
+        self.review_watcher = ReviewWatcherService(self.store, task_service=self.tasks)
         self.promotions = PromotionService(
             self.store,
             self.tasks,

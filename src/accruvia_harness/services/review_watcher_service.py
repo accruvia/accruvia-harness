@@ -18,8 +18,9 @@ class ReviewWatcherResult:
 
 
 class ReviewWatcherService:
-    def __init__(self, store, github: GitHubCLI | None = None, gitlab: GitLabCLI | None = None) -> None:
+    def __init__(self, store, task_service=None, github: GitHubCLI | None = None, gitlab: GitLabCLI | None = None) -> None:
         self.store = store
+        self.task_service = task_service
         self.github = github or GitHubCLI()
         self.gitlab = gitlab or GitLabCLI()
 
@@ -97,13 +98,14 @@ class ReviewWatcherService:
             if review_watch["has_conflicts"]:
                 conflict_count += 1
                 if previous_conflicts is not True:
+                    follow_on_task_id = self._ensure_conflict_follow_on(task.id, promotion.run_id, branch_name, review_watch["url"])
                     self.store.create_event(
                         Event(
                             id=new_id("event"),
                             entity_type="task",
                             entity_id=task.id,
                             event_type="promotion_merge_conflict_detected",
-                            payload={"promotion_id": promotion.id, **review_watch},
+                            payload={"promotion_id": promotion.id, "follow_on_task_id": follow_on_task_id, **review_watch},
                         )
                     )
             if review_watch["state"] == "merged":
@@ -133,3 +135,27 @@ class ReviewWatcherService:
         if provider == RepoProvider.GITLAB:
             return self.gitlab.fetch_merge_request_status(repo_name, branch_name)
         return None
+
+    def _ensure_conflict_follow_on(
+        self,
+        parent_task_id: str,
+        source_run_id: str,
+        branch_name: str,
+        review_url: str | None,
+    ) -> str | None:
+        if self.task_service is None:
+            return None
+        existing = self.store.find_follow_on_task(parent_task_id, source_run_id)
+        if existing is not None:
+            return existing.id
+        follow_on = self.task_service.create_follow_on_task(
+            parent_task_id=parent_task_id,
+            source_run_id=source_run_id,
+            title="Rebase approved change onto current main",
+            objective=(
+                "Resolve the promotion merge conflict by replaying the approved change on top of the current base branch, "
+                f"updating branch {branch_name}, and preserving the existing review context."
+                + (f" Review URL: {review_url}." if review_url else "")
+            ),
+        )
+        return follow_on.id

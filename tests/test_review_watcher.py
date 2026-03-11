@@ -7,6 +7,7 @@ from pathlib import Path
 
 from accruvia_harness.domain import Project, PromotionMode, PromotionRecord, PromotionStatus, RepoProvider, Run, RunStatus, Task, new_id
 from accruvia_harness.services.review_watcher_service import ReviewWatcherService
+from accruvia_harness.services.task_service import TaskService
 from accruvia_harness.store import SQLiteHarnessStore
 
 
@@ -81,7 +82,7 @@ class ReviewWatcherTests(unittest.TestCase):
     def test_check_due_reviews_updates_promotion_and_records_conflict(self) -> None:
         promotion = self._create_promotion()
         github = _FakeGitHub(state="open", has_conflicts=True)
-        watcher = ReviewWatcherService(self.store, github=github, gitlab=_FakeGitLab())
+        watcher = ReviewWatcherService(self.store, task_service=TaskService(self.store), github=github, gitlab=_FakeGitLab())
 
         result = watcher.check_due_reviews(interval_seconds=28800, now=datetime(2026, 3, 11, tzinfo=UTC))
 
@@ -91,14 +92,28 @@ class ReviewWatcherTests(unittest.TestCase):
         event_types = [event.event_type for event in self.store.list_events("task", self.task.id)]
         self.assertIn("promotion_review_synced", event_types)
         self.assertIn("promotion_merge_conflict_detected", event_types)
+        children = self.store.list_child_tasks(self.task.id)
+        self.assertEqual(1, len(children))
+        self.assertIn("Rebase approved change", children[0].title)
         self.assertEqual([("accruvia/routellect", "harness/task-1")], github.calls)
 
     def test_check_due_reviews_respects_interval(self) -> None:
         self._create_promotion(last_checked_at=datetime(2026, 3, 11, tzinfo=UTC).isoformat())
         github = _FakeGitHub()
-        watcher = ReviewWatcherService(self.store, github=github, gitlab=_FakeGitLab())
+        watcher = ReviewWatcherService(self.store, task_service=TaskService(self.store), github=github, gitlab=_FakeGitLab())
 
         result = watcher.check_due_reviews(interval_seconds=28800, now=datetime(2026, 3, 11, 1, tzinfo=UTC))
 
         self.assertEqual(0, result.checked_count)
         self.assertEqual([], github.calls)
+
+    def test_conflict_follow_on_is_not_duplicated_on_repeat_checks(self) -> None:
+        self._create_promotion()
+        github = _FakeGitHub(state="open", has_conflicts=True)
+        watcher = ReviewWatcherService(self.store, task_service=TaskService(self.store), github=github, gitlab=_FakeGitLab())
+
+        watcher.check_due_reviews(interval_seconds=28800, now=datetime(2026, 3, 11, tzinfo=UTC))
+        watcher.check_due_reviews(interval_seconds=0, now=datetime(2026, 3, 11, 8, tzinfo=UTC))
+
+        children = self.store.list_child_tasks(self.task.id)
+        self.assertEqual(1, len(children))
