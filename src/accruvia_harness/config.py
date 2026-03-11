@@ -1,10 +1,35 @@
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import asdict
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("Invalid integer for %s=%r, using default %d", name, raw, default)
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Invalid float for %s=%r, using default %s", name, raw, default)
+        return default
 
 
 @dataclass(slots=True)
@@ -174,11 +199,11 @@ class HarnessConfig:
             issue_reopen_on_pending=os.environ.get("ACCRUVIA_ISSUE_REOPEN_ON_PENDING", "true").lower() == "true",
             issue_reopen_on_active=os.environ.get("ACCRUVIA_ISSUE_REOPEN_ON_ACTIVE", "true").lower() == "true",
             issue_reopen_on_failed=os.environ.get("ACCRUVIA_ISSUE_REOPEN_ON_FAILED", "true").lower() == "true",
-            timeout_ema_alpha=float(os.environ.get("ACCRUVIA_TIMEOUT_EMA_ALPHA", "0.5")),
-            timeout_min_seconds=int(os.environ.get("ACCRUVIA_TIMEOUT_MIN_SECONDS", "30")),
-            timeout_max_seconds=int(os.environ.get("ACCRUVIA_TIMEOUT_MAX_SECONDS", "1800")),
-            timeout_multiplier=float(os.environ.get("ACCRUVIA_TIMEOUT_MULTIPLIER", "2.5")),
-            memory_limit_mb=int(os.environ.get("ACCRUVIA_MEMORY_LIMIT_MB", "1024")),
-            cpu_time_limit_seconds=int(os.environ.get("ACCRUVIA_CPU_TIME_LIMIT_SECONDS", "300")),
+            timeout_ema_alpha=_env_float("ACCRUVIA_TIMEOUT_EMA_ALPHA", 0.5),
+            timeout_min_seconds=_env_int("ACCRUVIA_TIMEOUT_MIN_SECONDS", 30),
+            timeout_max_seconds=_env_int("ACCRUVIA_TIMEOUT_MAX_SECONDS", 1800),
+            timeout_multiplier=_env_float("ACCRUVIA_TIMEOUT_MULTIPLIER", 2.5),
+            memory_limit_mb=_env_int("ACCRUVIA_MEMORY_LIMIT_MB", 1024),
+            cpu_time_limit_seconds=_env_int("ACCRUVIA_CPU_TIME_LIMIT_SECONDS", 300),
             observer_webhook_url=os.environ.get("ACCRUVIA_OBSERVER_WEBHOOK_URL"),
         )

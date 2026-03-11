@@ -47,6 +47,8 @@ class RunService:
         task = self.store.get_task(task_id)
         if task is None:
             raise ValueError(f"Unknown task: {task_id}")
+        if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
+            raise ValueError(f"Task {task_id} is already {task.status.value} — cannot run again")
         project = self.store.get_project(task.project_id)
         if project is None:
             raise ValueError(f"Unknown project for task: {task.project_id}")
