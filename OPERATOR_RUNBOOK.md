@@ -110,6 +110,8 @@ PYTHONPATH=src python3 -m accruvia_harness supervise --watch --review-check-enab
 
 If a PR/MR is found to be conflicted, the harness records the conflict and creates one remediation follow-on task tied to
 the original promoted run. Repeated checks do not keep spawning duplicate rebase tasks.
+When that remediation task is later promoted successfully, the harness pushes back to the same review branch so the original
+PR/MR is updated in place.
 
 ## Generated State
 

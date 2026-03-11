@@ -314,7 +314,17 @@ class PromotionService:
                 "workspace_mode": workspace_details.get("workspace_mode"),
             }
         try:
-            apply_result = self.repository_promotions.apply(project, task, Path(workspace_details["project_root"]))
+            remediation = None
+            if isinstance(task.external_ref_metadata, dict):
+                remediation = task.external_ref_metadata.get("promotion_remediation")
+            target_branch = remediation.get("branch_name") if isinstance(remediation, dict) else None
+            apply_result = self.repository_promotions.apply(
+                project,
+                task,
+                Path(workspace_details["project_root"]),
+                target_branch=target_branch,
+                open_review=False if target_branch else None,
+            )
         except subprocess.CalledProcessError:
             return {
                 "status": "skipped",
@@ -328,6 +338,7 @@ class PromotionService:
             "pushed_ref": apply_result.pushed_ref,
             "pr_url": apply_result.pr_url,
             "promotion_mode": project.promotion_mode.value,
+            "updated_existing_review": bool(target_branch),
         }
 
     def _workspace_details_for_run(self, run_id: str) -> dict[str, object] | None:

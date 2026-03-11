@@ -444,6 +444,102 @@ class HarnessEngineTests(unittest.TestCase):
             text=True,
         ).stdout)
 
+    def test_remediation_promotion_updates_existing_review_branch(self) -> None:
+        repo_root = Path(self.temp_dir.name) / "remediate-repo"
+        repo_root.mkdir()
+        (repo_root / "README.md").write_text("# demo\n", encoding="utf-8")
+        remote_root = self._init_git_repo(repo_root, with_remote=True)
+        subprocess.run(["git", "add", "."], cwd=repo_root, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=repo_root, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "push", "-u", "origin", "main"], cwd=repo_root, check=True, capture_output=True, text=True)
+
+        registry = ProjectAdapterRegistry()
+        registry.register(GitBranchAdapter(repo_root))
+        project = Project(
+            id=new_id("project"),
+            name="remediate-project",
+            description="Promotion remediation project",
+            adapter_name="gitbranch",
+            promotion_mode=PromotionMode.BRANCH_AND_PR,
+            repo_provider=RepoProvider.GITHUB,
+            repo_name="accruvia/remediate-project",
+        )
+        self.store.create_project(project)
+        engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-remediate",
+            project_adapter_registry=registry,
+        )
+        parent = engine.create_task_with_policy(
+            project_id=project.id,
+            title="Parent task",
+            objective="Parent objective",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+        task = engine.create_task_with_policy(
+            project_id=project.id,
+            title="Rebase approved change onto current main",
+            objective="Replay change on top of current main",
+            priority=100,
+            parent_task_id=parent.id,
+            source_run_id="run_source_parent",
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+        self.store.update_task_external_metadata(
+            task.id,
+            {"promotion_remediation": {"branch_name": "existing-review-branch", "review_url": "https://example/pr/1"}},
+        )
+        run = engine.run_once(task.id)
+        run_dir = engine.workspace_root / "runs" / run.id
+        workspace = run_dir / "workspace"
+        (workspace / "README.md").write_text("# demo\n\nremediated\n", encoding="utf-8")
+        review = engine.review_promotion(task.id, run_id=run.id)
+
+        class _LLMResult:
+            def __init__(self, prompt_path: Path, response_path: Path, response_text: str) -> None:
+                self.prompt_path = prompt_path
+                self.response_path = response_path
+                self.response_text = response_text
+
+        class _ApproveRouter:
+            def execute(self, invocation, telemetry=None):
+                Path(invocation.run_dir).mkdir(parents=True, exist_ok=True)
+                response_path = Path(invocation.run_dir) / "response.txt"
+                prompt_path = Path(invocation.run_dir) / "prompt.txt"
+                prompt_path.write_text(invocation.prompt, encoding="utf-8")
+                response_text = '{"approved": true, "rationale": "ready"}'
+                response_path.write_text(response_text, encoding="utf-8")
+                return _LLMResult(prompt_path, response_path, response_text), "command"
+
+        engine.set_llm_router(_ApproveRouter())
+        affirmation = engine.affirm_promotion(task.id, run_id=run.id, promotion_id=review.promotion.id)
+
+        applyback = affirmation.promotion.details["applyback"]
+        self.assertTrue(applyback["updated_existing_review"])
+        self.assertEqual("existing-review-branch", applyback["branch_name"])
+        self.assertIsNone(applyback["pr_url"])
+        self.assertIn(
+            "existing-review-branch",
+            subprocess.run(
+                ["git", "ls-remote", "--heads", str(remote_root)],
+                cwd=repo_root,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout,
+        )
+
     def test_run_once_rejects_terminal_tasks(self) -> None:
         task = self.engine.create_task_with_policy(
             project_id=self.project_id,

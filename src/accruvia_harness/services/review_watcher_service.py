@@ -158,4 +158,12 @@ class ReviewWatcherService:
                 + (f" Review URL: {review_url}." if review_url else "")
             ),
         )
+        parent = self.store.get_task(parent_task_id)
+        merged_metadata = dict(parent.external_ref_metadata) if parent is not None else {}
+        merged_metadata["promotion_remediation"] = {
+            "branch_name": branch_name,
+            "review_url": review_url,
+            "source_run_id": source_run_id,
+        }
+        self.store.update_task_external_metadata(follow_on.id, merged_metadata)
         return follow_on.id

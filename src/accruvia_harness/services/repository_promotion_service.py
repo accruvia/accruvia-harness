@@ -22,7 +22,15 @@ class RepositoryPromotionService:
         self.github = github or GitHubCLI()
         self.gitlab = gitlab or GitLabCLI()
 
-    def apply(self, project: Project, task: Task, workspace_root: Path) -> PromotionApplyResult:
+    def apply(
+        self,
+        project: Project,
+        task: Task,
+        workspace_root: Path,
+        *,
+        target_branch: str | None = None,
+        open_review: bool | None = None,
+    ) -> PromotionApplyResult:
         branch_name = self._branch_name(workspace_root)
         if not branch_name:
             raise RuntimeError("Promotion apply-back requires an isolated git branch in the prepared workspace")
@@ -38,14 +46,18 @@ class RepositoryPromotionService:
             self._git(workspace_root, "push", "origin", f"HEAD:{project.base_branch}")
             return PromotionApplyResult(branch_name=branch_name, commit_sha=commit_sha, pushed_ref=pushed_ref)
 
-        self._git(workspace_root, "push", "-u", "origin", branch_name)
+        push_branch = target_branch or branch_name
+        self._git(workspace_root, "push", "-u", "origin", f"HEAD:{push_branch}")
         pr_url = None
-        if project.promotion_mode == PromotionMode.BRANCH_AND_PR:
-            pr_url = self._open_review(project, task, branch_name)
+        should_open_review = (
+            open_review if open_review is not None else project.promotion_mode == PromotionMode.BRANCH_AND_PR
+        )
+        if should_open_review:
+            pr_url = self._open_review(project, task, push_branch)
         return PromotionApplyResult(
-            branch_name=branch_name,
+            branch_name=push_branch,
             commit_sha=commit_sha,
-            pushed_ref=branch_name,
+            pushed_ref=push_branch,
             pr_url=pr_url,
         )
 

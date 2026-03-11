@@ -95,6 +95,10 @@ class ReviewWatcherTests(unittest.TestCase):
         children = self.store.list_child_tasks(self.task.id)
         self.assertEqual(1, len(children))
         self.assertIn("Rebase approved change", children[0].title)
+        self.assertEqual(
+            "harness/task-1",
+            children[0].external_ref_metadata["promotion_remediation"]["branch_name"],
+        )
         self.assertEqual([("accruvia/routellect", "harness/task-1")], github.calls)
 
     def test_check_due_reviews_respects_interval(self) -> None:

@@ -81,6 +81,7 @@ When `supervise` is running, it can also perform sparse review checks for alread
 to every run. They only apply to promotions that already opened review branches, and by default they happen every 8 hours.
 If a merge conflict is detected, the harness records it and creates a bounded remediation follow-on task instead of polling
 aggressively or trying to force the merge.
+When that remediation task succeeds, the harness updates the existing review branch in place rather than opening a second PR.
 
 ## Quick Start
 
