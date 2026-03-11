@@ -149,3 +149,24 @@ class CLITests(unittest.TestCase):
         self.assertEqual("pending", review["promotion"]["status"])
         self.assertEqual("approved", affirmation["promotion"]["status"])
         self.assertEqual(1, len(status["promotions"]))
+
+    def test_explain_system_and_task_use_read_only_llm_observer(self) -> None:
+        project = self.run_cli("create-project", "observer", "observer project")["project"]
+        task = self.run_cli(
+            "create-task",
+            project["id"],
+            "Task Observer",
+            "Objective Observer",
+        )["task"]
+        self.run_cli("run-once", task["id"])
+        self.env["ACCRUVIA_LLM_BACKEND"] = "command"
+        self.env["ACCRUVIA_LLM_COMMAND"] = f'bash "{self.fixtures / "fake_affirm_approve.sh"}"'
+
+        system_explanation = self.run_cli("explain-system", "--project-id", project["id"])
+        task_explanation = self.run_cli("explain-task", task["id"])
+        status = self.run_cli("status")
+
+        self.assertIn("APPROVE", system_explanation["explanation"])
+        self.assertIn("APPROVE", task_explanation["explanation"])
+        self.assertEqual(1, len(status["tasks"]))
+        self.assertEqual(1, len(status["runs"]))

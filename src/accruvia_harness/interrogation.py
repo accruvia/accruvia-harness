@@ -1,15 +1,28 @@
 from __future__ import annotations
 
+import json
 from dataclasses import asdict
+from pathlib import Path
+from typing import Any
 
-from .domain import serialize_dataclass
-from .store import SQLiteHarnessStore
+from .domain import Project, Run, RunStatus, Task, TaskStatus, new_id, serialize_dataclass
+from .llm import LLMExecutionResult, LLMInvocation, LLMRouter
 from .telemetry import TelemetrySink
 
 
+class ReadOnlyStore:
+    def __init__(self, store) -> None:
+        self._store = store
+
+    def __getattr__(self, name: str):
+        if name.startswith(("create_", "update_", "mark_", "release_", "acquire_")):
+            raise AttributeError(f"Mutation method '{name}' is not available on ReadOnlyStore")
+        return getattr(self._store, name)
+
+
 class HarnessQueryService:
-    def __init__(self, store: SQLiteHarnessStore, telemetry: TelemetrySink | None = None) -> None:
-        self.store = store
+    def __init__(self, store, telemetry: TelemetrySink | None = None) -> None:
+        self.store = ReadOnlyStore(store)
         self.telemetry = telemetry
 
     def portfolio_summary(self) -> dict[str, object]:
@@ -120,7 +133,11 @@ class HarnessQueryService:
             "project_id": project_id,
             "metrics": metrics,
             "focus_tasks": focus_tasks,
-            "leases": [asdict(lease) | {"lease_expires_at": lease.lease_expires_at.isoformat(), "created_at": lease.created_at.isoformat()} for lease in self.store.list_task_leases()],
+            "leases": [
+                asdict(lease)
+                | {"lease_expires_at": lease.lease_expires_at.isoformat(), "created_at": lease.created_at.isoformat()}
+                for lease in self.store.list_task_leases()
+            ],
         }
 
     def operations_report(self, project_id: str | None = None) -> dict[str, object]:
@@ -166,3 +183,101 @@ class HarnessQueryService:
                 "slowest_operations_ms": telemetry.get("dashboard", {}).get("slowest_operations_ms", []),
             },
         }
+
+
+class InterrogationService:
+    def __init__(
+        self,
+        query_service: HarnessQueryService,
+        workspace_root: Path,
+        llm_router: LLMRouter | None,
+        telemetry: TelemetrySink | None = None,
+    ) -> None:
+        self.query_service = query_service
+        self.workspace_root = workspace_root
+        self.llm_router = llm_router
+        self.telemetry = telemetry
+
+    def explain_system(self, project_id: str | None = None) -> dict[str, object]:
+        packet = self.query_service.context_packet(project_id)
+        return self._explain(
+            subject_type="system",
+            subject_id=project_id or "portfolio",
+            payload=packet,
+            title=f"System explanation for {project_id or 'portfolio'}",
+        )
+
+    def explain_task(self, task_id: str) -> dict[str, object]:
+        packet = self.query_service.task_report(task_id)
+        return self._explain(
+            subject_type="task",
+            subject_id=task_id,
+            payload=packet,
+            title=f"Task explanation for {task_id}",
+        )
+
+    def _explain(self, subject_type: str, subject_id: str, payload: dict[str, Any], title: str) -> dict[str, object]:
+        if self.llm_router is None:
+            raise ValueError("No LLM router configured for interrogation")
+        executor, backend = self.llm_router.resolve()
+        run_dir = self.workspace_root / "interrogation" / f"{subject_type}_{subject_id}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        task = Task(
+            id=new_id("interrogation_task"),
+            project_id="interrogation",
+            title=title,
+            objective=f"Explain harness {subject_type} state from read-only evidence.",
+            status=TaskStatus.COMPLETED,
+        )
+        run = Run(
+            id=new_id("interrogation_run"),
+            task_id=task.id,
+            status=RunStatus.COMPLETED,
+            attempt=1,
+            summary=f"Read-only explanation for {subject_type} {subject_id}",
+        )
+        prompt = self._build_prompt(subject_type, payload)
+        if self.telemetry is not None:
+            with self.telemetry.timed(
+                "interrogation_explain",
+                subject_type=subject_type,
+                subject_id=subject_id,
+                llm_backend=backend,
+            ):
+                result = executor.execute(LLMInvocation(task=task, run=run, prompt=prompt, run_dir=run_dir))
+        else:
+            result = executor.execute(LLMInvocation(task=task, run=run, prompt=prompt, run_dir=run_dir))
+        explanation_path = run_dir / "explanation.json"
+        explanation_path.write_text(
+            json.dumps(
+                {
+                    "subject_type": subject_type,
+                    "subject_id": subject_id,
+                    "backend": backend,
+                    "explanation": result.response_text,
+                    "diagnostics": result.diagnostics,
+                },
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        return {
+            "subject_type": subject_type,
+            "subject_id": subject_id,
+            "backend": backend,
+            "explanation": result.response_text,
+            "prompt_path": str(result.prompt_path),
+            "response_path": str(result.response_path),
+            "explanation_path": str(explanation_path),
+            "diagnostics": result.diagnostics,
+        }
+
+    def _build_prompt(self, subject_type: str, payload: dict[str, Any]) -> str:
+        return (
+            "You are a read-only observer of the accrivia-harness control plane.\n"
+            "Explain the current system state, risks, bottlenecks, and recommended next actions.\n"
+            "Do not assume unstated facts. Base your explanation only on the provided evidence.\n\n"
+            f"Subject Type: {subject_type}\n"
+            f"Evidence:\n{json.dumps(payload, indent=2, sort_keys=True)}\n"
+        )

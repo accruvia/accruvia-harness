@@ -26,11 +26,17 @@ def handle_interrogation_command(args, ctx: CLIContext) -> bool:
     if args.command == "dashboard-report":
         emit(ctx.query_service.dashboard_report(args.project_id))
         return True
+    if args.command == "explain-system":
+        emit(ctx.interrogation_service.explain_system(args.project_id))
+        return True
     if args.command == "lineage-report":
         emit(ctx.query_service.task_lineage(args.task_id))
         return True
     if args.command == "task-report":
         emit(ctx.query_service.task_report(args.task_id))
+        return True
+    if args.command == "explain-task":
+        emit(ctx.interrogation_service.explain_task(args.task_id))
         return True
     if args.command == "events":
         emit({"events": [serialize_dataclass(i) for i in store.list_events(args.entity_type, args.entity_id)]})

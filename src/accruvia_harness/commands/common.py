@@ -9,7 +9,7 @@ from ..domain import serialize_dataclass
 from ..engine import HarnessEngine
 from ..github import GitHubCLI
 from ..gitlab import GitLabCLI
-from ..interrogation import HarnessQueryService
+from ..interrogation import HarnessQueryService, InterrogationService
 from ..project_adapters import build_project_adapter_registry
 from ..runtime import WorkflowRuntime, build_runtime
 from ..store import SQLiteHarnessStore
@@ -33,6 +33,7 @@ class CLIContext:
     gitlab: GitLabCLI
     runtime: WorkflowRuntime
     query_service: HarnessQueryService
+    interrogation_service: InterrogationService
     telemetry: TelemetrySink
 
 
@@ -61,6 +62,7 @@ def build_context(config: HarnessConfig) -> CLIContext:
     )
     engine.set_llm_router(build_llm_router(config, telemetry=telemetry))
     engine.set_worker(build_worker_from_config(config, telemetry=telemetry))
+    query_service = HarnessQueryService(store, telemetry=telemetry)
     return CLIContext(
         config=config,
         store=store,
@@ -74,6 +76,12 @@ def build_context(config: HarnessConfig) -> CLIContext:
             temporal_namespace=config.temporal_namespace,
             temporal_task_queue=config.temporal_task_queue,
         ),
-        query_service=HarnessQueryService(store, telemetry=telemetry),
+        query_service=query_service,
+        interrogation_service=InterrogationService(
+            query_service=query_service,
+            workspace_root=config.workspace_root,
+            llm_router=engine.llm_router,
+            telemetry=telemetry,
+        ),
         telemetry=telemetry,
     )

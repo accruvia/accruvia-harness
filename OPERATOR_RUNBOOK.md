@@ -28,8 +28,16 @@ PYTHONPATH=src python3 -m accruvia_harness context-packet
 PYTHONPATH=src python3 -m accruvia_harness task-report <task_id>
 PYTHONPATH=src python3 -m accruvia_harness dashboard-report
 PYTHONPATH=src python3 -m accruvia_harness telemetry-report
+PYTHONPATH=src python3 -m accruvia_harness explain-system
+PYTHONPATH=src python3 -m accruvia_harness explain-task <task_id>
 PYTHONPATH=src python3 -m accruvia_harness events
 ```
+
+## Read-Only Observer Boundary
+
+- `context-packet`, `task-report`, `dashboard-report`, `explain-system`, and `explain-task` are observer commands
+- they operate through a read-only facade over the store
+- they must not mutate tasks, runs, promotions, or events
 
 ## Issue Intake And Reporting
 

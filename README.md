@@ -122,6 +122,7 @@ This repo now contains a minimal durable harness foundation:
 - an adapter registry for built-in workload adapters plus externally supplied adapter modules
 - a profile-aware local worker that emits deterministic evidence for `generic`, `python`, `javascript`, and `terraform` tasks
 - a read-only interrogation surface for summaries, context packets, and task reports
+- LLM-backed `explain-system` and `explain-task` commands built on read-only evidence packets
 - an operational report for pending affirmations and profile-aware workload metrics
 - a dashboard export for slow operations, queue state, retry rate, and LLM cost usage
 - a small CLI for creating projects, syncing issue-backed tasks, running cycles, and inspecting status
@@ -161,6 +162,8 @@ PYTHONPATH=src python3 -m accruvia_harness context-packet
 PYTHONPATH=src python3 -m accruvia_harness ops-report
 PYTHONPATH=src python3 -m accruvia_harness telemetry-report
 PYTHONPATH=src python3 -m accruvia_harness dashboard-report
+PYTHONPATH=src python3 -m accruvia_harness explain-system
+PYTHONPATH=src python3 -m accruvia_harness explain-task <task_id>
 PYTHONPATH=src python3 -m accruvia_harness review-promotion <task_id>
 PYTHONPATH=src python3 -m accruvia_harness affirm-promotion <task_id>
 PYTHONPATH=src python3 -m accruvia_harness rereview-promotion <task_id> <remediation_task_id>
@@ -202,6 +205,23 @@ LLM executors can also emit structured usage metadata to `ACCRUVIA_LLM_METADATA_
 ```
 
 The harness records those values into telemetry and exposes them through `telemetry-report` and `dashboard-report`.
+
+### Interrogation Layer
+
+The interrogation layer is now explicitly read-only.
+
+- query surfaces use a read-only store facade
+- explanation commands use the configured LLM executor over exported evidence
+- explanations write their own artifacts under the interrogation workspace
+- the observer path does not mutate task, run, promotion, or event records
+
+Commands:
+
+```bash
+PYTHONPATH=src python3 -m accruvia_harness context-packet --project-id <project_id>
+PYTHONPATH=src python3 -m accruvia_harness explain-system --project-id <project_id>
+PYTHONPATH=src python3 -m accruvia_harness explain-task <task_id>
+```
 
 ### Observability
 

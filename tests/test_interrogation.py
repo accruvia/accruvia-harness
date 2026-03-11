@@ -186,3 +186,7 @@ class HarnessQueryServiceTests(unittest.TestCase):
         self.assertIn("telemetry", dashboard)
         self.assertIn("dashboard", dashboard)
         self.assertIn("slowest_operations_ms", dashboard["dashboard"])
+
+    def test_query_service_uses_read_only_store_wrapper(self) -> None:
+        with self.assertRaises(AttributeError):
+            self.query.store.update_task_status("task_x", None)
