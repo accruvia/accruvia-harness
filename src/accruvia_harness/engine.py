@@ -18,6 +18,7 @@ from .services import (
     GitLabTaskService,
     PromotionService,
     QueueService,
+    ReviewWatcherService,
     RunService,
     SupervisorService,
     TaskService,
@@ -97,6 +98,7 @@ class HarnessEngine:
             telemetry=self.telemetry,
         )
         self.supervisor = SupervisorService(self.store, self.queue, self.cognition)
+        self.review_watcher = ReviewWatcherService(self.store)
         self.promotions = PromotionService(
             self.store,
             self.tasks,
@@ -234,6 +236,8 @@ class HarnessEngine:
         heartbeat_project_ids: list[str] | None = None,
         heartbeat_interval_seconds: float | None = None,
         heartbeat_all_projects: bool = False,
+        review_check_enabled: bool = False,
+        review_check_interval_seconds: int | None = None,
     ):
         return self.supervisor.run(
             project_id=project_id,
@@ -246,7 +250,13 @@ class HarnessEngine:
             heartbeat_project_ids=heartbeat_project_ids,
             heartbeat_interval_seconds=heartbeat_interval_seconds,
             heartbeat_all_projects=heartbeat_all_projects,
+            review_check_enabled=review_check_enabled,
+            review_check_interval_seconds=review_check_interval_seconds,
+            review_watcher=self.review_watcher,
         )
+
+    def check_reviews(self, interval_seconds: int):
+        return self.review_watcher.check_due_reviews(interval_seconds)
 
     def import_issue_task(
         self,

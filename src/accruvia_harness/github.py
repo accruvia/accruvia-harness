@@ -95,3 +95,31 @@ class GitHubCLI:
             ]
         )
         return raw.strip() or None
+
+    def fetch_pull_request_status(self, repo: str, head: str) -> dict[str, object] | None:
+        raw = self.runner(
+            [
+                "gh",
+                "pr",
+                "list",
+                "--repo",
+                repo,
+                "--head",
+                head,
+                "--state",
+                "all",
+                "--json",
+                "url,state,mergeStateStatus,isDraft",
+            ]
+        )
+        payload = json.loads(raw)
+        if not payload:
+            return None
+        item = payload[0]
+        return {
+            "url": str(item.get("url") or ""),
+            "state": str(item.get("state") or "").lower(),
+            "merge_state": str(item.get("mergeStateStatus") or "").lower(),
+            "is_draft": bool(item.get("isDraft", False)),
+            "has_conflicts": str(item.get("mergeStateStatus") or "").upper() == "DIRTY",
+        }

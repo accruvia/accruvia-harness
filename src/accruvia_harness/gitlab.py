@@ -104,3 +104,30 @@ class GitLabCLI:
             ]
         )
         return raw.strip() or None
+
+    def fetch_merge_request_status(self, repo: str, source_branch: str) -> dict[str, object] | None:
+        raw = self.runner(
+            [
+                "glab",
+                "mr",
+                "list",
+                "--repo",
+                repo,
+                "--source-branch",
+                source_branch,
+                "--output",
+                "json",
+            ]
+        )
+        payload = json.loads(raw)
+        if not payload:
+            return None
+        item = payload[0]
+        merge_status = str(item.get("merge_status") or item.get("mergeStatus") or "").lower()
+        has_conflicts = bool(item.get("has_conflicts", False) or merge_status in {"cannot_be_merged", "conflict"})
+        return {
+            "url": str(item.get("web_url") or item.get("url") or ""),
+            "state": str(item.get("state") or "").lower(),
+            "merge_state": merge_status,
+            "has_conflicts": has_conflicts,
+        }

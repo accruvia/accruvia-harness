@@ -71,6 +71,8 @@ def build_parser() -> argparse.ArgumentParser:
     supervise.add_argument("--heartbeat-project-id", action="append", dest="heartbeat_project_ids", default=None)
     supervise.add_argument("--heartbeat-interval-seconds", type=float)
     supervise.add_argument("--heartbeat-all-projects", action="store_true")
+    supervise.add_argument("--review-check-enabled", action="store_true")
+    supervise.add_argument("--review-check-interval-seconds", type=int)
 
     runtime_run = subparsers.add_parser("run-runtime", help="Run a task through the configured workflow runtime backend.")
     runtime_run.add_argument("task_id")
@@ -188,4 +190,6 @@ def build_parser() -> argparse.ArgumentParser:
     events = subparsers.add_parser("events", help="Show recorded harness events.")
     events.add_argument("--entity-type")
     events.add_argument("--entity-id")
+    check_reviews = subparsers.add_parser("check-reviews", help="Check open PR/MR promotions for merge or conflict state.")
+    check_reviews.add_argument("--interval-seconds", type=int)
     return parser

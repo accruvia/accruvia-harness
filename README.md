@@ -77,6 +77,9 @@ Default posture:
 This exists for one reason: blocked or failed runs must not dirty the main checkout, and successful isolated work must
 have a deliberate path back into the real repo.
 
+When `supervise` is running, it can also perform sparse review checks for already-open PRs/MRs. These checks are not tied
+to every run. They only apply to promotions that already opened review branches, and by default they happen every 8 hours.
+
 ## Quick Start
 
 Create a virtualenv, install the package, and initialize the harness:

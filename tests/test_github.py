@@ -71,6 +71,17 @@ class FakeGhRunner:
                     "assignees": [],
                 }
             )
+        if args[:6] == ["gh", "pr", "list", "--repo", "accruvia/accruvia", "--head"]:
+            return json.dumps(
+                [
+                    {
+                        "url": "https://github.com/accruvia/accruvia/pull/12",
+                        "state": "OPEN",
+                        "mergeStateStatus": "DIRTY",
+                        "isDraft": False,
+                    }
+                ]
+            )
         return ""
 
 
@@ -172,6 +183,13 @@ class GitHubIntegrationTests(unittest.TestCase):
         updated = self.engine.sync_github_issue_metadata(task.id, "accruvia/accruvia", self.github)
         self.assertEqual("MVP", updated.external_ref_metadata["milestone"])
         self.assertEqual(["sanaani"], updated.external_ref_metadata["assignees"])
+
+    def test_fetch_pull_request_status_reports_conflict_state(self) -> None:
+        status = self.github.fetch_pull_request_status("accruvia/accruvia", "feature-branch")
+
+        assert status is not None
+        self.assertEqual("open", status["state"])
+        self.assertTrue(status["has_conflicts"])
 
     def test_completed_task_can_stay_open_until_promotion_approved(self) -> None:
         engine = HarnessEngine(

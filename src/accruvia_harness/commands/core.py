@@ -146,8 +146,17 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
             heartbeat_project_ids=args.heartbeat_project_ids,
             heartbeat_interval_seconds=args.heartbeat_interval_seconds,
             heartbeat_all_projects=args.heartbeat_all_projects,
+            review_check_enabled=args.review_check_enabled or config.pr_check_enabled,
+            review_check_interval_seconds=args.review_check_interval_seconds or config.pr_check_interval_seconds,
         )
         emit(serialize_dataclass(result))
+        return True
+    if args.command == "check-reviews":
+        emit(
+            serialize_dataclass(
+                engine.check_reviews(args.interval_seconds or config.pr_check_interval_seconds)
+            )
+        )
         return True
     if args.command == "review-promotion":
         result = engine.review_promotion(args.task_id, run_id=args.run_id, create_follow_on=not args.no_follow_on)

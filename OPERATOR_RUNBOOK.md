@@ -96,6 +96,18 @@ Recommended default:
 
 Use `direct_main` only after a project has proven it can operate safely without routine manual rescue.
 
+To run a one-shot review check:
+
+```bash
+PYTHONPATH=src python3 -m accruvia_harness check-reviews
+```
+
+To let the supervisor perform sparse review checks while watching the queue:
+
+```bash
+PYTHONPATH=src python3 -m accruvia_harness supervise --watch --review-check-enabled
+```
+
 ## Generated State
 
 Generated state lives under `.accruvia-harness/` and should not be committed:

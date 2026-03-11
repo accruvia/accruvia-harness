@@ -45,6 +45,25 @@ class _FakeStore:
         return [_FakeProject(project_id) for project_id in self.project_ids]
 
 
+class _FakeReviewWatcher:
+    def __init__(self, counts: list[int]) -> None:
+        self.counts = list(counts)
+        self.calls: list[int] = []
+
+    def check_due_reviews(self, interval_seconds: int):
+        self.calls.append(interval_seconds)
+        count = self.counts.pop(0) if self.counts else 0
+        from accruvia_harness.services.review_watcher_service import ReviewWatcherResult
+
+        return ReviewWatcherResult(
+            checked_count=count,
+            changed_count=count,
+            conflict_count=count,
+            merged_count=0,
+            checked_promotion_ids=["promotion-1"] if count else [],
+        )
+
+
 class _FakeClock:
     def __init__(self) -> None:
         self.now = 0.0
@@ -124,3 +143,27 @@ class SupervisorServiceTests(unittest.TestCase):
 
         self.assertEqual(2, result.processed_count)
         self.assertEqual("max_iterations_reached", result.exit_reason)
+
+    def test_supervisor_runs_review_checks_only_when_idle(self) -> None:
+        clock = _FakeClock()
+        watcher = _FakeReviewWatcher([1, 0])
+        service = SupervisorService(
+            _FakeStore(),
+            _FakeQueue([]),
+            _FakeCognition(),
+            sleeper=clock.sleep,
+            monotonic=clock.monotonic,
+        )
+
+        result = service.run(
+            watch=True,
+            idle_sleep_seconds=5.0,
+            max_iterations=3,
+            review_check_enabled=True,
+            review_check_interval_seconds=28800,
+            review_watcher=watcher,
+        )
+
+        self.assertEqual([28800, 28800], watcher.calls)
+        self.assertEqual(1, result.review_check_count)
+        self.assertEqual(1, result.review_conflict_count)

@@ -12,6 +12,9 @@ class SupervisorResult:
     processed_task_ids: list[str]
     heartbeat_count: int
     heartbeat_project_ids: list[str]
+    review_check_count: int
+    review_conflict_count: int
+    review_merged_count: int
     idle_cycles: int
     sleep_count: int
     slept_seconds: float
@@ -45,6 +48,9 @@ class SupervisorService:
         heartbeat_project_ids: list[str] | None = None,
         heartbeat_interval_seconds: float | None = None,
         heartbeat_all_projects: bool = False,
+        review_check_enabled: bool = False,
+        review_check_interval_seconds: int | None = None,
+        review_watcher=None,
     ) -> SupervisorResult:
         if max_idle_cycles is not None and max_idle_cycles < 1:
             raise ValueError("max_idle_cycles must be at least 1")
@@ -57,6 +63,9 @@ class SupervisorService:
 
         processed_task_ids: list[str] = []
         heartbeat_runs: list[str] = []
+        review_check_count = 0
+        review_conflict_count = 0
+        review_merged_count = 0
         idle_cycles = 0
         sleep_count = 0
         slept_seconds = 0.0
@@ -94,6 +103,15 @@ class SupervisorService:
                 idle_cycles = 0
                 continue
 
+            if review_check_enabled and review_check_interval_seconds is not None and review_watcher is not None:
+                review_result = review_watcher.check_due_reviews(review_check_interval_seconds)
+                if review_result.checked_count > 0:
+                    review_check_count += review_result.checked_count
+                    review_conflict_count += review_result.conflict_count
+                    review_merged_count += review_result.merged_count
+                    idle_cycles = 0
+                    continue
+
             idle_cycles += 1
             if not watch:
                 exit_reason = "idle"
@@ -110,6 +128,9 @@ class SupervisorService:
             processed_task_ids=processed_task_ids,
             heartbeat_count=len(heartbeat_runs),
             heartbeat_project_ids=heartbeat_runs,
+            review_check_count=review_check_count,
+            review_conflict_count=review_conflict_count,
+            review_merged_count=review_merged_count,
             idle_cycles=idle_cycles,
             sleep_count=sleep_count,
             slept_seconds=slept_seconds,

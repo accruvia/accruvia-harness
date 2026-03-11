@@ -71,6 +71,17 @@ class FakeGlabRunner:
                     "assignees": [],
                 }
             )
+        if args[:7] == ["glab", "mr", "list", "--repo", "soverton/accruvia", "--source-branch", "feature-branch"]:
+            return json.dumps(
+                [
+                    {
+                        "web_url": "https://gitlab.com/soverton/accruvia/-/merge_requests/3",
+                        "state": "opened",
+                        "merge_status": "cannot_be_merged",
+                        "has_conflicts": True,
+                    }
+                ]
+            )
         return ""
 
 
@@ -189,6 +200,13 @@ class GitLabIntegrationTests(unittest.TestCase):
         updated = self.engine.sync_gitlab_issue_metadata(task.id, "soverton/accruvia", self.gitlab)
         self.assertEqual("MVP", updated.external_ref_metadata["milestone"])
         self.assertEqual(["sanaani"], updated.external_ref_metadata["assignees"])
+
+    def test_fetch_merge_request_status_reports_conflict_state(self) -> None:
+        status = self.gitlab.fetch_merge_request_status("soverton/accruvia", "feature-branch")
+
+        assert status is not None
+        self.assertEqual("opened", status["state"])
+        self.assertTrue(status["has_conflicts"])
 
     def test_completed_gitlab_task_can_stay_open_until_promotion_approved(self) -> None:
         engine = HarnessEngine(
