@@ -219,6 +219,35 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual("accruvia_client", backend)
         self.assertEqual("accruvia_client", executor.backend_name)
 
+    def test_llm_worker_ignores_non_numeric_metadata_values(self) -> None:
+        config = HarnessConfig(
+            db_path=self.base / "harness.db",
+            workspace_root=self.base,
+            log_path=self.base / "harness.log",
+            default_project_name="demo",
+            default_repo="accruvia/accruvia",
+            runtime_backend="local",
+            temporal_target="localhost:7233",
+            temporal_namespace="default",
+            temporal_task_queue="accruvia-harness",
+            worker_backend="llm",
+            worker_command=None,
+            llm_backend="codex",
+            llm_model="gpt-5.4-codex",
+            llm_command=None,
+            llm_codex_command="printf 'codex response' > \"$ACCRUVIA_LLM_RESPONSE_PATH\"; printf '{\"cost_usd\": \"error\", \"prompt_tokens\": \"oops\"}' > \"$ACCRUVIA_LLM_METADATA_PATH\"",
+            llm_claude_command=None,
+            llm_accruvia_client_command=None,
+        )
+
+        telemetry = TelemetrySink(self.base / "telemetry")
+        worker = build_worker_from_config(config, telemetry=telemetry)
+        result = worker.work(self.task, self.run, self.base)
+
+        self.assertEqual("success", result.outcome)
+        summary = telemetry.summary()
+        self.assertEqual(0.0, summary["cost_totals"]["cost_usd"])
+
     def test_parse_affirmation_response_handles_loose_rejection_text(self) -> None:
         approved, rationale = parse_affirmation_response("I would reject this candidate.\nIt is not ready to promote.")
         self.assertFalse(approved)

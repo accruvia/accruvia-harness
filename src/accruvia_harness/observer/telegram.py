@@ -8,6 +8,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from .agent import ObserverAgent
@@ -41,6 +42,8 @@ class TelegramAdapter:
         self._offset: int = 0
         self._running = False
         self._message_lock = threading.Lock()
+        self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="telegram-observer")
+        self._pending = threading.BoundedSemaphore(value=32)
 
     def _api_call(self, method: str, payload: dict | None = None) -> dict:
         url = TELEGRAM_API.format(token=self.bot_token, method=method)
@@ -93,13 +96,15 @@ class TelegramAdapter:
         if text.startswith("/"):
             self._handle_command(chat_id, text, message_id)
             return
-        # Process in a background thread so LLM latency doesn't block polling
-        thread = threading.Thread(
-            target=self._answer_question,
-            args=(chat_id, text, message_id),
-            daemon=True,
-        )
-        thread.start()
+        self._submit_question(chat_id, text, message_id)
+
+    def _submit_question(self, chat_id: int, text: str, message_id: int) -> None:
+        if not self._pending.acquire(blocking=False):
+            logger.warning("Telegram observer queue is full; dropping message for chat %s", chat_id)
+            self._send_message(chat_id, "Observer is busy right now. Please try again shortly.", reply_to=message_id)
+            return
+        future = self._executor.submit(self._answer_question, chat_id, text, message_id)
+        future.add_done_callback(lambda _: self._pending.release())
 
     def _answer_question(self, chat_id: int, text: str, message_id: int) -> None:
         """Ask the agent and reply. Runs in a background thread."""
@@ -136,8 +141,7 @@ class TelegramAdapter:
                 "Commands: /status /cache /help"
             ), reply_to=message_id)
         elif cmd == "/status":
-            response = self.agent.ask("Give me a brief status overview of all projects and tasks.")
-            self._send_message(chat_id, response.answer or response.error or "No data", reply_to=message_id)
+            self._submit_question(chat_id, "Give me a brief status overview of all projects and tasks.", message_id)
         elif cmd == "/cache":
             self._send_message(chat_id, self.agent.cache.summary_text(), reply_to=message_id)
         elif cmd == "/help":
@@ -169,3 +173,4 @@ class TelegramAdapter:
 
     def stop(self) -> None:
         self._running = False
+        self._executor.shutdown(wait=False, cancel_futures=True)

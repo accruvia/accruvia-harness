@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from accruvia_harness.domain import Project, TaskStatus, new_id
 from accruvia_harness.engine import HarnessEngine
-from accruvia_harness.github import GitHubCLI
+from accruvia_harness.github import GitHubCLI, _default_runner
 from accruvia_harness.services.issue_policy import IssueStatePolicy
 from accruvia_harness.store import SQLiteHarnessStore
 
@@ -186,3 +188,12 @@ class GitHubIntegrationTests(unittest.TestCase):
         engine.sync_github_issue_state(task.id, "accruvia/accruvia", self.github)
         close_calls = [call for call in self.runner.calls if call[:3] == ["gh", "issue", "close"]]
         self.assertEqual([], close_calls)
+
+    @patch("subprocess.run")
+    def test_default_runner_maps_called_process_error_to_runtime_error(self, mock_run) -> None:
+        mock_run.side_effect = subprocess.CalledProcessError(2, ["gh", "api"], stderr="boom")
+
+        with self.assertRaises(RuntimeError) as exc:
+            _default_runner(["gh", "api", "repos/accruvia/accruvia/issues/456"])
+
+        self.assertIn("GitHub CLI failed", str(exc.exception))

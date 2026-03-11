@@ -6,7 +6,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .domain import Run, RunStatus
+from .domain import Run, RunStatus, TaskStatus
 
 logger = logging.getLogger(__name__)
 from .migrations import MIGRATIONS, apply_migrations
@@ -76,7 +76,7 @@ class SQLiteHarnessStore(ProjectTaskStoreMixin, RunRecordsStoreMixin, EventsMetr
                 WHERE status = ?
                 AND id NOT IN (SELECT task_id FROM task_leases)
                 """,
-                ("pending", now, "active"),
+                (TaskStatus.PENDING.value, now, TaskStatus.ACTIVE.value),
             ).rowcount
             recovered["tasks"] = tasks_reset
         return recovered

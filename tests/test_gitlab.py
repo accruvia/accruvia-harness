@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from accruvia_harness.domain import Project, TaskStatus, new_id
 from accruvia_harness.engine import HarnessEngine
-from accruvia_harness.gitlab import GitLabCLI
+from accruvia_harness.gitlab import GitLabCLI, _default_runner
 from accruvia_harness.services.issue_policy import IssueStatePolicy
 from accruvia_harness.store import SQLiteHarnessStore
 
@@ -203,3 +205,12 @@ class GitLabIntegrationTests(unittest.TestCase):
         engine.sync_gitlab_issue_state(task.id, "soverton/accruvia", self.gitlab)
         close_calls = [call for call in self.runner.calls if call[:3] == ["glab", "issue", "close"]]
         self.assertEqual([], close_calls)
+
+    @patch("subprocess.run")
+    def test_default_runner_maps_called_process_error_to_runtime_error(self, mock_run) -> None:
+        mock_run.side_effect = subprocess.CalledProcessError(2, ["glab", "api"], stderr="boom")
+
+        with self.assertRaises(RuntimeError) as exc:
+            _default_runner(["glab", "api", "projects/soverton%2Faccruvia/issues/456"])
+
+        self.assertIn("GitLab CLI failed", str(exc.exception))

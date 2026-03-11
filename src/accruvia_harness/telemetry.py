@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
+import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def _sanitize_attributes(attributes: dict[str, Any]) -> dict[str, str | int | float | bool]:
@@ -42,12 +46,14 @@ class TelemetrySink:
     _otel: "_OpenTelemetryBridge | None" = field(init=False, default=None)
     otel_status: str = field(init=False, default="disabled")
     otel_warning: str | None = field(init=False, default=None)
+    _append_lock: threading.Lock = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         self.metrics_path = self.root / "metrics.jsonl"
         self.spans_path = self.root / "spans.jsonl"
         self.warnings_path = self.root / "warnings.jsonl"
+        self._append_lock = threading.Lock()
         self._otel, self.otel_status, self.otel_warning = _OpenTelemetryBridge.build(
             service_name=self.service_name,
             endpoint=self.otlp_endpoint,
@@ -164,8 +170,9 @@ class TelemetrySink:
         }
 
     def _append(self, path: Path, payload: dict[str, Any]) -> None:
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+        with self._append_lock:
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, sort_keys=True) + "\n")
 
     def warn(self, category: str, message: str, **attributes: Any) -> None:
         payload = {
@@ -184,7 +191,10 @@ class TelemetrySink:
         for line in path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
-            records.append(json.loads(line))
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                logger.warning("Skipping corrupt telemetry JSONL line in %s: %s", path, exc)
         return records
 
     def load_metrics(self) -> list[dict[str, Any]]:
@@ -225,6 +235,7 @@ class _OpenTelemetryBridge:
         self.metric_endpoint = metric_endpoint
         self._counters: dict[str, Any] = {}
         self._histograms: dict[str, Any] = {}
+        self._counter_types: dict[str, str] = {}
 
     @classmethod
     def build(
@@ -282,10 +293,14 @@ class _OpenTelemetryBridge:
         if instrument is None:
             if value < 0:
                 instrument = self.meter.create_up_down_counter(name)
+                self._counter_types[name] = "up_down_counter"
             else:
                 instrument = self.meter.create_counter(name)
+                self._counter_types[name] = "counter"
             self._counters[name] = instrument
-        if value < 0 and instrument in self._counters.values():
+        if value < 0 and self._counter_types.get(name) == "counter":
+            raise ValueError(f"Metric {name} was created as a monotonic counter and cannot accept negative values")
+        if value < 0:
             instrument.add(value, attributes=attributes)
             return
         instrument.add(value, attributes=attributes)

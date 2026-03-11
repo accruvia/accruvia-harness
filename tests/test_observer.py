@@ -1,19 +1,24 @@
 from __future__ import annotations
 
 import json
+import queue
 import tempfile
 import threading
 import time
 import unittest
 import urllib.request
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from accruvia_harness.observer.agent import ObserverAgent, SYSTEM_PROMPT
 from accruvia_harness.observer.evidence_cache import EvidenceCache
 from accruvia_harness.observer.query_client import HarnessQueryClient, QueryResult
+from accruvia_harness.observer.telegram import TelegramAdapter
 from accruvia_harness.observer.webhook import WebhookReceiver
 from accruvia_harness.observer_hook import notify_observer, NOTIFY_EVENT_TYPES
+from accruvia_harness.store import SQLiteHarnessStore
+from accruvia_harness.domain import Event
 
 
 class EvidenceCacheTests(unittest.TestCase):
@@ -231,6 +236,30 @@ class WebhookReceiverTests(unittest.TestCase):
         finally:
             receiver.stop()
 
+    def test_webhook_returns_500_when_callback_fails(self) -> None:
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+
+        receiver = WebhookReceiver(port=port)
+        receiver.start(lambda event: (_ for _ in ()).throw(RuntimeError("boom")))
+        time.sleep(0.2)
+        try:
+            event = {"event_type": "task_failed", "entity_id": "task_123"}
+            data = json.dumps(event).encode("utf-8")
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/",
+                data=data,
+                headers={"Content-Type": "application/json"},
+            )
+            with self.assertRaises(urllib.error.HTTPError) as exc:
+                urllib.request.urlopen(req, timeout=5)
+            self.assertEqual(500, exc.exception.code)
+        finally:
+            receiver.stop()
+
 
 class ObserverHookTests(unittest.TestCase):
     def test_notify_filters_by_event_type(self) -> None:
@@ -245,6 +274,47 @@ class ObserverHookTests(unittest.TestCase):
         self.assertIn("task_failed", NOTIFY_EVENT_TYPES)
         self.assertIn("task_completed", NOTIFY_EVENT_TYPES)
         self.assertIn("branch_winner_selected", NOTIFY_EVENT_TYPES)
+
+    def test_notify_drops_when_queue_is_full(self) -> None:
+        with patch("accruvia_harness.observer_hook._pending.acquire", return_value=False):
+            with patch("accruvia_harness.observer_hook._pool.submit") as mock_submit:
+                notify_observer("http://localhost:8900", "task_failed", "task", "task_123", {})
+                mock_submit.assert_not_called()
+
+    def test_create_event_does_not_fail_when_notify_observer_raises(self) -> None:
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        store = SQLiteHarnessStore(Path(temp_dir.name) / "harness.db")
+        store.initialize()
+        store.observer_webhook_url = "http://localhost:8900"
+        event = Event(
+            id="event_1",
+            entity_type="task",
+            entity_id="task_123",
+            event_type="task_failed",
+            payload={},
+        )
+        with patch("accruvia_harness.observer_hook.notify_observer", side_effect=RuntimeError("boom")):
+            store.create_event(event)
+        self.assertEqual(1, len(store.list_events("task", "task_123")))
+
+
+class TelegramAdapterTests(unittest.TestCase):
+    def test_status_command_is_dispatched_async(self) -> None:
+        agent = MagicMock(spec=ObserverAgent)
+        adapter = TelegramAdapter("token", agent)
+        adapter._send_message = MagicMock()
+        with patch.object(adapter, "_submit_question") as mock_submit:
+            adapter._handle_command(1, "/status", 99)
+        mock_submit.assert_called_once()
+
+    def test_submit_question_rejects_when_queue_is_full(self) -> None:
+        agent = MagicMock(spec=ObserverAgent)
+        adapter = TelegramAdapter("token", agent)
+        adapter._send_message = MagicMock()
+        with patch.object(adapter._pending, "acquire", return_value=False):
+            adapter._submit_question(1, "hello", 99)
+        adapter._send_message.assert_called_once()
 
 
 class ObserverConfigTests(unittest.TestCase):

@@ -102,7 +102,7 @@ class RunRecordsStoreMixin:
                 (
                     evaluation.id,
                     evaluation.run_id,
-                    evaluation.verdict,
+                    evaluation.verdict.value,
                     evaluation.confidence,
                     evaluation.summary,
                     json.dumps(evaluation.details, sort_keys=True),

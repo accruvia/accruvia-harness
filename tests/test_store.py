@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from accruvia_harness.domain import Event, Project, Task, new_id
+from accruvia_harness.domain import Event, Evaluation, EvaluationVerdict, Project, Run, RunStatus, Task, TaskStatus, new_id
 from accruvia_harness.store import SQLiteHarnessStore
 
 
@@ -147,3 +147,121 @@ class SQLiteHarnessStoreTests(unittest.TestCase):
         loaded = self.store.get_task(task.id)
         assert loaded is not None
         self.assertEqual(["bug", "triage"], loaded.external_ref_metadata["labels"])
+
+    def test_metrics_snapshot_scopes_active_leases_by_project(self) -> None:
+        project_a = Project(id=new_id("project"), name="a", description="A")
+        project_b = Project(id=new_id("project"), name="b", description="B")
+        self.store.create_project(project_a)
+        self.store.create_project(project_b)
+        task_a = Task(id=new_id("task"), project_id=project_a.id, title="A", objective="A")
+        task_b = Task(id=new_id("task"), project_id=project_b.id, title="B", objective="B")
+        self.store.create_task(task_a)
+        self.store.create_task(task_b)
+        self.store.acquire_task_lease("worker-a", lease_seconds=60, project_id=project_a.id)
+        self.store.acquire_task_lease("worker-b", lease_seconds=60, project_id=project_b.id)
+
+        metrics_a = self.store.metrics_snapshot(project_a.id)
+        metrics_b = self.store.metrics_snapshot(project_b.id)
+
+        self.assertEqual(1, metrics_a["active_leases"])
+        self.assertEqual(1, metrics_b["active_leases"])
+
+    def test_recover_stale_state_resets_runs_tasks_and_expired_leases(self) -> None:
+        project = Project(id=new_id("project"), name="recover", description="Recover")
+        self.store.create_project(project)
+        task = Task(
+            id=new_id("task"),
+            project_id=project.id,
+            title="Recover me",
+            objective="Recover stale state",
+            status=TaskStatus.ACTIVE,
+        )
+        self.store.create_task(task)
+        run = Run(
+            id=new_id("run"),
+            task_id=task.id,
+            status=RunStatus.WORKING,
+            attempt=1,
+            summary="working",
+        )
+        self.store.create_run(run)
+        with self.store.connect() as connection:
+            connection.execute(
+                "INSERT INTO task_leases (task_id, worker_id, lease_expires_at, created_at) VALUES (?, ?, ?, ?)",
+                (task.id, "worker-a", "2000-01-01T00:00:00+00:00", "2000-01-01T00:00:00+00:00"),
+            )
+
+        recovered = self.store.recover_stale_state()
+        task_after = self.store.get_task(task.id)
+        run_after = self.store.get_run(run.id)
+
+        self.assertEqual(1, recovered["runs"])
+        self.assertEqual(1, recovered["tasks"])
+        self.assertEqual(1, recovered["leases"])
+        self.assertEqual(TaskStatus.PENDING, task_after.status if task_after else None)
+        self.assertEqual(RunStatus.FAILED, run_after.status if run_after else None)
+
+    def test_foreign_keys_are_enforced(self) -> None:
+        task = Task(id=new_id("task"), project_id="missing-project", title="bad", objective="bad")
+
+        with self.assertRaises(Exception):
+            self.store.create_task(task)
+
+    def test_invalid_task_transition_raises(self) -> None:
+        project = Project(id=new_id("project"), name="transitions", description="Transitions")
+        self.store.create_project(project)
+        task = Task(
+            id=new_id("task"),
+            project_id=project.id,
+            title="Done",
+            objective="done",
+            status=TaskStatus.COMPLETED,
+        )
+        self.store.create_task(task)
+
+        with self.assertRaises(ValueError):
+            self.store.update_task_status(task.id, TaskStatus.ACTIVE)
+
+    def test_create_evaluation_round_trip_uses_verdict_value(self) -> None:
+        project = Project(id=new_id("project"), name="evals", description="evals")
+        self.store.create_project(project)
+        task = Task(id=new_id("task"), project_id=project.id, title="t", objective="o")
+        self.store.create_task(task)
+        run = Run(id=new_id("run"), task_id=task.id, status=RunStatus.COMPLETED, attempt=1, summary="done")
+        self.store.create_run(run)
+        evaluation = Evaluation(
+            id=new_id("evaluation"),
+            run_id=run.id,
+            verdict=EvaluationVerdict.ACCEPTABLE,
+            confidence=0.9,
+            summary="ok",
+            details={},
+        )
+
+        self.store.create_evaluation(evaluation)
+        loaded = self.store.list_evaluations(run.id)[0]
+
+        self.assertEqual(EvaluationVerdict.ACCEPTABLE, loaded.verdict)
+
+    def test_corrupt_task_json_falls_back_instead_of_crashing(self) -> None:
+        project = Project(id=new_id("project"), name="corrupt", description="Corrupt")
+        self.store.create_project(project)
+        task = Task(
+            id=new_id("task"),
+            project_id=project.id,
+            title="Corrupt metadata",
+            objective="Fallback on bad json",
+            external_ref_metadata={"labels": ["bug"]},
+            required_artifacts=["plan", "report"],
+        )
+        self.store.create_task(task)
+        with self.store.connect() as connection:
+            connection.execute(
+                "UPDATE tasks SET external_ref_metadata_json = ?, required_artifacts_json = ? WHERE id = ?",
+                ("{bad", "[oops", task.id),
+            )
+
+        loaded = self.store.get_task(task.id)
+
+        self.assertEqual({}, loaded.external_ref_metadata if loaded else None)
+        self.assertEqual([], loaded.required_artifacts if loaded else None)

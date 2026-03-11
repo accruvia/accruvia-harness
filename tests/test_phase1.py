@@ -78,6 +78,19 @@ class Phase1Tests(unittest.TestCase):
 
         self.assertEqual(("FOO", "BAR"), config.env_passthrough)
 
+    def test_config_invalid_numeric_envs_fall_back_to_defaults(self) -> None:
+        env = {
+            "ACCRUVIA_TIMEOUT_EMA_ALPHA": "abc",
+            "ACCRUVIA_TIMEOUT_MIN_SECONDS": "oops",
+            "ACCRUVIA_MEMORY_LIMIT_MB": "nah",
+        }
+        with unittest.mock.patch.dict(os.environ, env, clear=False):
+            config = HarnessConfig.from_env()
+
+        self.assertEqual(0.5, config.timeout_ema_alpha)
+        self.assertEqual(30, config.timeout_min_seconds)
+        self.assertEqual(1024, config.memory_limit_mb)
+
     def test_config_payload_round_trip_preserves_runtime_settings(self) -> None:
         config = HarnessConfig.from_env(
             db_path=self.base / "payload.db",
@@ -119,3 +132,38 @@ class Phase1Tests(unittest.TestCase):
         self.assertEqual("error", summary["otel_status"])
         self.assertEqual("OpenTelemetry import/setup failed: boom", summary["otel_warning"])
         self.assertEqual("otel_setup", summary["warnings"][0]["category"])
+
+    def test_telemetry_load_skips_corrupt_jsonl_lines(self) -> None:
+        telemetry = TelemetrySink(self.base / "telemetry")
+        telemetry.metrics_path.write_text('{"name":"ok","value":1}\nnot-json\n', encoding="utf-8")
+
+        metrics = telemetry.load_metrics()
+
+        self.assertEqual(1, len(metrics))
+        self.assertEqual("ok", metrics[0]["name"])
+
+    def test_telemetry_negative_after_positive_counter_is_ignored_with_warning(self) -> None:
+        telemetry = TelemetrySink(self.base / "telemetry", otlp_endpoint="http://localhost:4318")
+        class FakeOtel:
+            trace_endpoint = "http://localhost:4318/v1/traces"
+            metric_endpoint = "http://localhost:4318/v1/metrics"
+            def __init__(self):
+                self.values = []
+            def metric(self, name, value, metric_type, attributes):
+                if not hasattr(self, "seen"):
+                    self.seen = set()
+                if name not in self.seen and value >= 0:
+                    self.seen.add(name)
+                    return
+                if value < 0:
+                    raise ValueError("negative monotonic counter")
+            def span(self, name, duration_ms, attributes):
+                return None
+        telemetry._otel = FakeOtel()
+        telemetry.otel_status = "enabled"
+
+        telemetry.metric("queue_delta", 1)
+        telemetry.metric("queue_delta", -1)
+        summary = telemetry.summary()
+
+        self.assertTrue(any(item["category"] == "otel_metric_export" for item in summary["warnings"]))

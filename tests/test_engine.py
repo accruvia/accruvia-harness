@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from accruvia_harness.config import HarnessConfig
-from accruvia_harness.domain import Project, new_id
+from accruvia_harness.domain import Project, TaskStatus, new_id
 from accruvia_harness.engine import HarnessEngine
 from accruvia_harness.llm import build_llm_router
 from accruvia_harness.policy import WorkResult
@@ -166,6 +166,25 @@ class HarnessEngineTests(unittest.TestCase):
         self.assertIn("workspace_metadata", artifact_paths)
         self.assertTrue(Path(artifact_paths["workspace_metadata"]).exists())
         self.assertIn("project_workspace_prepared", [event.event_type for event in events])
+
+    def test_run_once_rejects_terminal_tasks(self) -> None:
+        task = self.engine.create_task_with_policy(
+            project_id=self.project_id,
+            title="Terminal",
+            objective="Already done",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+        self.store.update_task_status(task.id, TaskStatus.COMPLETED)
+
+        with self.assertRaises(ValueError):
+            self.engine.run_once(task.id)
 
     def test_run_until_stable_fails_after_retry_budget_is_exhausted(self) -> None:
         failing_engine = HarnessEngine(

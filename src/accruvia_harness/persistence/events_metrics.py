@@ -110,9 +110,25 @@ class EventsMetricsStoreMixin:
             follow_on_count = int(connection.execute(follow_on_query, follow_on_params).fetchone()["cnt"])
 
             now = datetime.now(UTC).isoformat()
-            active_leases = int(connection.execute(
-                "SELECT COUNT(*) AS cnt FROM task_leases WHERE lease_expires_at > ?", (now,)
-            ).fetchone()["cnt"])
+            if project_id:
+                active_leases = int(
+                    connection.execute(
+                        """
+                        SELECT COUNT(*) AS cnt
+                        FROM task_leases l
+                        JOIN tasks t ON t.id = l.task_id
+                        WHERE l.lease_expires_at > ? AND t.project_id = ?
+                        """,
+                        (now, project_id),
+                    ).fetchone()["cnt"]
+                )
+            else:
+                active_leases = int(
+                    connection.execute(
+                        "SELECT COUNT(*) AS cnt FROM task_leases WHERE lease_expires_at > ?",
+                        (now,),
+                    ).fetchone()["cnt"]
+                )
 
         tasks_by_status = {row["status"]: int(row["count"]) for row in task_rows}
         tasks_by_validation_profile = {row["validation_profile"]: int(row["count"]) for row in profile_rows}

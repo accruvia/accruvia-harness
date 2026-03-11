@@ -41,6 +41,15 @@ class LLMExecutionError(RuntimeError):
     """Raised when an LLM executor cannot complete a requested invocation."""
 
 
+def _coerce_metric_number(value: object) -> float:
+    if value in (None, "", False):
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 class CommandLLMExecutor:
     def __init__(
         self,
@@ -149,11 +158,11 @@ class CommandLLMExecutor:
             )
 
         token_metrics = {
-            "llm_cost_usd": float(metadata.get("cost_usd", 0.0) or 0.0),
-            "llm_prompt_tokens": float(metadata.get("prompt_tokens", 0.0) or 0.0),
-            "llm_completion_tokens": float(metadata.get("completion_tokens", 0.0) or 0.0),
-            "llm_total_tokens": float(metadata.get("total_tokens", 0.0) or 0.0),
-            "llm_latency_ms": float(metadata.get("latency_ms", 0.0) or 0.0),
+            "llm_cost_usd": _coerce_metric_number(metadata.get("cost_usd", 0.0)),
+            "llm_prompt_tokens": _coerce_metric_number(metadata.get("prompt_tokens", 0.0)),
+            "llm_completion_tokens": _coerce_metric_number(metadata.get("completion_tokens", 0.0)),
+            "llm_total_tokens": _coerce_metric_number(metadata.get("total_tokens", 0.0)),
+            "llm_latency_ms": _coerce_metric_number(metadata.get("latency_ms", 0.0)),
         }
         if self.telemetry is not None:
             for metric_name, metric_value in token_metrics.items():
