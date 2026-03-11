@@ -13,6 +13,7 @@ from ..interrogation import HarnessQueryService
 from ..project_adapters import build_project_adapter_registry
 from ..runtime import WorkflowRuntime, build_runtime
 from ..store import SQLiteHarnessStore
+from ..telemetry import TelemetrySink
 from ..llm import build_llm_router
 from ..workers import build_worker_from_config
 
@@ -30,15 +31,18 @@ class CLIContext:
     gitlab: GitLabCLI
     runtime: WorkflowRuntime
     query_service: HarnessQueryService
+    telemetry: TelemetrySink
 
 
 def build_context(config: HarnessConfig) -> CLIContext:
     store = SQLiteHarnessStore(config.db_path)
     store.initialize()
+    telemetry = TelemetrySink(config.telemetry_dir)
     engine = HarnessEngine(
         store=store,
         workspace_root=config.workspace_root,
         project_adapter_registry=build_project_adapter_registry(config.project_adapter_modules),
+        telemetry=telemetry,
     )
     engine.set_llm_router(build_llm_router(config))
     engine.set_worker(build_worker_from_config(config))
@@ -56,4 +60,5 @@ def build_context(config: HarnessConfig) -> CLIContext:
             temporal_task_queue=config.temporal_task_queue,
         ),
         query_service=HarnessQueryService(store),
+        telemetry=telemetry,
     )

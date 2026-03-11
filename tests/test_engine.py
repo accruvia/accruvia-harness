@@ -191,6 +191,35 @@ class HarnessEngineTests(unittest.TestCase):
         self.assertEqual("fail", last_decision.action.value)
         self.assertEqual(["report"], last_eval.details["missing_required_artifacts"])
 
+    def test_retry_strategy_is_recorded_from_previous_evaluation(self) -> None:
+        failing_engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-retry-focus",
+            worker=MissingArtifactWorker(),
+        )
+        task = failing_engine.create_task_with_policy(
+            project_id=self.project_id,
+            title="Retry focus",
+            objective="Exercise retry feedback",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=2,
+            required_artifacts=["plan", "report"],
+        )
+
+        runs = failing_engine.run_until_stable(task.id)
+        second_run_events = self.store.list_events("run", runs[1].id)
+        retry_event = next(
+            event for event in second_run_events if event.event_type == "retry_strategy_selected"
+        )
+
+        self.assertEqual("incomplete", retry_event.payload["previous_verdict"])
+        self.assertIn("report", retry_event.payload["focus"])
+
     def test_run_once_emits_auditable_events(self) -> None:
         task = self.engine.create_task_with_policy(
             project_id=self.project_id,

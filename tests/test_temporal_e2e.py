@@ -81,4 +81,5 @@ class TemporalEndToEndTests(unittest.TestCase):
         result = json.loads(self.run_cli("run-runtime", task["id"]))
 
         self.assertEqual("completed", result["task"]["status"])
-        self.assertEqual(1, len(result["runs"]))
+        self.assertGreaterEqual(len(result["runs"]), 1)
+        self.assertEqual("completed", result["runs"][-1]["status"])

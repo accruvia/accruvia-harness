@@ -13,7 +13,7 @@ from ..domain import (
     TaskStatus,
     new_id,
 )
-from ..policy import DefaultAnalyzer, DefaultDecider, DefaultPlanner
+from ..policy import DefaultAnalyzer, DefaultDecider, DefaultPlanner, RetryStrategyAdvisor
 from ..project_adapters import ProjectAdapterRegistry
 from ..store import SQLiteHarnessStore
 from ..workers import WorkerBackend
@@ -29,6 +29,8 @@ class RunService:
         analyzer: DefaultAnalyzer,
         decider: DefaultDecider,
         project_adapter_registry: ProjectAdapterRegistry,
+        retry_advisor: RetryStrategyAdvisor | None = None,
+        telemetry=None,
     ) -> None:
         self.store = store
         self.workspace_root = workspace_root
@@ -37,6 +39,8 @@ class RunService:
         self.analyzer = analyzer
         self.decider = decider
         self.project_adapter_registry = project_adapter_registry
+        self.retry_advisor = retry_advisor or RetryStrategyAdvisor()
+        self.telemetry = telemetry
 
     def run_once(self, task_id: str) -> Run:
         task = self.store.get_task(task_id)
@@ -51,6 +55,17 @@ class RunService:
             Event(id=new_id("event"), entity_type="task", entity_id=task.id, event_type="task_activated", payload={})
         )
         attempt = self.store.next_attempt(task.id)
+        prior_runs = self.store.list_runs(task.id)
+        previous_run = prior_runs[-1] if prior_runs else None
+        previous_evaluations = self.store.list_evaluations(previous_run.id) if previous_run else []
+        previous_decisions = self.store.list_decisions(previous_run.id) if previous_run else []
+        retry_context = self.retry_advisor.advise(
+            task=task,
+            attempt=attempt,
+            previous_run=previous_run,
+            previous_evaluation=previous_evaluations[-1] if previous_evaluations else None,
+            previous_decision=previous_decisions[-1].action if previous_decisions else None,
+        )
         run = Run(
             id=new_id("run"),
             task_id=task.id,
@@ -68,6 +83,16 @@ class RunService:
                 payload={"task_id": task.id, "attempt": attempt},
             )
         )
+        if self.telemetry is not None:
+            self.telemetry.metric(
+                "run_started",
+                1,
+                task_id=task.id,
+                run_id=run.id,
+                attempt=attempt,
+                validation_profile=task.validation_profile,
+                strategy=task.strategy,
+            )
         run_dir = self.workspace_root / "runs" / run.id
         run_dir.mkdir(parents=True, exist_ok=True)
         project_adapter = self.project_adapter_registry.get(project.adapter_name)
@@ -105,19 +130,49 @@ class RunService:
             )
         )
 
-        plan = self.planner.plan(task)
+        if self.telemetry is not None:
+            with self.telemetry.timed(
+                "planning",
+                task_id=task.id,
+                run_id=run.id,
+                attempt=attempt,
+                validation_profile=task.validation_profile,
+                retry=retry_context is not None,
+            ):
+                plan = self.planner.plan(task, retry_context)
+        else:
+            plan = self.planner.plan(task, retry_context)
         self.store.create_event(
             Event(
                 id=new_id("event"),
                 entity_type="run",
                 entity_id=run.id,
                 event_type="planned",
-                payload={"summary": plan.summary},
+                payload={"summary": plan.summary, "retry_context": plan.retry_context or {}},
             )
         )
+        if retry_context is not None:
+            self.store.create_event(
+                Event(
+                    id=new_id("event"),
+                    entity_type="run",
+                    entity_id=run.id,
+                    event_type="retry_strategy_selected",
+                    payload=plan.retry_context or {},
+                )
+            )
         run = self.store.mark_run(run, RunStatus.WORKING, plan.summary)
-
-        work = self.worker.work(task, run, self.workspace_root)
+        if self.telemetry is not None:
+            with self.telemetry.timed(
+                "work",
+                task_id=task.id,
+                run_id=run.id,
+                attempt=attempt,
+                validation_profile=task.validation_profile,
+            ):
+                work = self.worker.work(task, run, self.workspace_root)
+        else:
+            work = self.worker.work(task, run, self.workspace_root)
         self.store.create_event(
             Event(
                 id=new_id("event"),
@@ -143,8 +198,26 @@ class RunService:
                 )
             )
         run = self.store.mark_run(run, RunStatus.ANALYZING, work.summary)
-
-        analysis = self.analyzer.analyze(task, run, self.store.list_artifacts(run.id))
+        if self.telemetry is not None:
+            self.telemetry.metric(
+                "worker_result",
+                1,
+                task_id=task.id,
+                run_id=run.id,
+                outcome=work.outcome,
+                validation_profile=task.validation_profile,
+            )
+        if self.telemetry is not None:
+            with self.telemetry.timed(
+                "analyze",
+                task_id=task.id,
+                run_id=run.id,
+                attempt=attempt,
+                outcome=work.outcome,
+            ):
+                analysis = self.analyzer.analyze(task, run, self.store.list_artifacts(run.id))
+        else:
+            analysis = self.analyzer.analyze(task, run, self.store.list_artifacts(run.id))
         evaluation = Evaluation(
             id=new_id("evaluation"),
             run_id=run.id,
@@ -164,8 +237,26 @@ class RunService:
             )
         )
         run = self.store.mark_run(run, RunStatus.DECIDING, analysis.summary)
-
-        decision_result = self.decider.decide(analysis, run, task)
+        if self.telemetry is not None:
+            self.telemetry.metric(
+                "evaluation_recorded",
+                1,
+                task_id=task.id,
+                run_id=run.id,
+                verdict=analysis.verdict,
+                validation_profile=task.validation_profile,
+            )
+        if self.telemetry is not None:
+            with self.telemetry.timed(
+                "decide",
+                task_id=task.id,
+                run_id=run.id,
+                attempt=attempt,
+                verdict=analysis.verdict,
+            ):
+                decision_result = self.decider.decide(analysis, run, task)
+        else:
+            decision_result = self.decider.decide(analysis, run, task)
         decision = Decision(
             id=new_id("decision"),
             run_id=run.id,
@@ -198,6 +289,26 @@ class RunService:
                 payload={"status": task_status.value, "run_id": run.id},
             )
         )
+        if self.telemetry is not None:
+            self.telemetry.metric(
+                "run_finished",
+                1,
+                task_id=task.id,
+                run_id=run.id,
+                run_status=final_status.value,
+                task_status=task_status.value,
+                decision=decision_result.action.value,
+                validation_profile=task.validation_profile,
+            )
+            if decision_result.action == DecisionAction.RETRY:
+                self.telemetry.metric(
+                    "retry_selected",
+                    1,
+                    task_id=task.id,
+                    run_id=run.id,
+                    attempt=attempt,
+                    validation_profile=task.validation_profile,
+                )
         return run
 
     def run_until_stable(self, task_id: str) -> list[Run]:

@@ -30,6 +30,7 @@ class HarnessEngine:
         decider: DefaultDecider | None = None,
         llm_router: LLMRouter | None = None,
         project_adapter_registry: ProjectAdapterRegistry | None = None,
+        telemetry=None,
     ) -> None:
         self.store = store
         self.workspace_root = Path(workspace_root)
@@ -40,6 +41,7 @@ class HarnessEngine:
         self.decider = decider or DefaultDecider()
         self.llm_router = llm_router
         self.project_adapter_registry = project_adapter_registry or build_project_adapter_registry()
+        self.telemetry = telemetry
 
         self.tasks = TaskService(self.store)
         self._build_services()
@@ -53,6 +55,7 @@ class HarnessEngine:
             analyzer=self.analyzer,
             decider=self.decider,
             project_adapter_registry=self.project_adapter_registry,
+            telemetry=self.telemetry,
         )
         self.queue = QueueService(self.store, self.runs)
         self.github_tasks = GitHubTaskService(self.tasks, self.store)

@@ -69,6 +69,23 @@ class CLITests(unittest.TestCase):
 
         self.assertEqual(1, ops["metrics"]["pending_promotions"])
         self.assertEqual(1, ops["metrics"]["tasks_by_validation_profile"]["python"])
+        self.assertGreaterEqual(ops["telemetry"]["metric_totals"]["run_started"], 1)
+
+    def test_telemetry_report_is_emitted_after_run(self) -> None:
+        project = self.run_cli("create-project", "telemetry", "telemetry project")["project"]
+        task = self.run_cli(
+            "create-task",
+            project["id"],
+            "Task Telemetry",
+            "Objective Telemetry",
+        )["task"]
+
+        self.run_cli("run-once", task["id"])
+        telemetry = self.run_cli("telemetry-report")
+
+        self.assertGreaterEqual(telemetry["metric_totals"]["run_started"], 1)
+        self.assertGreaterEqual(telemetry["metric_totals"]["run_finished"], 1)
+        self.assertIn("planning", telemetry["span_counts"])
 
     def test_javascript_profile_runs_end_to_end_through_review(self) -> None:
         project = self.run_cli("create-project", "js", "javascript project")["project"]

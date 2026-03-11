@@ -16,6 +16,7 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
             "db_path": str(config.db_path),
             "workspace_root": str(config.workspace_root),
             "log_path": str(config.log_path),
+            "telemetry_dir": str(config.telemetry_dir),
             "default_project_name": config.default_project_name,
             "default_repo": config.default_repo,
             "runtime_backend": config.runtime_backend,

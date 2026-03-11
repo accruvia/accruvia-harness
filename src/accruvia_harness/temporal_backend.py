@@ -7,6 +7,7 @@ from typing import Any
 
 from .engine import HarnessEngine
 from .store import SQLiteHarnessStore
+from .telemetry import TelemetrySink
 
 try:
     from temporalio import activity, workflow
@@ -24,7 +25,11 @@ except ModuleNotFoundError:  # pragma: no cover - exercised via availability che
 def _build_engine(db_path: str, workspace_root: str) -> HarnessEngine:
     store = SQLiteHarnessStore(Path(db_path))
     store.initialize()
-    return HarnessEngine(store=store, workspace_root=Path(workspace_root))
+    return HarnessEngine(
+        store=store,
+        workspace_root=Path(workspace_root),
+        telemetry=TelemetrySink(Path(db_path).parent / "telemetry"),
+    )
 
 
 def _import_temporal_modules() -> tuple[Any, Any, Any]:

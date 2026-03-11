@@ -26,6 +26,7 @@ class HarnessConfig:
     llm_accruvia_client_command: str | None
     adapter_modules: tuple[str, ...] = field(default_factory=tuple)
     project_adapter_modules: tuple[str, ...] = field(default_factory=tuple)
+    telemetry_dir: Path = Path(".accruvia-harness/telemetry")
 
     @classmethod
     def from_env(
@@ -40,10 +41,12 @@ class HarnessConfig:
             Path(workspace_root) if workspace_root is not None else base / "workspace"
         )
         resolved_log = Path(log_path) if log_path is not None else base / "harness.log"
+        resolved_telemetry = base / "telemetry"
         return cls(
             db_path=resolved_db,
             workspace_root=resolved_workspace,
             log_path=resolved_log,
+            telemetry_dir=resolved_telemetry,
             default_project_name=os.environ.get("ACCRUVIA_HARNESS_PROJECT", "accruvia"),
             default_repo=os.environ.get("ACCRUVIA_HARNESS_REPO", "soverton/accruvia"),
             runtime_backend=os.environ.get("ACCRUVIA_HARNESS_RUNTIME", "local"),

@@ -88,6 +88,7 @@ class CommandWorker:
             "ACCRUVIA_TASK_ID": task.id,
             "ACCRUVIA_RUN_ID": run.id,
             "ACCRUVIA_TASK_OBJECTIVE": task.objective,
+            "ACCRUVIA_RUN_SUMMARY": run.summary,
             "ACCRUVIA_RUN_DIR": str(run_dir),
             "ACCRUVIA_PROJECT_WORKSPACE": str(project_workspace),
         }
@@ -268,6 +269,7 @@ class LLMTaskWorker:
             f"Task ID: {task.id}\n"
             f"Run ID: {run.id}\n"
             f"Attempt: {run.attempt}\n"
+            f"Plan Summary: {run.summary}\n"
             "Instructions:\n"
             "- Produce the work needed for the objective.\n"
             "- Preserve durable artifacts in the run directory when appropriate.\n"

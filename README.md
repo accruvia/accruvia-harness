@@ -108,6 +108,7 @@ This repo now contains a minimal durable harness foundation:
 - an explicit configuration model
 - structured JSONL logging for CLI operations
 - a separate workflow policy module for `plan -> work -> analyze -> decide`
+- retry planning informed by the previous run's evaluation and decision
 - a workflow runtime boundary with local and Temporal backends
 - queue selection for pending tasks by priority
 - task leasing for safe queue arbitration
@@ -149,6 +150,7 @@ PYTHONPATH=src python3 -m accruvia_harness status
 PYTHONPATH=src python3 -m accruvia_harness summary
 PYTHONPATH=src python3 -m accruvia_harness context-packet
 PYTHONPATH=src python3 -m accruvia_harness ops-report
+PYTHONPATH=src python3 -m accruvia_harness telemetry-report
 PYTHONPATH=src python3 -m accruvia_harness task-report <task_id>
 PYTHONPATH=src python3 -m accruvia_harness events
 ```
@@ -264,6 +266,7 @@ The repo now has meaningful slices of the later phases in place:
   - task leasing and worker-aware queue arbitration
 - Phase 7: observability and analytics baseline
   - structured JSONL logs
+  - telemetry metrics and span logs under `.accruvia-harness/telemetry`
   - metrics snapshots over tasks, runs, leases, retries, promotions, and follow-on work
 - Phase 8: interrogation layer baseline
   - `summary`

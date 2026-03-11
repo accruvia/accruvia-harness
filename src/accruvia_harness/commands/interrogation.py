@@ -16,7 +16,12 @@ def handle_interrogation_command(args, ctx: CLIContext) -> bool:
         emit(ctx.query_service.context_packet(args.project_id))
         return True
     if args.command == "ops-report":
-        emit(ctx.query_service.operations_report(args.project_id))
+        payload = ctx.query_service.operations_report(args.project_id)
+        payload["telemetry"] = ctx.telemetry.summary()
+        emit(payload)
+        return True
+    if args.command == "telemetry-report":
+        emit(ctx.telemetry.summary())
         return True
     if args.command == "task-report":
         emit(ctx.query_service.task_report(args.task_id))
