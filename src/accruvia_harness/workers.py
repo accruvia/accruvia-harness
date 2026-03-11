@@ -21,6 +21,11 @@ class WorkerExecutionError(RuntimeError):
     """Raised when a worker backend fails to produce a usable result."""
 
 
+def _prepared_project_workspace(run_dir: Path) -> Path:
+    workspace = run_dir / "workspace"
+    return workspace if workspace.exists() else run_dir
+
+
 class LocalArtifactWorker:
     def __init__(self, adapter_registry: AdapterRegistry | None = None) -> None:
         self.adapter_registry = adapter_registry or build_adapter_registry()
@@ -28,13 +33,14 @@ class LocalArtifactWorker:
     def work(self, task: Task, run: Run, workspace_root: Path) -> WorkResult:
         run_dir = workspace_root / "runs" / run.id
         run_dir.mkdir(parents=True, exist_ok=True)
+        project_workspace = _prepared_project_workspace(run_dir)
         plan_path = run_dir / "plan.txt"
         plan_path.write_text(
-            f"task={task.id}\nrun={run.id}\nattempt={run.attempt}\nobjective={task.objective}\n",
+            f"task={task.id}\nrun={run.id}\nattempt={run.attempt}\nobjective={task.objective}\nproject_workspace={project_workspace}\n",
             encoding="utf-8",
         )
         adapter = self.adapter_registry.get(task.validation_profile)
-        evidence = adapter.build_evidence(task, run_dir)
+        evidence = adapter.build_evidence(task, project_workspace)
         report_path = run_dir / "report.json"
         report_path.write_text(
             json.dumps(
@@ -63,6 +69,7 @@ class LocalArtifactWorker:
             diagnostics={
                 "worker_backend": "local",
                 "validation_profile": task.validation_profile,
+                "project_workspace": str(project_workspace),
                 **evidence.diagnostics,
             },
         )
@@ -76,17 +83,19 @@ class CommandWorker:
     def work(self, task: Task, run: Run, workspace_root: Path) -> WorkResult:
         run_dir = workspace_root / "runs" / run.id
         run_dir.mkdir(parents=True, exist_ok=True)
+        project_workspace = _prepared_project_workspace(run_dir)
         env = {
             "ACCRUVIA_TASK_ID": task.id,
             "ACCRUVIA_RUN_ID": run.id,
             "ACCRUVIA_TASK_OBJECTIVE": task.objective,
             "ACCRUVIA_RUN_DIR": str(run_dir),
+            "ACCRUVIA_PROJECT_WORKSPACE": str(project_workspace),
         }
         completed = subprocess.run(
             self.command,
             shell=True,
             check=False,
-            cwd=run_dir,
+            cwd=project_workspace,
             capture_output=True,
             text=True,
             env={**os.environ, **env},
@@ -134,6 +143,7 @@ class CommandWorker:
                 "worker_backend": self.backend_name,
                 "command": self.command,
                 "returncode": completed.returncode,
+                "project_workspace": str(project_workspace),
             },
         )
 
@@ -156,12 +166,13 @@ class LLMTaskWorker:
     def work(self, task: Task, run: Run, workspace_root: Path) -> WorkResult:
         run_dir = workspace_root / "runs" / run.id
         run_dir.mkdir(parents=True, exist_ok=True)
+        project_workspace = _prepared_project_workspace(run_dir)
         prompt = self._build_prompt(task, run)
         executor, routed_backend = self.router.resolve()
         try:
             result = executor.execute(
                 invocation=LLMInvocation(
-                    task=task, run=run, prompt=prompt, run_dir=run_dir, model=self.model
+                    task=task, run=run, prompt=prompt, run_dir=project_workspace, model=self.model
                 )
             )
             outcome = "success"
@@ -184,11 +195,12 @@ class LLMTaskWorker:
                         "attempt": run.attempt,
                         "strategy": task.strategy,
                         "objective": task.objective,
-                        "worker_backend": "llm",
-                        "llm_backend": routed_backend,
-                        "error": str(exc),
-                        "validation_profile": task.validation_profile,
-                    },
+                    "worker_backend": "llm",
+                    "llm_backend": routed_backend,
+                    "error": str(exc),
+                    "validation_profile": task.validation_profile,
+                    "project_workspace": str(project_workspace),
+                },
                     indent=2,
                     sort_keys=True,
                 ),
@@ -206,6 +218,7 @@ class LLMTaskWorker:
                     "llm_backend": routed_backend,
                     "llm_model": self.model,
                     "error": str(exc),
+                    "project_workspace": str(project_workspace),
                 },
             )
 
@@ -229,6 +242,7 @@ class LLMTaskWorker:
                     "llm_backend": result.backend,
                     "llm_model": self.model,
                     "validation_profile": task.validation_profile,
+                    "project_workspace": str(project_workspace),
                 },
                 indent=2,
                 sort_keys=True,

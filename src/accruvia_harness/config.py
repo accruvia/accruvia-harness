@@ -25,6 +25,7 @@ class HarnessConfig:
     llm_claude_command: str | None
     llm_accruvia_client_command: str | None
     adapter_modules: tuple[str, ...] = field(default_factory=tuple)
+    project_adapter_modules: tuple[str, ...] = field(default_factory=tuple)
 
     @classmethod
     def from_env(
@@ -60,6 +61,11 @@ class HarnessConfig:
             adapter_modules=tuple(
                 item.strip()
                 for item in os.environ.get("ACCRUVIA_ADAPTER_MODULES", "").split(",")
+                if item.strip()
+            ),
+            project_adapter_modules=tuple(
+                item.strip()
+                for item in os.environ.get("ACCRUVIA_PROJECT_ADAPTER_MODULES", "").split(",")
                 if item.strip()
             ),
         )

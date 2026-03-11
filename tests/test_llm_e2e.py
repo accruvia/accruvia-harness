@@ -60,7 +60,7 @@ class LLMEndToEndTests(unittest.TestCase):
         self.assertEqual("completed", report["task"]["status"])
         run_report = report["runs"][0]
         artifact_kinds = sorted(item["kind"] for item in run_report["artifacts"])
-        self.assertEqual(["llm_response", "plan", "report"], artifact_kinds)
+        self.assertEqual(["llm_response", "plan", "report", "workspace_metadata"], artifact_kinds)
         response_artifact = next(item for item in run_report["artifacts"] if item["kind"] == "llm_response")
         report_artifact = next(item for item in run_report["artifacts"] if item["kind"] == "report")
         response_text = Path(response_artifact["path"]).read_text(encoding="utf-8")
@@ -98,6 +98,6 @@ class LLMEndToEndTests(unittest.TestCase):
         self.assertEqual("failed", report["task"]["status"])
         run_report = report["runs"][-1]
         artifact_kinds = sorted(item["kind"] for item in run_report["artifacts"])
-        self.assertEqual(["llm_error", "report"], artifact_kinds)
+        self.assertEqual(["llm_error", "report", "workspace_metadata"], artifact_kinds)
         self.assertEqual("failed", run_report["run"]["status"])
         self.assertEqual("incomplete", run_report["evaluations"][0]["verdict"])

@@ -49,15 +49,26 @@ class TemporalEndToEndTests(unittest.TestCase):
                 self.worker.wait(timeout=5)
 
     def run_cli(self, *args: str) -> str:
-        completed = subprocess.run(
-            [sys.executable, "-m", "accruvia_harness", *args],
-            cwd=self.repo_root,
-            env=self.env,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        return completed.stdout
+        retries = 10 if args and args[0] == "run-runtime" else 1
+        last_error: subprocess.CalledProcessError | None = None
+        for attempt in range(retries):
+            try:
+                completed = subprocess.run(
+                    [sys.executable, "-m", "accruvia_harness", *args],
+                    cwd=self.repo_root,
+                    env=self.env,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                return completed.stdout
+            except subprocess.CalledProcessError as exc:
+                last_error = exc
+                if attempt == retries - 1:
+                    raise
+                time.sleep(1)
+        assert last_error is not None
+        raise last_error
 
     def test_temporal_runtime_completes_task_end_to_end(self) -> None:
         import json

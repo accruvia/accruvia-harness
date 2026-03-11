@@ -113,6 +113,7 @@ This repo now contains a minimal durable harness foundation:
 - task leasing for safe queue arbitration
 - task lineage via `parent_task_id` and `source_run_id`
 - a GitHub adapter for importing issues and reporting results back out
+- a project adapter registry for preparing per-run workspaces without hardcoding private repo logic
 - worker backends for `local`, `shell`, `agent`, and routed `llm`
 - an LLM executor/router layer that can choose local CLI tools or `accruvia-client`
 - an adapter registry for built-in workload adapters plus externally supplied adapter modules
@@ -130,7 +131,7 @@ PYTHONPATH=src python3 -m accruvia_harness init-db
 PYTHONPATH=src python3 -m accruvia_harness config
 PYTHONPATH=src python3 -m accruvia_harness runtime-info
 PYTHONPATH=src python3 -m accruvia_harness run-temporal-worker
-PYTHONPATH=src python3 -m accruvia_harness create-project accruvia "Accruvia harness work"
+PYTHONPATH=src python3 -m accruvia_harness create-project accruvia "Accruvia harness work" --adapter-name generic
 PYTHONPATH=src python3 -m accruvia_harness create-task <project_id> "First task" "Build the first durable loop" --priority 200 --validation-profile generic --external-ref-type github_issue --external-ref-id 456 --strategy baseline --required-artifact plan --required-artifact report
 PYTHONPATH=src python3 -m accruvia_harness import-issue <project_id> 456 "First task" "Build the first durable loop" --priority 200 --validation-profile generic --strategy baseline --required-artifact plan --required-artifact report
 PYTHONPATH=src python3 -m accruvia_harness import-github-issue <project_id> accruvia/accruvia 456 --priority 200 --validation-profile generic --strategy baseline --required-artifact plan --required-artifact report
@@ -195,6 +196,29 @@ def register_adapters(registry) -> None:
 ```
 
 That keeps the harness core generic while letting each project define its own workspace setup, evidence generation, and validation expectations.
+
+### Project Adapters
+
+Workload adapters decide how evidence is generated for a task class. Project adapters decide how a real project workspace is prepared for each run.
+
+- this repo ships a built-in `generic` project adapter
+- private projects should usually provide their own project adapter module
+- project adapters are loaded with `ACCRUVIA_PROJECT_ADAPTER_MODULES`
+- each project selects its adapter with `create-project --adapter-name ...`
+
+Example:
+
+```bash
+export ACCRUVIA_PROJECT_ADAPTER_MODULES='accruvia_client.harness_project_adapters'
+PYTHONPATH=src python3 -m accruvia_harness create-project accruvia-client "Private client work" --adapter-name accruvia_client
+```
+
+External project adapter modules are expected to expose:
+
+```python
+def register_project_adapters(registry) -> None:
+    ...
+```
 
 ## Phase 1 Status
 

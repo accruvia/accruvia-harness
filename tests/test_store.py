@@ -17,7 +17,12 @@ class SQLiteHarnessStoreTests(unittest.TestCase):
         self.store.initialize()
 
     def test_task_round_trip_preserves_policy_fields(self) -> None:
-        project = Project(id=new_id("project"), name="accruvia", description="Harness work")
+        project = Project(
+            id=new_id("project"),
+            name="accruvia",
+            description="Harness work",
+            adapter_name="generic",
+        )
         self.store.create_project(project)
 
         task = Task(
@@ -49,6 +54,20 @@ class SQLiteHarnessStoreTests(unittest.TestCase):
         self.assertEqual("baseline", loaded.strategy)
         self.assertEqual(5, loaded.max_attempts)
         self.assertEqual(["plan", "report", "diff"], loaded.required_artifacts)
+
+    def test_project_round_trip_preserves_adapter_name(self) -> None:
+        project = Project(
+            id=new_id("project"),
+            name="adapter-project",
+            description="Project adapter persistence",
+            adapter_name="private_repo",
+        )
+        self.store.create_project(project)
+
+        loaded = self.store.get_project(project.id)
+        self.assertIsNotNone(loaded)
+        assert loaded is not None
+        self.assertEqual("private_repo", loaded.adapter_name)
 
     def test_event_round_trip_preserves_payload(self) -> None:
         event = Event(

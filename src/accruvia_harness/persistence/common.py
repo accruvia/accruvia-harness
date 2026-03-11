@@ -62,6 +62,7 @@ def project_from_row(row: sqlite3.Row) -> Project:
         id=row["id"],
         name=row["name"],
         description=row["description"],
+        adapter_name=row["adapter_name"],
         created_at=parse_dt(row["created_at"]),
     )
 

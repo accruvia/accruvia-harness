@@ -14,6 +14,7 @@ from ..domain import (
     new_id,
 )
 from ..policy import DefaultAnalyzer, DefaultDecider, DefaultPlanner
+from ..project_adapters import ProjectAdapterRegistry
 from ..store import SQLiteHarnessStore
 from ..workers import WorkerBackend
 
@@ -27,6 +28,7 @@ class RunService:
         worker: WorkerBackend,
         analyzer: DefaultAnalyzer,
         decider: DefaultDecider,
+        project_adapter_registry: ProjectAdapterRegistry,
     ) -> None:
         self.store = store
         self.workspace_root = workspace_root
@@ -34,11 +36,15 @@ class RunService:
         self.worker = worker
         self.analyzer = analyzer
         self.decider = decider
+        self.project_adapter_registry = project_adapter_registry
 
     def run_once(self, task_id: str) -> Run:
         task = self.store.get_task(task_id)
         if task is None:
             raise ValueError(f"Unknown task: {task_id}")
+        project = self.store.get_project(task.project_id)
+        if project is None:
+            raise ValueError(f"Unknown project for task: {task.project_id}")
 
         self.store.update_task_status(task.id, TaskStatus.ACTIVE)
         self.store.create_event(
@@ -60,6 +66,42 @@ class RunService:
                 entity_id=run.id,
                 event_type="run_created",
                 payload={"task_id": task.id, "attempt": attempt},
+            )
+        )
+        run_dir = self.workspace_root / "runs" / run.id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        project_adapter = self.project_adapter_registry.get(project.adapter_name)
+        prepared_workspace = project_adapter.prepare_workspace(project, task, run, run_dir)
+        for metadata_path in prepared_workspace.metadata_files:
+            artifact = Artifact(
+                id=new_id("artifact"),
+                run_id=run.id,
+                kind="workspace_metadata",
+                path=str(metadata_path),
+                summary="Prepared project workspace metadata",
+            )
+            self.store.create_artifact(artifact)
+            self.store.create_event(
+                Event(
+                    id=new_id("event"),
+                    entity_type="artifact",
+                    entity_id=artifact.id,
+                    event_type="artifact_recorded",
+                    payload={"run_id": run.id, "kind": artifact.kind, "path": artifact.path},
+                )
+            )
+        self.store.create_event(
+            Event(
+                id=new_id("event"),
+                entity_type="run",
+                entity_id=run.id,
+                event_type="project_workspace_prepared",
+                payload={
+                    "project_id": project.id,
+                    "project_adapter": project.adapter_name,
+                    "project_root": str(prepared_workspace.project_root),
+                    "diagnostics": prepared_workspace.diagnostics,
+                },
             )
         )
 

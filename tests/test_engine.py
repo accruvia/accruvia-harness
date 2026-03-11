@@ -10,6 +10,7 @@ from accruvia_harness.domain import Project, new_id
 from accruvia_harness.engine import HarnessEngine
 from accruvia_harness.llm import build_llm_router
 from accruvia_harness.policy import WorkResult
+from accruvia_harness.project_adapters import ProjectAdapterRegistry
 from accruvia_harness.workers import LocalArtifactWorker
 from accruvia_harness.store import SQLiteHarnessStore
 
@@ -57,6 +58,24 @@ class PromotionBlockedWorker(LocalArtifactWorker):
         )
 
 
+class ManifestProjectAdapter:
+    name = "manifest"
+
+    def prepare_workspace(self, project, task, run, run_dir: Path):
+        workspace = run_dir / "workspace"
+        workspace.mkdir(parents=True, exist_ok=True)
+        manifest = workspace / "custom-manifest.txt"
+        manifest.write_text("custom workspace prepared\n", encoding="utf-8")
+        from accruvia_harness.project_adapters import ProjectWorkspace
+
+        return ProjectWorkspace(
+            project_root=workspace,
+            metadata_files=[manifest],
+            environment={"ACCRUVIA_PROJECT_WORKSPACE": str(workspace)},
+            diagnostics={"project_adapter": self.name},
+        )
+
+
 class HarnessEngineTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -94,13 +113,50 @@ class HarnessEngineTests(unittest.TestCase):
         task_after = self.store.get_task(task.id)
 
         self.assertEqual("completed", run.status.value)
-        self.assertEqual(["plan", "report"], sorted(artifact.kind for artifact in artifacts))
+        self.assertEqual(["plan", "report", "workspace_metadata"], sorted(artifact.kind for artifact in artifacts))
         self.assertEqual("acceptable", evaluations[0].verdict)
         self.assertEqual("promote", decisions[0].action.value)
         assert task_after is not None
         self.assertEqual("gitlab_issue", task_after.external_ref_type)
         self.assertEqual("456", task_after.external_ref_id)
         self.assertEqual("completed", task_after.status.value)
+
+    def test_run_once_prepares_project_workspace_before_work(self) -> None:
+        registry = ProjectAdapterRegistry()
+        registry.register(ManifestProjectAdapter())
+        engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-manifest",
+            project_adapter_registry=registry,
+        )
+        project = Project(
+            id=new_id("project"),
+            name="manifest-project",
+            description="Uses custom project adapter",
+            adapter_name="manifest",
+        )
+        self.store.create_project(project)
+        task = engine.create_task_with_policy(
+            project_id=project.id,
+            title="Prepare workspace",
+            objective="Ensure workspace adapter runs",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+
+        run = engine.run_once(task.id)
+        artifact_paths = {artifact.kind: artifact.path for artifact in self.store.list_artifacts(run.id)}
+        events = self.store.list_events(entity_type="run", entity_id=run.id)
+
+        self.assertIn("workspace_metadata", artifact_paths)
+        self.assertTrue(Path(artifact_paths["workspace_metadata"]).exists())
+        self.assertIn("project_workspace_prepared", [event.event_type for event in events])
 
     def test_run_until_stable_fails_after_retry_budget_is_exhausted(self) -> None:
         failing_engine = HarnessEngine(
@@ -161,7 +217,7 @@ class HarnessEngineTests(unittest.TestCase):
         self.assertEqual("gitlab_issue", task_events[0].payload["external_ref_type"])
         self.assertEqual("458", task_events[0].payload["external_ref_id"])
         self.assertEqual(
-            ["run_created", "planned", "worker_completed"],
+            ["run_created", "project_workspace_prepared", "planned", "worker_completed"],
             [event.event_type for event in run_events],
         )
 

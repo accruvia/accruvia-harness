@@ -9,8 +9,8 @@ class TaskService:
     def __init__(self, store: SQLiteHarnessStore) -> None:
         self.store = store
 
-    def create_project(self, name: str, description: str) -> Project:
-        project = Project(id=new_id("project"), name=name, description=description)
+    def create_project(self, name: str, description: str, adapter_name: str = "generic") -> Project:
+        project = Project(id=new_id("project"), name=name, description=description, adapter_name=adapter_name)
         self.store.create_project(project)
         return project
 

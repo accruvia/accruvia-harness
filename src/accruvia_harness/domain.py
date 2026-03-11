@@ -49,6 +49,7 @@ class Project:
     id: str
     name: str
     description: str
+    adapter_name: str = "generic"
     created_at: datetime = field(default_factory=utc_now)
 
 

@@ -6,6 +6,7 @@ from .github import GitHubCLI
 from .gitlab import GitLabCLI
 from .llm import LLMRouter
 from .policy import DefaultAnalyzer, DefaultDecider, DefaultPlanner
+from .project_adapters import ProjectAdapterRegistry, build_project_adapter_registry
 from .services import (
     GitHubTaskService,
     GitLabTaskService,
@@ -28,6 +29,7 @@ class HarnessEngine:
         analyzer: DefaultAnalyzer | None = None,
         decider: DefaultDecider | None = None,
         llm_router: LLMRouter | None = None,
+        project_adapter_registry: ProjectAdapterRegistry | None = None,
     ) -> None:
         self.store = store
         self.workspace_root = Path(workspace_root)
@@ -37,6 +39,7 @@ class HarnessEngine:
         self.analyzer = analyzer or DefaultAnalyzer()
         self.decider = decider or DefaultDecider()
         self.llm_router = llm_router
+        self.project_adapter_registry = project_adapter_registry or build_project_adapter_registry()
 
         self.tasks = TaskService(self.store)
         self._build_services()
@@ -49,6 +52,7 @@ class HarnessEngine:
             worker=self.worker,
             analyzer=self.analyzer,
             decider=self.decider,
+            project_adapter_registry=self.project_adapter_registry,
         )
         self.queue = QueueService(self.store, self.runs)
         self.github_tasks = GitHubTaskService(self.tasks, self.store)
@@ -63,8 +67,8 @@ class HarnessEngine:
         self.llm_router = llm_router
         self._build_services()
 
-    def create_project(self, name: str, description: str):
-        return self.tasks.create_project(name, description)
+    def create_project(self, name: str, description: str, adapter_name: str = "generic"):
+        return self.tasks.create_project(name, description, adapter_name=adapter_name)
 
     def create_task(self, project_id: str, title: str, objective: str):
         return self.tasks.create_task_with_policy(

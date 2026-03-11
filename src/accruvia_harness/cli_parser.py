@@ -18,6 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
     create_project = subparsers.add_parser("create-project", help="Create a project.")
     create_project.add_argument("name")
     create_project.add_argument("description")
+    create_project.add_argument("--adapter-name", default="generic")
 
     create_task = subparsers.add_parser("create-task", help="Create a task.")
     create_task.add_argument("project_id")

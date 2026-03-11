@@ -137,6 +137,13 @@ MIGRATIONS: list[Migration] = [
         ALTER TABLE tasks ADD COLUMN validation_profile TEXT NOT NULL DEFAULT 'generic';
         """,
     ),
+    Migration(
+        version=5,
+        name="project_adapters",
+        sql="""
+        ALTER TABLE projects ADD COLUMN adapter_name TEXT NOT NULL DEFAULT 'generic';
+        """,
+    ),
 ]
 
 

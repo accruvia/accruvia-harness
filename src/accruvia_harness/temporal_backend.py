@@ -11,11 +11,13 @@ from .store import SQLiteHarnessStore
 try:
     from temporalio import activity, workflow
     from temporalio.client import Client
+    from temporalio.common import RetryPolicy
     from temporalio.worker import Worker
 except ModuleNotFoundError:  # pragma: no cover - exercised via availability checks
     activity = None
     workflow = None
     Client = None
+    RetryPolicy = None
     Worker = None
 
 
@@ -26,7 +28,7 @@ def _build_engine(db_path: str, workspace_root: str) -> HarnessEngine:
 
 
 def _import_temporal_modules() -> tuple[Any, Any, Any]:
-    if activity is None or workflow is None or Client is None:
+    if activity is None or workflow is None or Client is None or RetryPolicy is None:
         raise ModuleNotFoundError("temporalio is not installed")
     return activity, workflow, Client
 
@@ -97,6 +99,7 @@ if activity is not None and workflow is not None:
                 "task_to_stable_activity",
                 args=[config, task_id],
                 start_to_close_timeout=timedelta(seconds=300),
+                retry_policy=RetryPolicy(maximum_attempts=1),
             )
 
 
@@ -114,6 +117,7 @@ if activity is not None and workflow is not None:
                 "process_next_task_activity",
                 args=[config, project_id, worker_id, lease_seconds],
                 start_to_close_timeout=timedelta(seconds=300),
+                retry_policy=RetryPolicy(maximum_attempts=1),
             )
 
 

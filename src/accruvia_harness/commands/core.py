@@ -31,10 +31,11 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
             "llm_claude_command": config.llm_claude_command,
             "llm_accruvia_client_command": config.llm_accruvia_client_command,
             "adapter_modules": list(config.adapter_modules),
+            "project_adapter_modules": list(config.project_adapter_modules),
         })
         return True
     if args.command == "create-project":
-        emit({"project": serialize_dataclass(engine.create_project(args.name, args.description))})
+        emit({"project": serialize_dataclass(engine.create_project(args.name, args.description, adapter_name=args.adapter_name))})
         return True
     if args.command == "create-task":
         required_artifacts = args.required_artifacts or ["plan", "report"]
@@ -84,7 +85,7 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
         emit({"promotion": serialize_dataclass(result.promotion), "follow_on_task_id": result.follow_on_task_id})
         return True
     if args.command == "smoke-test":
-        project = engine.create_project(args.project_name, "Local smoke-test project")
+        project = engine.create_project(args.project_name, "Local smoke-test project", adapter_name="generic")
         task = engine.create_task_with_policy(
             project.id, args.task_title, args.objective, 100, None, None, None, None, "generic", "smoke", 2, ["plan", "report"]
         )
