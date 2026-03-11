@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -42,6 +43,32 @@ class WorkerTests(unittest.TestCase):
         result = worker.work(self.task, self.run, self.base)
         kinds = sorted(kind for kind, _, _ in result.artifacts)
         self.assertEqual(["plan", "report"], kinds)
+
+    def test_local_worker_emits_javascript_profile_evidence(self) -> None:
+        self.task.validation_profile = "javascript"
+
+        worker = LocalArtifactWorker()
+        result = worker.work(self.task, self.run, self.base)
+
+        self.assertEqual("success", result.outcome)
+        report_path = self.base / "runs" / self.run.id / "report.json"
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual("javascript", payload["validation_profile"])
+        self.assertTrue(payload["test_files"][0].endswith(".test.ts"))
+        self.assertEqual("jest_stub", payload["test_check"]["framework"])
+
+    def test_local_worker_emits_terraform_profile_evidence(self) -> None:
+        self.task.validation_profile = "terraform"
+
+        worker = LocalArtifactWorker()
+        result = worker.work(self.task, self.run, self.base)
+
+        self.assertEqual("success", result.outcome)
+        report_path = self.base / "runs" / self.run.id / "report.json"
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual("terraform", payload["validation_profile"])
+        self.assertIn("terraform_validate", payload)
+        self.assertTrue(payload["terraform_validate"]["passed"])
 
     def test_shell_worker_executes_command(self) -> None:
         worker = ShellCommandWorker("printf 'hello from shell worker' > output.txt")

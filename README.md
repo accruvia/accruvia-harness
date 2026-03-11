@@ -115,6 +115,7 @@ This repo now contains a minimal durable harness foundation:
 - a GitHub adapter for importing issues and reporting results back out
 - worker backends for `local`, `shell`, `agent`, and routed `llm`
 - an LLM executor/router layer that can choose local CLI tools or `accruvia-client`
+- a profile-aware local worker that emits deterministic evidence for `generic`, `python`, `javascript`, and `terraform` tasks
 - a read-only interrogation surface for summaries, context packets, and task reports
 - an operational report for pending affirmations and profile-aware workload metrics
 - a small CLI for creating projects, syncing issue-backed tasks, running cycles, and inspecting status

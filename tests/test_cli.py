@@ -70,6 +70,27 @@ class CLITests(unittest.TestCase):
         self.assertEqual(1, ops["metrics"]["pending_promotions"])
         self.assertEqual(1, ops["metrics"]["tasks_by_validation_profile"]["python"])
 
+    def test_javascript_profile_runs_end_to_end_through_review(self) -> None:
+        project = self.run_cli("create-project", "js", "javascript project")["project"]
+        task = self.run_cli(
+            "create-task",
+            project["id"],
+            "Task JS",
+            "Objective JS",
+            "--validation-profile",
+            "javascript",
+        )["task"]
+
+        self.run_cli("run-once", task["id"])
+        review = self.run_cli("review-promotion", task["id"])
+        report = self.run_cli("task-report", task["id"])
+
+        self.assertEqual("pending", review["promotion"]["status"])
+        artifact_report = next(item for item in report["runs"][0]["artifacts"] if item["kind"] == "report")
+        payload = json.loads(Path(artifact_report["path"]).read_text(encoding="utf-8"))
+        self.assertEqual("javascript", payload["validation_profile"])
+        self.assertEqual("jest_stub", payload["test_check"]["framework"])
+
     def test_review_then_affirm_promotion_commands_record_final_approval(self) -> None:
         project = self.run_cli("create-project", "promotion", "promotion project")["project"]
         task = self.run_cli(

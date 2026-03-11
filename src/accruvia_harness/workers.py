@@ -31,6 +31,49 @@ class LocalArtifactWorker:
             f"task={task.id}\nrun={run.id}\nattempt={run.attempt}\nobjective={task.objective}\n",
             encoding="utf-8",
         )
+        evidence = self._build_profile_evidence(task, run_dir)
+        report_path = run_dir / "report.json"
+        report_path.write_text(
+            json.dumps(
+                {
+                    "task_id": task.id,
+                    "run_id": run.id,
+                    "attempt": run.attempt,
+                    "strategy": task.strategy,
+                    "objective": task.objective,
+                    "worker_backend": "local",
+                    "validation_profile": task.validation_profile,
+                    **evidence["report"],
+                },
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        return WorkResult(
+            summary="Recorded durable plan and report artifacts for the run.",
+            artifacts=[
+                ("plan", str(plan_path), "Run planning artifact"),
+                ("report", str(report_path), "Structured run report"),
+            ],
+            outcome="success" if evidence["passed"] else "failed",
+            diagnostics={
+                "worker_backend": "local",
+                "validation_profile": task.validation_profile,
+                **evidence["diagnostics"],
+            },
+        )
+
+    def _build_profile_evidence(self, task: Task, run_dir: Path) -> dict[str, object]:
+        if task.validation_profile == "python":
+            return self._build_python_evidence(run_dir)
+        if task.validation_profile == "javascript":
+            return self._build_javascript_evidence(run_dir)
+        if task.validation_profile == "terraform":
+            return self._build_terraform_evidence(run_dir)
+        return self._build_generic_evidence(run_dir)
+
+    def _build_python_evidence(self, run_dir: Path) -> dict[str, object]:
         module_path = run_dir / "generated_module.py"
         module_path.write_text(
             "def generated_value() -> int:\n"
@@ -63,55 +106,154 @@ class LocalArtifactWorker:
             f"{test_completed.stdout}\n{test_completed.stderr}".strip(),
             encoding="utf-8",
         )
-        report_path = run_dir / "report.json"
-        report_path.write_text(
-            json.dumps(
-                {
-                    "task_id": task.id,
-                    "run_id": run.id,
-                    "attempt": run.attempt,
-                    "strategy": task.strategy,
-                    "objective": task.objective,
-                    "worker_backend": "local",
-                    "validation_profile": task.validation_profile,
-                    "changed_files": [str(module_path), str(test_path)],
-                    "test_files": [str(test_path)],
-                    "compile_check": {"passed": True, "targets": compile_targets},
-                    "test_check": {
-                        "passed": test_completed.returncode == 0,
-                        "framework": "unittest",
-                        "command": [
-                            sys.executable,
-                            "-m",
-                            "unittest",
-                            "discover",
-                            "-s",
-                            str(run_dir),
-                            "-p",
-                            "test_generated_module.py",
-                        ],
-                        "output_path": str(test_output_path),
-                    },
+        return {
+            "passed": test_completed.returncode == 0,
+            "report": {
+                "changed_files": [str(module_path), str(test_path)],
+                "test_files": [str(test_path)],
+                "compile_check": {"passed": True, "targets": compile_targets},
+                "test_check": {
+                    "passed": test_completed.returncode == 0,
+                    "framework": "unittest",
+                    "command": [
+                        sys.executable,
+                        "-m",
+                        "unittest",
+                        "discover",
+                        "-s",
+                        str(run_dir),
+                        "-p",
+                        "test_generated_module.py",
+                    ],
+                    "output_path": str(test_output_path),
                 },
-                indent=2,
-                sort_keys=True,
-            ),
-            encoding="utf-8",
-        )
-        return WorkResult(
-            summary="Recorded durable plan and report artifacts for the run.",
-            artifacts=[
-                ("plan", str(plan_path), "Run planning artifact"),
-                ("report", str(report_path), "Structured run report"),
-            ],
-            outcome="success" if test_completed.returncode == 0 else "failed",
-            diagnostics={
-                "worker_backend": "local",
+            },
+            "diagnostics": {
                 "compile_targets": compile_targets,
                 "test_output_path": str(test_output_path),
                 "test_returncode": test_completed.returncode,
             },
+        }
+
+    def _build_javascript_evidence(self, run_dir: Path) -> dict[str, object]:
+        source_path = run_dir / "generated-module.ts"
+        source_path.write_text(
+            "export function generatedValue(): number {\n"
+            "  return 2;\n"
+            "}\n",
+            encoding="utf-8",
         )
+        test_path = run_dir / "generated-module.test.ts"
+        test_path.write_text(
+            "import { generatedValue } from './generated-module';\n\n"
+            "describe('generatedValue', () => {\n"
+            "  it('returns 2', () => {\n"
+            "    expect(generatedValue()).toBe(2);\n"
+            "  });\n"
+            "});\n",
+            encoding="utf-8",
+        )
+        test_output_path = run_dir / "test_output.txt"
+        test_output_path.write_text("PASS generated-module.test.ts\n", encoding="utf-8")
+        compile_output_path = run_dir / "compile_output.txt"
+        compile_output_path.write_text("TypeScript syntax check passed.\n", encoding="utf-8")
+        changed_files = [str(source_path), str(test_path)]
+        return {
+            "passed": True,
+            "report": {
+                "changed_files": changed_files,
+                "test_files": [str(test_path)],
+                "compile_check": {
+                    "passed": True,
+                    "targets": changed_files,
+                    "mode": "syntactic_stub",
+                    "output_path": str(compile_output_path),
+                },
+                "test_check": {
+                    "passed": True,
+                    "framework": "jest_stub",
+                    "output_path": str(test_output_path),
+                },
+            },
+            "diagnostics": {
+                "compile_targets": changed_files,
+                "test_output_path": str(test_output_path),
+                "compile_output_path": str(compile_output_path),
+                "test_returncode": 0,
+            },
+        }
+
+    def _build_terraform_evidence(self, run_dir: Path) -> dict[str, object]:
+        main_tf = run_dir / "main.tf"
+        main_tf.write_text(
+            'terraform {\n  required_version = ">= 1.0.0"\n}\n\n'
+            'variable "name" {\n  type = string\n}\n',
+            encoding="utf-8",
+        )
+        vars_tf = run_dir / "terraform.tfvars"
+        vars_tf.write_text('name = "accruvia"\n', encoding="utf-8")
+        validate_output_path = run_dir / "terraform_validate.txt"
+        validate_output_path.write_text("Success! The configuration is valid.\n", encoding="utf-8")
+        changed_files = [str(main_tf), str(vars_tf)]
+        return {
+            "passed": True,
+            "report": {
+                "changed_files": changed_files,
+                "test_files": [],
+                "compile_check": {
+                    "passed": True,
+                    "targets": changed_files,
+                    "mode": "terraform_syntax_stub",
+                    "output_path": str(validate_output_path),
+                },
+                "test_check": {
+                    "passed": True,
+                    "framework": "terraform_validate_stub",
+                    "output_path": str(validate_output_path),
+                },
+                "terraform_validate": {
+                    "passed": True,
+                    "output_path": str(validate_output_path),
+                },
+            },
+            "diagnostics": {
+                "compile_targets": changed_files,
+                "terraform_validate_output_path": str(validate_output_path),
+                "test_returncode": 0,
+            },
+        }
+
+    def _build_generic_evidence(self, run_dir: Path) -> dict[str, object]:
+        source_path = run_dir / "generated_artifact.txt"
+        source_path.write_text("generic source artifact\n", encoding="utf-8")
+        test_path = run_dir / "generated_validation.txt"
+        test_path.write_text("generic validation evidence\n", encoding="utf-8")
+        check_output_path = run_dir / "generic_check.txt"
+        check_output_path.write_text("Generic validation passed.\n", encoding="utf-8")
+        changed_files = [str(source_path), str(test_path)]
+        return {
+            "passed": True,
+            "report": {
+                "changed_files": changed_files,
+                "test_files": [str(test_path)],
+                "compile_check": {
+                    "passed": True,
+                    "targets": changed_files,
+                    "mode": "generic_stub",
+                    "output_path": str(check_output_path),
+                },
+                "test_check": {
+                    "passed": True,
+                    "framework": "generic_stub",
+                    "output_path": str(check_output_path),
+                },
+            },
+            "diagnostics": {
+                "compile_targets": changed_files,
+                "test_output_path": str(check_output_path),
+                "test_returncode": 0,
+            },
+        }
 
 
 class CommandWorker:
