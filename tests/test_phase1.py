@@ -43,6 +43,8 @@ class Phase1Tests(unittest.TestCase):
         self.assertEqual("accruvia-harness", config.otel_service_name)
         self.assertIsNone(config.otel_exporter_otlp_endpoint)
         self.assertEqual((), config.env_passthrough)
+        self.assertTrue(config.pr_check_enabled)
+        self.assertEqual(28800, config.pr_check_interval_seconds)
 
     def test_logger_writes_jsonl(self) -> None:
         logger = HarnessLogger(self.base / "logs" / "harness.jsonl")
@@ -115,6 +117,8 @@ class Phase1Tests(unittest.TestCase):
         self.assertEqual(config.runtime_backend, restored.runtime_backend)
         self.assertEqual(config.timeout_multiplier, restored.timeout_multiplier)
         self.assertEqual(config.telemetry_fsync_writes, restored.telemetry_fsync_writes)
+        self.assertEqual(config.pr_check_enabled, restored.pr_check_enabled)
+        self.assertEqual(config.pr_check_interval_seconds, restored.pr_check_interval_seconds)
 
     def test_config_reads_telemetry_fsync_flag(self) -> None:
         with mock.patch.dict(

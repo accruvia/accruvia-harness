@@ -66,6 +66,8 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
             "default_promotion_mode": config.default_promotion_mode,
             "default_repo_provider": config.default_repo_provider,
             "default_base_branch": config.default_base_branch,
+            "pr_check_enabled": config.pr_check_enabled,
+            "pr_check_interval_seconds": config.pr_check_interval_seconds,
         })
         return True
     if args.command == "create-project":

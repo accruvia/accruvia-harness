@@ -72,6 +72,7 @@ Default posture:
 
 - isolated workspaces are required
 - approved work is delivered on a branch and opened for review
+- open PR/MR mergeability is checked sparingly, default every 8 hours
 
 This exists for one reason: blocked or failed runs must not dirty the main checkout, and successful isolated work must
 have a deliberate path back into the real repo.

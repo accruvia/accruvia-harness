@@ -77,6 +77,8 @@ class HarnessConfig:
     default_promotion_mode: str = PromotionMode.BRANCH_AND_PR.value
     default_repo_provider: str | None = RepoProvider.GITHUB.value
     default_base_branch: str = "main"
+    pr_check_enabled: bool = True
+    pr_check_interval_seconds: int = 28800
 
     def to_payload(self) -> dict[str, object]:
         payload = asdict(self)
@@ -148,6 +150,8 @@ class HarnessConfig:
                 str(payload["default_repo_provider"]) if payload.get("default_repo_provider") is not None else None
             ),
             default_base_branch=str(payload.get("default_base_branch", "main")),
+            pr_check_enabled=bool(payload.get("pr_check_enabled", True)),
+            pr_check_interval_seconds=int(payload.get("pr_check_interval_seconds", 28800)),
         )
 
     @classmethod
@@ -235,4 +239,6 @@ class HarnessConfig:
             ),
             default_repo_provider=os.environ.get("ACCRUVIA_DEFAULT_REPO_PROVIDER", RepoProvider.GITHUB.value),
             default_base_branch=os.environ.get("ACCRUVIA_DEFAULT_BASE_BRANCH", "main"),
+            pr_check_enabled=os.environ.get("ACCRUVIA_PR_CHECK_ENABLED", "true").lower() == "true",
+            pr_check_interval_seconds=_env_int("ACCRUVIA_PR_CHECK_INTERVAL_SECONDS", 28800),
         )

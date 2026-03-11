@@ -92,6 +92,7 @@ Approved isolated work can be delivered in one of three modes:
 Recommended default:
 
 - `branch_and_pr`
+- PR/MR mergeability recheck every `28800` seconds (`8 hours`)
 
 Use `direct_main` only after a project has proven it can operate safely without routine manual rescue.
 
