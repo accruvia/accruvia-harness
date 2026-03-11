@@ -17,15 +17,20 @@ class _WebhookHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         content_length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_length)
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"ok")
+        # Process the event before responding so failures aren't silently lost
         if self.callback and body:
             try:
                 event = json.loads(body)
                 self.callback(event)
             except Exception:
                 logger.exception("Error processing webhook event")
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(b"error")
+                return
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ok")
 
     def log_message(self, format: str, *args: object) -> None:
         logger.debug(format, *args)

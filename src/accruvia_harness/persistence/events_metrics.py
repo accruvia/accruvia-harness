@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 from .common import event_from_row
 from ..domain import Event
@@ -92,6 +93,20 @@ class EventsMetricsStoreMixin:
                 promotion_query += " GROUP BY status"
             run_row = connection.execute(run_query, run_params).fetchone()
             promotion_rows = connection.execute(promotion_query, promotion_params).fetchall()
+
+            # Keep follow-on and lease counts in the same connection/transaction
+            follow_on_query = "SELECT COUNT(*) AS cnt FROM tasks WHERE parent_task_id IS NOT NULL"
+            follow_on_params: tuple[str, ...] = ()
+            if project_id:
+                follow_on_query += " AND project_id = ?"
+                follow_on_params = (project_id,)
+            follow_on_count = int(connection.execute(follow_on_query, follow_on_params).fetchone()["cnt"])
+
+            now = datetime.now(UTC).isoformat()
+            active_leases = int(connection.execute(
+                "SELECT COUNT(*) AS cnt FROM task_leases WHERE lease_expires_at > ?", (now,)
+            ).fetchone()["cnt"])
+
         tasks_by_status = {row["status"]: int(row["count"]) for row in task_rows}
         tasks_by_validation_profile = {row["validation_profile"]: int(row["count"]) for row in profile_rows}
         promotions_by_status = {row["status"]: int(row["count"]) for row in promotion_rows}
@@ -101,14 +116,13 @@ class EventsMetricsStoreMixin:
         rejected = promotions_by_status.get("rejected", 0)
         pending = promotions_by_status.get("pending", 0)
         total_promotions = approved + rejected
-        follow_on_count = len([task for task in self.list_tasks(project_id) if task.parent_task_id is not None])
         return {
             "project_id": project_id,
             "tasks_by_status": tasks_by_status,
             "tasks_by_validation_profile": tasks_by_validation_profile,
             "total_runs": total_runs,
             "average_attempt": float(run_row["avg_attempt"]),
-            "active_leases": len(self.list_task_leases()),
+            "active_leases": active_leases,
             "promotions_by_status": promotions_by_status,
             "pending_promotions": pending,
             "retry_rate": (retried_runs / total_runs) if total_runs else 0.0,

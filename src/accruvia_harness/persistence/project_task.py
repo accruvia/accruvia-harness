@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import UTC, datetime
 
 from .common import project_from_row, task_from_row, task_lease_from_row
-from ..domain import Project, Task, TaskLease, TaskStatus
+from ..domain import Project, Task, TaskLease, TaskStatus, validate_task_transition
 
 
 class ProjectTaskStoreMixin:
@@ -128,6 +129,11 @@ class ProjectTaskStoreMixin:
 
     def update_task_status(self, task_id: str, status: TaskStatus) -> None:
         with self.connect() as connection:
+            row = connection.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if row is None:
+                raise ValueError(f"Unknown task: {task_id}")
+            current = TaskStatus(row["status"])
+            validate_task_transition(current, status)
             connection.execute(
                 "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
                 (status.value, datetime.now(UTC).isoformat(), task_id),
@@ -173,13 +179,18 @@ class ProjectTaskStoreMixin:
                 break
             if task_id is None:
                 return None
-            connection.execute(
-                """
-                INSERT OR REPLACE INTO task_leases (task_id, worker_id, lease_expires_at, created_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (task_id, worker_id, expires_at.isoformat(), now.isoformat()),
-            )
+            # Use INSERT without OR REPLACE to fail if another worker grabbed it first
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO task_leases (task_id, worker_id, lease_expires_at, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (task_id, worker_id, expires_at.isoformat(), now.isoformat()),
+                )
+            except sqlite3.IntegrityError:
+                # Another worker acquired the lease between our read and write
+                return None
         return self.get_task(task_id)
 
     def release_task_lease(self, task_id: str, worker_id: str | None = None) -> None:

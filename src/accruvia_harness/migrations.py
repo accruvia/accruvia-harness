@@ -179,7 +179,13 @@ def apply_migrations(connection: sqlite3.Connection) -> list[int]:
     for migration in MIGRATIONS:
         if migration.version in applied:
             continue
-        connection.executescript(migration.sql)
+        # Execute each statement individually to stay within the connection's
+        # transaction instead of using executescript() which auto-commits and
+        # can leave partially-applied migrations unrecorded.
+        for statement in migration.sql.split(";"):
+            statement = statement.strip()
+            if statement:
+                connection.execute(statement)
         connection.execute(
             "INSERT INTO schema_migrations (version, name) VALUES (?, ?)",
             (migration.version, migration.name),

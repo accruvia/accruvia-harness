@@ -22,6 +22,22 @@ class TaskStatus(StrEnum):
     FAILED = "failed"
 
 
+VALID_TASK_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
+    TaskStatus.PENDING: frozenset({TaskStatus.ACTIVE, TaskStatus.COMPLETED, TaskStatus.FAILED}),
+    TaskStatus.ACTIVE: frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.PENDING}),
+    TaskStatus.COMPLETED: frozenset({TaskStatus.FAILED}),  # promotion rejection
+    TaskStatus.FAILED: frozenset({TaskStatus.PENDING}),
+}
+
+
+def validate_task_transition(current: TaskStatus, target: TaskStatus) -> None:
+    if current == target:
+        return  # idempotent no-op
+    allowed = VALID_TASK_TRANSITIONS.get(current, frozenset())
+    if target not in allowed:
+        raise ValueError(f"Invalid task transition: {current} -> {target}")
+
+
 class RunStatus(StrEnum):
     PLANNING = "planning"
     WORKING = "working"

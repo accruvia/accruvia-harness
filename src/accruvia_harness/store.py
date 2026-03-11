@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 from .domain import Run, RunStatus
+
+logger = logging.getLogger(__name__)
 from .migrations import MIGRATIONS, apply_migrations
 from .persistence.events_metrics import EventsMetricsStoreMixin
 from .persistence.project_task import ProjectTaskStoreMixin
@@ -18,13 +21,17 @@ class SQLiteHarnessStore(ProjectTaskStoreMixin, RunRecordsStoreMixin, EventsMetr
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
     def connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.db_path)
+        connection = sqlite3.connect(self.db_path, timeout=30)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
         return connection
 
     def initialize(self) -> None:
         with self.connect() as connection:
             apply_migrations(connection)
+        recovered = self.recover_stale_state()
+        if any(v > 0 for v in recovered.values()):
+            logger.warning("Startup recovery: %s", recovered)
 
     def schema_version(self) -> int:
         with self.connect() as connection:
@@ -35,6 +42,44 @@ class SQLiteHarnessStore(ProjectTaskStoreMixin, RunRecordsStoreMixin, EventsMetr
 
     def expected_schema_version(self) -> int:
         return max(migration.version for migration in MIGRATIONS)
+
+    def recover_stale_state(self) -> dict[str, int]:
+        """Find stuck runs/tasks from prior crashes and mark them failed."""
+        now = datetime.now(UTC).isoformat()
+        recovered: dict[str, int] = {"runs": 0, "tasks": 0, "leases": 0}
+        with self.connect() as connection:
+            # Expire stale leases
+            expired = connection.execute(
+                "DELETE FROM task_leases WHERE lease_expires_at <= ?", (now,)
+            ).rowcount
+            recovered["leases"] = expired
+
+            # Mark in-progress runs (not terminal) as failed
+            in_progress_statuses = [
+                RunStatus.PLANNING.value,
+                RunStatus.WORKING.value,
+                RunStatus.ANALYZING.value,
+                RunStatus.DECIDING.value,
+            ]
+            placeholders = ",".join("?" for _ in in_progress_statuses)
+            rows = connection.execute(
+                f"UPDATE runs SET status = ?, summary = 'Recovered: process crash detected', updated_at = ? "
+                f"WHERE status IN ({placeholders})",
+                (RunStatus.FAILED.value, now, *in_progress_statuses),
+            ).rowcount
+            recovered["runs"] = rows
+
+            # Reset ACTIVE tasks with no active lease back to PENDING
+            tasks_reset = connection.execute(
+                """
+                UPDATE tasks SET status = ?, updated_at = ?
+                WHERE status = ?
+                AND id NOT IN (SELECT task_id FROM task_leases)
+                """,
+                ("pending", now, "active"),
+            ).rowcount
+            recovered["tasks"] = tasks_reset
+        return recovered
 
     def mark_run(self, run: Run, status: RunStatus, summary: str) -> Run:
         updated = replace(run, status=status, summary=summary, updated_at=datetime.now(UTC))
