@@ -5,6 +5,7 @@ import logging
 import os
 import time
 import threading
+from uuid import uuid4
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -57,6 +58,8 @@ class TelemetrySink:
     metrics_path: Path = field(init=False)
     spans_path: Path = field(init=False)
     warnings_path: Path = field(init=False)
+    journal_path: Path = field(init=False)
+    state_path: Path = field(init=False)
     _otel: "_OpenTelemetryBridge | None" = field(init=False, default=None)
     otel_status: str = field(init=False, default="disabled")
     otel_warning: str | None = field(init=False, default=None)
@@ -67,11 +70,14 @@ class TelemetrySink:
         self.metrics_path = self.root / "metrics.jsonl"
         self.spans_path = self.root / "spans.jsonl"
         self.warnings_path = self.root / "warnings.jsonl"
+        self.journal_path = self.root / "journal.jsonl"
+        self.state_path = self.root / "telemetry_state.json"
         self._append_lock = threading.Lock()
         self._otel, self.otel_status, self.otel_warning = _OpenTelemetryBridge.build(
             service_name=self.service_name,
             endpoint=self.otlp_endpoint,
         )
+        self._recover_from_journal()
         if self.otel_warning:
             self.warn("otel_setup", self.otel_warning, endpoint=self.otlp_endpoint)
 
@@ -85,12 +91,7 @@ class TelemetrySink:
             "value": value,
             "attributes": sanitized,
         }
-        self._append(self.metrics_path, payload)
-        if self._otel is not None:
-            try:
-                self._otel.metric(name, value, metric_type=metric_type, attributes=sanitized)
-            except Exception as exc:
-                self.warn("otel_metric_export", str(exc), metric=name, metric_type=metric_type)
+        self._record("metric", payload)
 
     def span(self, name: str, duration_ms: float | None = None, **attributes: Any) -> None:
         sanitized = _sanitize_attributes(attributes)
@@ -102,20 +103,17 @@ class TelemetrySink:
         }
         if duration_ms is not None:
             payload["duration_ms"] = duration_ms
-        self._append(self.spans_path, payload)
-        if self._otel is not None:
-            try:
-                self._otel.span(name, duration_ms=duration_ms, attributes=sanitized)
-            except Exception as exc:
-                self.warn("otel_span_export", str(exc), span=name)
+        self._record("span", payload)
 
     def timed(self, name: str, **attributes: Any):
         return _TimedSpan(self, name, attributes)
 
     def summary(self) -> dict[str, object]:
+        self._recover_from_journal()
         metrics = self.load_metrics()
         spans = self.load_spans()
         warnings = self.load_warnings()
+        state = self._load_state()
         metric_totals: dict[str, float] = {}
         metric_series: dict[str, list[float]] = {}
         cost_totals = {
@@ -153,7 +151,12 @@ class TelemetrySink:
             "metrics_path": str(self.metrics_path),
             "spans_path": str(self.spans_path),
             "warnings_path": str(self.warnings_path),
+            "journal_path": str(self.journal_path),
+            "telemetry_state_path": str(self.state_path),
             "warnings": warnings[-20:],
+            "journal_backlog": max(0, int(state.get("last_sequence", 0)) - int(state.get("last_materialized_sequence", 0))),
+            "last_sequence": int(state.get("last_sequence", 0)),
+            "last_materialized_sequence": int(state.get("last_materialized_sequence", 0)),
             "metric_totals": metric_totals,
             "metric_averages": {
                 name: (sum(values) / len(values)) for name, values in metric_series.items() if values
@@ -203,9 +206,10 @@ class TelemetrySink:
             "message": message,
             "attributes": _sanitize_attributes(attributes),
         }
-        self._append(self.warnings_path, payload)
+        self._record("warning", payload, export_to_otel=False)
 
     def _load(self, path: Path) -> list[dict[str, Any]]:
+        self._recover_from_journal()
         if not path.exists():
             return []
         records: list[dict[str, Any]] = []
@@ -224,6 +228,138 @@ class TelemetrySink:
                 if fcntl is not None:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         return records
+
+    def _record(self, channel: str, payload: dict[str, Any], *, export_to_otel: bool = True) -> None:
+        with self._append_lock:
+            state = self._load_state()
+            sequence = int(state.get("last_sequence", 0)) + 1
+            envelope = {
+                "sequence": sequence,
+                "record_id": f"telemetry_{uuid4().hex}",
+                "channel": channel,
+                "payload": payload,
+            }
+            self._append_without_lock(self.journal_path, envelope, fsync=self.fsync_writes)
+            self._materialize_envelope(envelope, export_to_otel=export_to_otel)
+            state["last_sequence"] = sequence
+            state["last_materialized_sequence"] = sequence
+            self._write_state(state)
+
+    def _recover_from_journal(self) -> None:
+        with self._append_lock:
+            state = self._load_state()
+            last_materialized = int(state.get("last_materialized_sequence", 0))
+            last_seen = int(state.get("last_sequence", 0))
+            if not self.journal_path.exists():
+                return
+            with self.journal_path.open("r", encoding="utf-8") as handle:
+                if fcntl is not None:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+                try:
+                    for line in handle:
+                        if not line.strip():
+                            continue
+                        try:
+                            envelope = json.loads(line)
+                        except json.JSONDecodeError as exc:
+                            logger.warning("Skipping corrupt telemetry journal line in %s: %s", self.journal_path, exc)
+                            continue
+                        sequence = int(envelope.get("sequence", 0))
+                        if sequence > last_seen:
+                            last_seen = sequence
+                        if sequence <= last_materialized:
+                            continue
+                        self._materialize_envelope(envelope, export_to_otel=True)
+                        last_materialized = sequence
+                finally:
+                    if fcntl is not None:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            state["last_sequence"] = last_seen
+            state["last_materialized_sequence"] = last_materialized
+            self._write_state(state)
+
+    def _materialize_envelope(self, envelope: dict[str, Any], *, export_to_otel: bool) -> None:
+        channel = str(envelope["channel"])
+        payload = dict(envelope["payload"])
+        if channel == "metric":
+            self._append_without_lock(self.metrics_path, payload, fsync=False)
+            if export_to_otel and self._otel is not None:
+                try:
+                    self._otel.metric(
+                        str(payload["name"]),
+                        _coerce_float(payload["value"]),
+                        metric_type=str(payload["metric_type"]),
+                        attributes=dict(payload.get("attributes", {})),
+                    )
+                except Exception as exc:
+                    warning_payload = {
+                        "timestamp": datetime.now(UTC).isoformat(),
+                        "type": "warning",
+                        "category": "otel_metric_export",
+                        "message": str(exc),
+                        "attributes": _sanitize_attributes(
+                            {
+                                "metric": payload.get("name"),
+                                "metric_type": payload.get("metric_type"),
+                            }
+                        ),
+                    }
+                    self._append_without_lock(self.warnings_path, warning_payload, fsync=False)
+        elif channel == "span":
+            self._append_without_lock(self.spans_path, payload, fsync=False)
+            if export_to_otel and self._otel is not None:
+                try:
+                    self._otel.span(
+                        str(payload["name"]),
+                        duration_ms=_coerce_float(payload.get("duration_ms")) if "duration_ms" in payload else None,
+                        attributes=dict(payload.get("attributes", {})),
+                    )
+                except Exception as exc:
+                    warning_payload = {
+                        "timestamp": datetime.now(UTC).isoformat(),
+                        "type": "warning",
+                        "category": "otel_span_export",
+                        "message": str(exc),
+                        "attributes": _sanitize_attributes({"span": payload.get("name")}),
+                    }
+                    self._append_without_lock(self.warnings_path, warning_payload, fsync=False)
+        elif channel == "warning":
+            self._append_without_lock(self.warnings_path, payload, fsync=False)
+
+    def _append_without_lock(self, path: Path, payload: dict[str, Any], *, fsync: bool) -> None:
+        with path.open("a", encoding="utf-8") as handle:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            handle.write(json.dumps(payload, sort_keys=True) + "\n")
+            handle.flush()
+            if fsync:
+                os.fsync(handle.fileno())
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    def _load_state(self) -> dict[str, int]:
+        if not self.state_path.exists():
+            return {"last_sequence": 0, "last_materialized_sequence": 0}
+        try:
+            payload = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {"last_sequence": 0, "last_materialized_sequence": 0}
+        return {
+            "last_sequence": int(payload.get("last_sequence", 0)),
+            "last_materialized_sequence": int(payload.get("last_materialized_sequence", 0)),
+        }
+
+    def _write_state(self, state: dict[str, int]) -> None:
+        payload = json.dumps(state, sort_keys=True)
+        with self.state_path.open("w", encoding="utf-8") as handle:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            handle.write(payload)
+            handle.flush()
+            if self.fsync_writes:
+                os.fsync(handle.fileno())
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def load_metrics(self) -> list[dict[str, Any]]:
         return self._load(self.metrics_path)

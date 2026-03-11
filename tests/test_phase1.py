@@ -207,6 +207,42 @@ class Phase1Tests(unittest.TestCase):
         self.assertEqual(40, len(metrics))
         self.assertEqual(40, len({item["name"] for item in metrics}))
 
+    def test_telemetry_replays_journal_after_partial_crash(self) -> None:
+        telemetry = TelemetrySink(self.base / "telemetry")
+        envelope = {
+            "sequence": 1,
+            "record_id": "telemetry_test",
+            "channel": "metric",
+            "payload": {
+                "timestamp": "2026-03-11T00:00:00+00:00",
+                "type": "metric",
+                "name": "replayed_metric",
+                "metric_type": "counter",
+                "value": 3,
+                "attributes": {},
+            },
+        }
+        telemetry.journal_path.write_text(json.dumps(envelope) + "\n", encoding="utf-8")
+        telemetry.state_path.write_text(
+            json.dumps({"last_sequence": 1, "last_materialized_sequence": 0}),
+            encoding="utf-8",
+        )
+
+        metrics = telemetry.load_metrics()
+        summary = telemetry.summary()
+
+        self.assertEqual(1, len([item for item in metrics if item["name"] == "replayed_metric"]))
+        self.assertEqual(0, summary["journal_backlog"])
+        self.assertEqual(1, summary["last_materialized_sequence"])
+
+    def test_telemetry_summary_reports_journal_paths(self) -> None:
+        telemetry = TelemetrySink(self.base / "telemetry")
+
+        summary = telemetry.summary()
+
+        self.assertEqual(str(telemetry.journal_path), summary["journal_path"])
+        self.assertEqual(str(telemetry.state_path), summary["telemetry_state_path"])
+
     def test_store_enables_sqlite_wal_and_busy_timeout(self) -> None:
         store = SQLiteHarnessStore(self.base / "harness.db")
         store.initialize()

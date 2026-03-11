@@ -138,6 +138,7 @@ Explanation commands use the configured LLM executor over read-only evidence pac
 Telemetry includes:
 
 - JSONL metrics and spans under `.accruvia-harness/telemetry`
+- a durable telemetry journal plus replay state for crash recovery
 - timing metrics for planning, work, analysis, decision, and promotion
 - optional OpenTelemetry export
 - LLM cost/token/latency rollups when executors emit metadata

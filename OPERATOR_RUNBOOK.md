@@ -71,6 +71,7 @@ Generated state lives under `.accruvia-harness/` and should not be committed:
 
 - database
 - logs
+- telemetry journal and replay state
 - workspace artifacts
 
 If local state becomes confusing during development:
@@ -79,6 +80,110 @@ If local state becomes confusing during development:
 rm -rf .accruvia-harness
 PYTHONPATH=src python3 -m accruvia_harness init-db
 ```
+
+## Telemetry Durability
+
+Telemetry is journal-first:
+
+- `.accruvia-harness/telemetry/journal.jsonl` is the durable append log
+- metrics, spans, and warnings are materialized views
+- replay state lives in `.accruvia-harness/telemetry/telemetry_state.json`
+
+If the process crashes mid-run, the next telemetry read or process startup replays unapplied journal entries.
+
+To inspect telemetry health:
+
+```bash
+PYTHONPATH=src python3 -m accruvia_harness telemetry-report
+```
+
+Watch for:
+
+- `journal_backlog`
+- `otel_warning`
+- repeated export warnings in `warnings`
+
+## Localized Trial Checklist
+
+Review these before using the harness against a private workload:
+
+1. Exact private repo adapter behavior
+2. Worker command and environment exposure for that repo
+3. Promotion rules for that workload
+4. Timeout and resource defaults for realistic tasks
+5. Observer channels and notification noise
+6. Backup and retention for `.accruvia-harness/`
+7. Trial runbook steps below
+
+## Trial Runbook
+
+### Start
+
+```bash
+make init
+make test-fast
+make test-temporal
+PYTHONPATH=src python3 -m accruvia_harness init-db
+PYTHONPATH=src python3 -m accruvia_harness config
+```
+
+### Stop
+
+- stop any local worker process cleanly
+- stop any Temporal worker cleanly
+- ensure no unexpected active leases remain in `status`
+
+### Recover stale state
+
+Stale state is recovered automatically on startup by `init-db` and any normal store initialization path.
+
+To force a clean process restart:
+
+```bash
+PYTHONPATH=src python3 -m accruvia_harness init-db
+PYTHONPATH=src python3 -m accruvia_harness status
+```
+
+### Inspect blocked tasks
+
+```bash
+PYTHONPATH=src python3 -m accruvia_harness summary
+PYTHONPATH=src python3 -m accruvia_harness dashboard-report
+PYTHONPATH=src python3 -m accruvia_harness task-report <task_id>
+PYTHONPATH=src python3 -m accruvia_harness events --entity-type task --entity-id <task_id>
+```
+
+### Rerun safely
+
+- verify the task is `pending` or explicitly requeued
+- review the latest run, evaluation, decision, and promotion records first
+- if Temporal/runtime behavior changed, rerun `make test-temporal` before retrying real work
+
+Preferred rerun path:
+
+```bash
+PYTHONPATH=src python3 -m accruvia_harness run-until-stable <task_id>
+```
+
+Or queue-driven:
+
+```bash
+PYTHONPATH=src python3 -m accruvia_harness process-next --worker-id worker-a --lease-seconds 300
+```
+
+## Backup And Retention
+
+Before a localized trial, back up `.accruvia-harness/` periodically, especially:
+
+- `harness.db`
+- `telemetry/journal.jsonl`
+- `workspace/` if you need retained artifacts
+
+At minimum:
+
+- snapshot before schema/runtime changes
+- snapshot before trial start
+- snapshot after any blocked or failed production-like incident
 
 ## What To Check When Something Breaks
 
