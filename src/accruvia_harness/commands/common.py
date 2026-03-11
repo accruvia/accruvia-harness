@@ -14,6 +14,7 @@ from ..project_adapters import build_project_adapter_registry
 from ..runtime import WorkflowRuntime, build_runtime
 from ..store import SQLiteHarnessStore
 from ..telemetry import TelemetrySink
+from ..validation import build_validator_registry
 from ..llm import build_llm_router
 from ..workers import build_worker_from_config
 
@@ -42,6 +43,7 @@ def build_context(config: HarnessConfig) -> CLIContext:
         store=store,
         workspace_root=config.workspace_root,
         project_adapter_registry=build_project_adapter_registry(config.project_adapter_modules),
+        validator_registry=build_validator_registry(config.validator_modules),
         telemetry=telemetry,
     )
     engine.set_llm_router(build_llm_router(config))

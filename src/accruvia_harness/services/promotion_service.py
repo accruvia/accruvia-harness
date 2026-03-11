@@ -6,7 +6,7 @@ from pathlib import Path
 from ..domain import Event, PromotionRecord, PromotionStatus, RunStatus, TaskStatus, new_id
 from ..llm import LLMInvocation, LLMRouter, parse_affirmation_response
 from ..store import SQLiteHarnessStore
-from ..validation import PromotionValidator, ValidationIssue, default_promotion_validators
+from ..validation import PromotionValidator, PromotionValidatorRegistry, ValidationIssue, default_promotion_validators
 from .task_service import TaskService
 
 
@@ -23,19 +23,25 @@ class PromotionService:
         task_service: TaskService,
         workspace_root: Path,
         validators: list[PromotionValidator] | None = None,
+        validator_registry: PromotionValidatorRegistry | None = None,
         llm_router: LLMRouter | None = None,
     ) -> None:
         self.store = store
         self.task_service = task_service
         self.workspace_root = workspace_root
         self.validators = validators
+        self.validator_registry = validator_registry
         self.llm_router = llm_router
 
     def review_task(self, task_id: str, run_id: str | None = None, create_follow_on: bool = True) -> PromotionReviewResult:
         task = self.store.get_task(task_id)
         if task is None:
             raise ValueError(f"Unknown task: {task_id}")
-        validators = self.validators or default_promotion_validators(task.validation_profile)
+        validators = self.validators or (
+            self.validator_registry.validators_for_profile(task.validation_profile)
+            if self.validator_registry is not None
+            else default_promotion_validators(task.validation_profile)
+        )
         run = self._select_run(task_id, run_id)
         if run.status != RunStatus.COMPLETED:
             raise ValueError(f"Run {run.id} is not promotion-eligible")
@@ -223,6 +229,80 @@ class PromotionService:
         )
         return PromotionReviewResult(promotion=promotion, follow_on_task_id=follow_on_task_id)
 
+    def rereview_task(
+        self,
+        task_id: str,
+        remediation_task_id: str,
+        remediation_run_id: str | None = None,
+        base_promotion_id: str | None = None,
+        create_follow_on: bool = True,
+    ) -> PromotionReviewResult:
+        task = self.store.get_task(task_id)
+        if task is None:
+            raise ValueError(f"Unknown task: {task_id}")
+        remediation_task = self.store.get_task(remediation_task_id)
+        if remediation_task is None:
+            raise ValueError(f"Unknown remediation task: {remediation_task_id}")
+        base_promotion = self._select_promotion(task_id, promotion_id=base_promotion_id) if base_promotion_id else self.store.latest_promotion(task_id)
+        validators = self.validators or (
+            self.validator_registry.validators_for_profile(task.validation_profile)
+            if self.validator_registry is not None
+            else default_promotion_validators(task.validation_profile)
+        )
+        run = self._select_run(remediation_task_id, remediation_run_id)
+        artifacts = self.store.list_artifacts(run.id)
+        results = [validator.validate(task, artifacts) for validator in validators]
+        issues = [issue for result in results for issue in result.issues]
+        if not issues:
+            promotion = PromotionRecord(
+                id=new_id("promotion"),
+                task_id=task.id,
+                run_id=run.id,
+                status=PromotionStatus.PENDING,
+                summary="Remediation candidate passed deterministic gates; awaiting LLM affirmation.",
+                details={
+                    "validators": [self._serialize_result(result) for result in results],
+                    "affirmation_required": True,
+                    "review_mode": "rereview",
+                    "base_promotion_id": base_promotion.id if base_promotion else None,
+                    "remediation_task_id": remediation_task_id,
+                    "remediation_run_id": run.id,
+                },
+            )
+            self.store.create_promotion(promotion)
+            return PromotionReviewResult(promotion=promotion, follow_on_task_id=None)
+        follow_on_task_id: str | None = None
+        if create_follow_on:
+            existing = self.store.find_follow_on_task(remediation_task.id, run.id)
+            if existing is not None:
+                follow_on_task_id = existing.id
+            else:
+                title, objective = self._follow_on_from_issues(task.title, issues)
+                follow_on = self.task_service.create_follow_on_task(
+                    parent_task_id=remediation_task.id,
+                    source_run_id=run.id,
+                    title=title,
+                    objective=objective,
+                )
+                follow_on_task_id = follow_on.id
+        promotion = PromotionRecord(
+            id=new_id("promotion"),
+            task_id=task.id,
+            run_id=run.id,
+            status=PromotionStatus.REJECTED,
+            summary="Remediation candidate failed re-review.",
+            details={
+                "validators": [self._serialize_result(result) for result in results],
+                "review_mode": "rereview",
+                "base_promotion_id": base_promotion.id if base_promotion else None,
+                "remediation_task_id": remediation_task_id,
+                "remediation_run_id": run.id,
+                "follow_on_task_id": follow_on_task_id,
+            },
+        )
+        self.store.create_promotion(promotion)
+        return PromotionReviewResult(promotion=promotion, follow_on_task_id=follow_on_task_id)
+
     def _select_run(self, task_id: str, run_id: str | None):
         if run_id is not None:
             run = self.store.get_run(run_id)
@@ -293,6 +373,7 @@ class PromotionService:
     ) -> str:
         validator_summaries = promotion.details.get("validators", [])
         artifact_lines = "\n".join(f"- {artifact.kind}: {artifact.path}" for artifact in artifacts)
+        artifact_contents = self._artifact_contents(artifacts)
         return (
             "You are affirming a promotion decision after deterministic validation has already run.\n"
             "Decide whether the candidate should be promoted.\n"
@@ -304,6 +385,7 @@ class PromotionService:
             f"Run ID: {promotion.run_id}\n"
             f"Validator Results: {validator_summaries}\n"
             f"Artifacts:\n{artifact_lines}\n"
+            f"Artifact Contents:\n{artifact_contents}\n"
         )
 
     def _affirmation_run_dir(self, run_id: str):
@@ -313,9 +395,27 @@ class PromotionService:
         return self.workspace_root / "runs" / run.id / "promotion_affirmation"
 
     def _follow_on_from_issues(self, task_title: str, issues: list[ValidationIssue]) -> tuple[str, str]:
-        first = issues[0]
-        return (
-            first.follow_on_title or f"Resolve promotion failure for {task_title}",
-            first.follow_on_objective
-            or "Address the promotion validation failures recorded for the rejected candidate and regenerate it.",
-        )
+        if not issues:
+            return (
+                f"Resolve promotion failure for {task_title}",
+                "Address the promotion validation failures recorded for the rejected candidate and regenerate it.",
+            )
+        title = issues[0].follow_on_title or f"Resolve promotion failure for {task_title}"
+        objectives = [issue.follow_on_objective or issue.summary for issue in issues]
+        objective_lines = "\n".join(f"- {item}" for item in objectives)
+        return (title, f"Address all recorded promotion issues:\n{objective_lines}")
+
+    def _artifact_contents(self, artifacts) -> str:
+        sections: list[str] = []
+        for artifact in artifacts:
+            if artifact.kind not in {"report", "plan"}:
+                continue
+            path = Path(artifact.path)
+            try:
+                content = path.read_text(encoding="utf-8")
+            except OSError as exc:
+                content = f"<unreadable: {exc}>"
+            if len(content) > 4000:
+                content = content[:4000] + "\n...<truncated>"
+            sections.append(f"## {artifact.kind}: {artifact.path}\n{content}")
+        return "\n\n".join(sections) if sections else "<no readable artifact contents>"

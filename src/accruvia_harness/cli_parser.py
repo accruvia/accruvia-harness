@@ -121,6 +121,13 @@ def build_parser() -> argparse.ArgumentParser:
     affirm.add_argument("--promotion-id")
     affirm.add_argument("--no-follow-on", action="store_true")
 
+    rereview = subparsers.add_parser("rereview-promotion", help="Re-review a previously failed promotion using a remediation task run.")
+    rereview.add_argument("task_id")
+    rereview.add_argument("remediation_task_id")
+    rereview.add_argument("--remediation-run-id")
+    rereview.add_argument("--base-promotion-id")
+    rereview.add_argument("--no-follow-on", action="store_true")
+
     smoke = subparsers.add_parser("smoke-test", help="Run a local end-to-end smoke test from project creation through task completion.")
     smoke.add_argument("--project-name", default="smoke-project")
     smoke.add_argument("--task-title", default="Smoke task")

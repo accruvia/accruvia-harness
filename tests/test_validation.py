@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +15,7 @@ from accruvia_harness.validation import (
     RequiredArtifactsValidator,
     TerraformValidationValidator,
     TestEvidenceValidator,
+    build_validator_registry,
     validators_for_profile,
 )
 
@@ -147,3 +149,29 @@ class DeterministicValidationTests(unittest.TestCase):
         self.assertIn("PythonTestFileValidator", python_validators)
         self.assertIn("JavaScriptTestFileValidator", javascript_validators)
         self.assertIn("TerraformValidationValidator", terraform_validators)
+
+    def test_validator_registry_can_load_external_module(self) -> None:
+        plugin_root = self.base / "plugins"
+        plugin_root.mkdir()
+        module_path = plugin_root / "private_validator.py"
+        module_path.write_text(
+            "from accruvia_harness.validation.base import ValidationIssue, ValidationResult\n\n"
+            "class ExtraValidator:\n"
+            "    def validate(self, task, artifacts):\n"
+            "        return ValidationResult(\n"
+            "            'extra_validator',\n"
+            "            False,\n"
+            "            'extra failed',\n"
+            "            [ValidationIssue('extra_issue', 'extra summary', {'task_id': task.id})],\n"
+            "        )\n\n"
+            "def register_validators(registry):\n"
+            "    registry.register_profile_factory(lambda profile: [ExtraValidator()] if profile == 'generic' else [])\n",
+            encoding="utf-8",
+        )
+        sys.path.insert(0, str(plugin_root))
+        self.addCleanup(lambda: sys.path.remove(str(plugin_root)))
+
+        registry = build_validator_registry(("private_validator",))
+        validators = registry.validators_for_profile("generic")
+
+        self.assertIn("ExtraValidator", [validator.__class__.__name__ for validator in validators])

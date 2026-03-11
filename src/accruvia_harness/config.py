@@ -26,6 +26,7 @@ class HarnessConfig:
     llm_accruvia_client_command: str | None
     adapter_modules: tuple[str, ...] = field(default_factory=tuple)
     project_adapter_modules: tuple[str, ...] = field(default_factory=tuple)
+    validator_modules: tuple[str, ...] = field(default_factory=tuple)
     telemetry_dir: Path = Path(".accruvia-harness/telemetry")
     timeout_ema_alpha: float = 0.5
     timeout_min_seconds: int = 30
@@ -75,6 +76,11 @@ class HarnessConfig:
             project_adapter_modules=tuple(
                 item.strip()
                 for item in os.environ.get("ACCRUVIA_PROJECT_ADAPTER_MODULES", "").split(",")
+                if item.strip()
+            ),
+            validator_modules=tuple(
+                item.strip()
+                for item in os.environ.get("ACCRUVIA_VALIDATOR_MODULES", "").split(",")
                 if item.strip()
             ),
             timeout_ema_alpha=float(os.environ.get("ACCRUVIA_TIMEOUT_EMA_ALPHA", "0.5")),

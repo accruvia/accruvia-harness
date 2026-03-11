@@ -10,6 +10,7 @@ from accruvia_harness.domain import Project, new_id
 from accruvia_harness.engine import HarnessEngine
 from accruvia_harness.llm import build_llm_router
 from accruvia_harness.policy import WorkResult
+from accruvia_harness.services.promotion_service import PromotionService
 from accruvia_harness.project_adapters import ProjectAdapterRegistry
 from accruvia_harness.workers import LocalArtifactWorker
 from accruvia_harness.store import SQLiteHarnessStore
@@ -576,6 +577,111 @@ class HarnessEngineTests(unittest.TestCase):
         self.assertEqual("rejected", result.promotion.status.value)
         validator_names = [entry["validator"] for entry in result.promotion.details["validators"]]
         self.assertIn("test_evidence", validator_names)
+
+    def test_affirmation_prompt_includes_report_contents(self) -> None:
+        task = self.engine.create_task_with_policy(
+            project_id=self.project_id,
+            title="Prompt contents",
+            objective="Expose report contents to affirmation",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+        run = self.engine.run_once(task.id)
+        review = self.engine.review_promotion(task.id, run.id)
+        service = PromotionService(self.store, self.engine.tasks, Path(self.temp_dir.name) / "workspace-prompt")
+        prompt = service._build_affirmation_prompt(task, review.promotion, self.store.list_artifacts(run.id))
+
+        self.assertIn('"changed_files"', prompt)
+        self.assertIn("Artifact Contents:", prompt)
+
+    def test_follow_on_objective_aggregates_multiple_issues(self) -> None:
+        class MultiIssueWorker(LocalArtifactWorker):
+            def work(self, task, run, workspace_root: Path) -> WorkResult:  # type: ignore[override]
+                run_dir = workspace_root / "runs" / run.id
+                run_dir.mkdir(parents=True, exist_ok=True)
+                (run_dir / "plan.txt").write_text("plan\n", encoding="utf-8")
+                (run_dir / "report.json").write_text(json.dumps({}), encoding="utf-8")
+                return WorkResult(
+                    summary="multiple issues",
+                    artifacts=[
+                        ("plan", str(run_dir / "plan.txt"), "Plan"),
+                        ("report", str(run_dir / "report.json"), "Report"),
+                    ],
+                )
+
+        engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-multi-issue",
+            worker=MultiIssueWorker(),
+        )
+        task = engine.create_task_with_policy(
+            project_id=self.project_id,
+            title="Multi issue",
+            objective="Exercise multiple validation issues",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+        run = engine.run_once(task.id)
+        result = engine.review_promotion(task.id, run.id)
+        follow_on = self.store.get_task(result.follow_on_task_id) if result.follow_on_task_id else None
+
+        self.assertIsNotNone(follow_on)
+        assert follow_on is not None
+        self.assertIn("- ", follow_on.objective)
+        self.assertIn("changed source and test files", follow_on.objective.lower())
+        self.assertIn("compile", follow_on.objective.lower())
+
+    def test_rereview_promotion_uses_remediation_run(self) -> None:
+        engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-rereview",
+            worker=PromotionBlockedWorker(),
+        )
+        task = engine.create_task_with_policy(
+            project_id=self.project_id,
+            title="Needs remediation",
+            objective="Fail first review",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+        failed_run = engine.run_once(task.id)
+        failed_review = engine.review_promotion(task.id, failed_run.id)
+        remediation_task = self.store.get_task(failed_review.follow_on_task_id)
+        assert remediation_task is not None
+
+        remediation_engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-rereview-remediation",
+        )
+        remediation_run = remediation_engine.run_once(remediation_task.id)
+        rereview = remediation_engine.rereview_promotion(
+            task.id,
+            remediation_task_id=remediation_task.id,
+            remediation_run_id=remediation_run.id,
+            base_promotion_id=failed_review.promotion.id,
+        )
+
+        self.assertEqual("pending", rereview.promotion.status.value)
+        self.assertEqual("rereview", rereview.promotion.details["review_mode"])
+        self.assertEqual(remediation_task.id, rereview.promotion.details["remediation_task_id"])
 
     def test_affirm_promotion_rejects_pending_candidate(self) -> None:
         config = HarnessConfig(

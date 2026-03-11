@@ -33,6 +33,7 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
             "llm_accruvia_client_command": config.llm_accruvia_client_command,
             "adapter_modules": list(config.adapter_modules),
             "project_adapter_modules": list(config.project_adapter_modules),
+            "validator_modules": list(config.validator_modules),
             "timeout_ema_alpha": config.timeout_ema_alpha,
             "timeout_min_seconds": config.timeout_min_seconds,
             "timeout_max_seconds": config.timeout_max_seconds,
@@ -87,6 +88,16 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
             args.task_id,
             run_id=args.run_id,
             promotion_id=args.promotion_id,
+            create_follow_on=not args.no_follow_on,
+        )
+        emit({"promotion": serialize_dataclass(result.promotion), "follow_on_task_id": result.follow_on_task_id})
+        return True
+    if args.command == "rereview-promotion":
+        result = engine.rereview_promotion(
+            args.task_id,
+            remediation_task_id=args.remediation_task_id,
+            remediation_run_id=args.remediation_run_id,
+            base_promotion_id=args.base_promotion_id,
             create_follow_on=not args.no_follow_on,
         )
         emit({"promotion": serialize_dataclass(result.promotion), "follow_on_task_id": result.follow_on_task_id})

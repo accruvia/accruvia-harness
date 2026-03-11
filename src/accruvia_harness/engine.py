@@ -16,6 +16,7 @@ from .services import (
     TaskService,
 )
 from .store import SQLiteHarnessStore
+from .validation import PromotionValidatorRegistry, build_validator_registry
 from .workers import LocalArtifactWorker, WorkerBackend
 
 
@@ -30,6 +31,7 @@ class HarnessEngine:
         decider: DefaultDecider | None = None,
         llm_router: LLMRouter | None = None,
         project_adapter_registry: ProjectAdapterRegistry | None = None,
+        validator_registry: PromotionValidatorRegistry | None = None,
         telemetry=None,
     ) -> None:
         self.store = store
@@ -41,6 +43,7 @@ class HarnessEngine:
         self.decider = decider or DefaultDecider()
         self.llm_router = llm_router
         self.project_adapter_registry = project_adapter_registry or build_project_adapter_registry()
+        self.validator_registry = validator_registry or build_validator_registry()
         self.telemetry = telemetry
 
         self.tasks = TaskService(self.store)
@@ -60,7 +63,13 @@ class HarnessEngine:
         self.queue = QueueService(self.store, self.runs)
         self.github_tasks = GitHubTaskService(self.tasks, self.store)
         self.gitlab_tasks = GitLabTaskService(self.tasks, self.store)
-        self.promotions = PromotionService(self.store, self.tasks, self.workspace_root, llm_router=self.llm_router)
+        self.promotions = PromotionService(
+            self.store,
+            self.tasks,
+            self.workspace_root,
+            validator_registry=self.validator_registry,
+            llm_router=self.llm_router,
+        )
 
     def set_worker(self, worker: WorkerBackend) -> None:
         self.worker = worker
@@ -350,5 +359,21 @@ class HarnessEngine:
             task_id=task_id,
             run_id=run_id,
             promotion_id=promotion_id,
+            create_follow_on=create_follow_on,
+        )
+
+    def rereview_promotion(
+        self,
+        task_id: str,
+        remediation_task_id: str,
+        remediation_run_id: str | None = None,
+        base_promotion_id: str | None = None,
+        create_follow_on: bool = True,
+    ):
+        return self.promotions.rereview_task(
+            task_id=task_id,
+            remediation_task_id=remediation_task_id,
+            remediation_run_id=remediation_run_id,
+            base_promotion_id=base_promotion_id,
             create_follow_on=create_follow_on,
         )

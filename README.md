@@ -115,6 +115,7 @@ This repo now contains a minimal durable harness foundation:
 - task lineage via `parent_task_id` and `source_run_id`
 - a GitHub adapter for importing issues and reporting results back out
 - a project adapter registry for preparing per-run workspaces without hardcoding private repo logic
+- a validator registry for built-in and externally supplied promotion validators
 - worker backends for `local`, `shell`, `agent`, and routed `llm`
 - an LLM executor/router layer that can choose local CLI tools or `accruvia-client`
 - an adapter registry for built-in workload adapters plus externally supplied adapter modules
@@ -151,6 +152,9 @@ PYTHONPATH=src python3 -m accruvia_harness summary
 PYTHONPATH=src python3 -m accruvia_harness context-packet
 PYTHONPATH=src python3 -m accruvia_harness ops-report
 PYTHONPATH=src python3 -m accruvia_harness telemetry-report
+PYTHONPATH=src python3 -m accruvia_harness review-promotion <task_id>
+PYTHONPATH=src python3 -m accruvia_harness affirm-promotion <task_id>
+PYTHONPATH=src python3 -m accruvia_harness rereview-promotion <task_id> <remediation_task_id>
 PYTHONPATH=src python3 -m accruvia_harness task-report <task_id>
 PYTHONPATH=src python3 -m accruvia_harness events
 ```
@@ -198,6 +202,30 @@ def register_adapters(registry) -> None:
 ```
 
 That keeps the harness core generic while letting each project define its own workspace setup, evidence generation, and validation expectations.
+
+### Validator Modules
+
+Promotion validators are now pluggable.
+
+- built-in validators live in this repo
+- project-specific promotion gates should usually live outside this repo
+- external validator modules are loaded with `ACCRUVIA_VALIDATOR_MODULES`
+
+Example:
+
+```bash
+export ACCRUVIA_VALIDATOR_MODULES='my_private_project.harness_validators'
+PYTHONPATH=src python3 -m accruvia_harness config
+```
+
+External validator modules are expected to expose:
+
+```python
+def register_validators(registry) -> None:
+    ...
+```
+
+They can register additional validators for one or more validation profiles without editing the harness source.
 
 ### Project Adapters
 
