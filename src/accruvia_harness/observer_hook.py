@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-import threading
+from concurrent.futures import ThreadPoolExecutor
 import urllib.error
 import urllib.request
 
@@ -20,6 +20,9 @@ NOTIFY_EVENT_TYPES = frozenset({
     "run_blocked",
 })
 
+# Bounded pool prevents unbounded thread accumulation when the observer is slow/down.
+_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="observer-hook")
+
 
 def notify_observer(webhook_url: str, event_type: str, entity_type: str, entity_id: str, payload: dict) -> None:
     """POST an event to the observer webhook. Non-blocking, fire-and-forget."""
@@ -31,8 +34,7 @@ def notify_observer(webhook_url: str, event_type: str, entity_type: str, entity_
         "entity_id": entity_id,
         "payload": payload,
     }
-    thread = threading.Thread(target=_post_event, args=(webhook_url, event), daemon=True)
-    thread.start()
+    _pool.submit(_post_event, webhook_url, event)
 
 
 def _post_event(url: str, event: dict) -> None:

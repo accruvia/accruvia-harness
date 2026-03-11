@@ -4,7 +4,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..domain import (
+    Artifact,
+    Decision,
     DecisionAction,
+    Evaluation,
+    EvaluationVerdict,
     Event,
     Run,
     RunStatus,
@@ -111,7 +115,6 @@ class BranchService:
 
             work = self.worker.work(task, run, self.workspace_root)
             for kind, path, summary in work.artifacts:
-                from ..domain import Artifact
                 artifact = Artifact(id=new_id("artifact"), run_id=run.id, kind=kind, path=path, summary=summary)
                 self.store.create_artifact(artifact)
 
@@ -122,7 +125,6 @@ class BranchService:
             else:
                 analysis = self.analyzer.analyze(task, run, self.store.list_artifacts(run.id))
 
-            from ..domain import Evaluation
             evaluation = Evaluation(
                 id=new_id("evaluation"),
                 run_id=run.id,
@@ -133,7 +135,7 @@ class BranchService:
             )
             self.store.create_evaluation(evaluation)
 
-            final_status = RunStatus.COMPLETED if analysis.verdict == "acceptable" else RunStatus.FAILED
+            final_status = RunStatus.COMPLETED if analysis.verdict == EvaluationVerdict.ACCEPTABLE else RunStatus.FAILED
             run = self.store.mark_run(run, final_status, analysis.summary)
             runs.append(run)
 
@@ -214,7 +216,6 @@ class BranchService:
                 )
             )
 
-        from ..domain import Decision
         decision = Decision(
             id=new_id("decision"),
             run_id=winner.id,

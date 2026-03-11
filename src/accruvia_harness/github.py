@@ -1,13 +1,24 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from typing import Callable
 
 from .issues import ExternalIssue
 
+logger = logging.getLogger(__name__)
+
+
 def _default_runner(args: list[str]) -> str:
-    completed = subprocess.run(args, check=True, capture_output=True, text=True)
+    try:
+        completed = subprocess.run(args, check=True, capture_output=True, text=True, timeout=30)
+    except FileNotFoundError:
+        raise RuntimeError("GitHub CLI (gh) not found. Is it installed and on PATH?")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"GitHub CLI command timed out: {' '.join(args[:3])}")
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(f"GitHub CLI failed (exit {exc.returncode}): {exc.stderr[:500]}") from exc
     return completed.stdout
 
 

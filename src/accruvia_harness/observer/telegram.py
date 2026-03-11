@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -39,6 +40,7 @@ class TelegramAdapter:
         self.poll_timeout = poll_timeout
         self._offset: int = 0
         self._running = False
+        self._message_lock = threading.Lock()
 
     def _api_call(self, method: str, payload: dict | None = None) -> dict:
         url = TELEGRAM_API.format(token=self.bot_token, method=method)
@@ -91,12 +93,28 @@ class TelegramAdapter:
         if text.startswith("/"):
             self._handle_command(chat_id, text, message_id)
             return
-        # Send typing indicator
+        # Process in a background thread so LLM latency doesn't block polling
+        thread = threading.Thread(
+            target=self._answer_question,
+            args=(chat_id, text, message_id),
+            daemon=True,
+        )
+        thread.start()
+
+    def _answer_question(self, chat_id: int, text: str, message_id: int) -> None:
+        """Ask the agent and reply. Runs in a background thread."""
         try:
             self._api_call("sendChatAction", {"chat_id": chat_id, "action": "typing"})
         except (urllib.error.URLError, OSError):
             pass
-        response = self.agent.ask(text)
+        # Serialize LLM calls so we don't overwhelm the backend
+        with self._message_lock:
+            try:
+                response = self.agent.ask(text)
+            except Exception:
+                logger.exception("Agent.ask() failed for chat %s", chat_id)
+                self._send_message(chat_id, "Internal error processing your question.", reply_to=message_id)
+                return
         if response.error:
             reply = f"Error: {response.error}"
         else:

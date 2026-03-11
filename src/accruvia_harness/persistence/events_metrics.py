@@ -3,8 +3,12 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
+import logging
+
 from .common import event_from_row
 from ..domain import Event
+
+logger = logging.getLogger(__name__)
 
 
 class EventsMetricsStoreMixin:
@@ -24,8 +28,11 @@ class EventsMetricsStoreMixin:
                 ),
             )
         if self.observer_webhook_url:
-            from ..observer_hook import notify_observer
-            notify_observer(self.observer_webhook_url, event.event_type, event.entity_type, event.entity_id, event.payload)
+            try:
+                from ..observer_hook import notify_observer
+                notify_observer(self.observer_webhook_url, event.event_type, event.entity_type, event.entity_id, event.payload)
+            except Exception as exc:
+                logger.warning("Observer notification failed (non-fatal): %s", exc)
 
     def list_events(self, entity_type: str | None = None, entity_id: str | None = None) -> list[Event]:
         query = "SELECT id, entity_type, entity_id, event_type, payload_json, created_at FROM events"
