@@ -5,6 +5,7 @@ from .gitlab_task_service import GitLabTaskService
 from .promotion_service import PromotionReviewResult, PromotionService
 from .queue_service import QueueService
 from .run_service import RunService
+from .supervisor_service import SupervisorResult, SupervisorService
 from .task_service import TaskService
 
 __all__ = [
@@ -17,6 +18,8 @@ __all__ = [
     "PromotionService",
     "QueueService",
     "RunService",
+    "SupervisorResult",
+    "SupervisorService",
     "TaskService",
     "WinnerResult",
 ]

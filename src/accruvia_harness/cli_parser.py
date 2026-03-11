@@ -50,6 +50,21 @@ def build_parser() -> argparse.ArgumentParser:
     process_queue.add_argument("--worker-id", default="local-worker")
     process_queue.add_argument("--lease-seconds", type=int, default=300)
 
+    supervise = subparsers.add_parser(
+        "supervise",
+        help="Advance the queue until idle, optionally watching for new work and scheduled heartbeats.",
+    )
+    supervise.add_argument("--project-id")
+    supervise.add_argument("--worker-id", default="supervisor")
+    supervise.add_argument("--lease-seconds", type=int, default=300)
+    supervise.add_argument("--watch", action="store_true")
+    supervise.add_argument("--idle-sleep-seconds", type=float, default=30.0)
+    supervise.add_argument("--max-idle-cycles", type=int)
+    supervise.add_argument("--max-iterations", type=int)
+    supervise.add_argument("--heartbeat-project-id", action="append", dest="heartbeat_project_ids", default=None)
+    supervise.add_argument("--heartbeat-interval-seconds", type=float)
+    supervise.add_argument("--heartbeat-all-projects", action="store_true")
+
     runtime_run = subparsers.add_parser("run-runtime", help="Run a task through the configured workflow runtime backend.")
     runtime_run.add_argument("task_id")
 

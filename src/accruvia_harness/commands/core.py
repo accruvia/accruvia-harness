@@ -93,6 +93,24 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
         results = engine.process_queue(args.limit, args.project_id, worker_id=args.worker_id, lease_seconds=args.lease_seconds)
         emit({"processed": [{"task": serialize_dataclass(i["task"]), "runs": [serialize_dataclass(r) for r in i["runs"]]} for i in results]})
         return True
+    if args.command == "supervise":
+        max_idle_cycles = args.max_idle_cycles
+        if max_idle_cycles is None:
+            max_idle_cycles = None if args.watch else 1
+        result = engine.supervise(
+            project_id=args.project_id,
+            worker_id=args.worker_id,
+            lease_seconds=args.lease_seconds,
+            watch=args.watch,
+            idle_sleep_seconds=args.idle_sleep_seconds,
+            max_idle_cycles=max_idle_cycles,
+            max_iterations=args.max_iterations,
+            heartbeat_project_ids=args.heartbeat_project_ids,
+            heartbeat_interval_seconds=args.heartbeat_interval_seconds,
+            heartbeat_all_projects=args.heartbeat_all_projects,
+        )
+        emit(serialize_dataclass(result))
+        return True
     if args.command == "review-promotion":
         result = engine.review_promotion(args.task_id, run_id=args.run_id, create_follow_on=not args.no_follow_on)
         emit({"promotion": serialize_dataclass(result.promotion), "follow_on_task_id": result.follow_on_task_id})

@@ -18,6 +18,7 @@ from .services import (
     PromotionService,
     QueueService,
     RunService,
+    SupervisorService,
     TaskService,
 )
 from .store import SQLiteHarnessStore
@@ -90,6 +91,7 @@ class HarnessEngine:
             llm_router=self.llm_router,
             telemetry=self.telemetry,
         )
+        self.supervisor = SupervisorService(self.store, self.queue, self.cognition)
         self.promotions = PromotionService(
             self.store,
             self.tasks,
@@ -192,6 +194,32 @@ class HarnessEngine:
 
     def heartbeat(self, project_id: str):
         return self.cognition.heartbeat(project_id)
+
+    def supervise(
+        self,
+        project_id: str | None = None,
+        worker_id: str = "supervisor",
+        lease_seconds: int = 300,
+        watch: bool = False,
+        idle_sleep_seconds: float = 30.0,
+        max_idle_cycles: int | None = 1,
+        max_iterations: int | None = None,
+        heartbeat_project_ids: list[str] | None = None,
+        heartbeat_interval_seconds: float | None = None,
+        heartbeat_all_projects: bool = False,
+    ):
+        return self.supervisor.run(
+            project_id=project_id,
+            worker_id=worker_id,
+            lease_seconds=lease_seconds,
+            watch=watch,
+            idle_sleep_seconds=idle_sleep_seconds,
+            max_idle_cycles=max_idle_cycles,
+            max_iterations=max_iterations,
+            heartbeat_project_ids=heartbeat_project_ids,
+            heartbeat_interval_seconds=heartbeat_interval_seconds,
+            heartbeat_all_projects=heartbeat_all_projects,
+        )
 
     def import_issue_task(
         self,

@@ -108,6 +108,33 @@ class CLITests(unittest.TestCase):
         self.assertEqual("javascript", payload["validation_profile"])
         self.assertEqual("node_test", payload["test_check"]["framework"])
 
+    def test_supervise_drains_queue_until_idle(self) -> None:
+        project = self.run_cli("create-project", "supervisor", "supervisor project")["project"]
+        high = self.run_cli(
+            "create-task",
+            project["id"],
+            "High",
+            "High priority",
+            "--priority",
+            "300",
+        )["task"]
+        low = self.run_cli(
+            "create-task",
+            project["id"],
+            "Low",
+            "Low priority",
+            "--priority",
+            "100",
+        )["task"]
+
+        result = self.run_cli("supervise", "--project-id", project["id"], "--worker-id", "supervisor-a")
+        summary = self.run_cli("summary", "--project-id", project["id"])
+
+        self.assertEqual(2, result["processed_count"])
+        self.assertEqual([high["id"], low["id"]], result["processed_task_ids"])
+        self.assertEqual("idle", result["exit_reason"])
+        self.assertEqual(2, summary["metrics"]["tasks_by_status"]["completed"])
+
     def test_terraform_profile_runs_end_to_end_through_review(self) -> None:
         project = self.run_cli("create-project", "tf", "terraform project")["project"]
         task = self.run_cli(
