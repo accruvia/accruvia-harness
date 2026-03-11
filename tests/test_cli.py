@@ -89,7 +89,29 @@ class CLITests(unittest.TestCase):
         artifact_report = next(item for item in report["runs"][0]["artifacts"] if item["kind"] == "report")
         payload = json.loads(Path(artifact_report["path"]).read_text(encoding="utf-8"))
         self.assertEqual("javascript", payload["validation_profile"])
-        self.assertEqual("jest_stub", payload["test_check"]["framework"])
+        self.assertEqual("node_test", payload["test_check"]["framework"])
+
+    def test_terraform_profile_runs_end_to_end_through_review(self) -> None:
+        project = self.run_cli("create-project", "tf", "terraform project")["project"]
+        task = self.run_cli(
+            "create-task",
+            project["id"],
+            "Task TF",
+            "Objective TF",
+            "--validation-profile",
+            "terraform",
+        )["task"]
+
+        self.run_cli("run-once", task["id"])
+        review = self.run_cli("review-promotion", task["id"])
+        report = self.run_cli("task-report", task["id"])
+
+        self.assertEqual("pending", review["promotion"]["status"])
+        artifact_report = next(item for item in report["runs"][0]["artifacts"] if item["kind"] == "report")
+        payload = json.loads(Path(artifact_report["path"]).read_text(encoding="utf-8"))
+        self.assertEqual("terraform", payload["validation_profile"])
+        self.assertIn("terraform_validate", payload)
+        self.assertTrue(payload["terraform_validate"]["passed"])
 
     def test_review_then_affirm_promotion_commands_record_final_approval(self) -> None:
         project = self.run_cli("create-project", "promotion", "promotion project")["project"]

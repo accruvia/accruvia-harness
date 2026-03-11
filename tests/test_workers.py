@@ -54,8 +54,8 @@ class WorkerTests(unittest.TestCase):
         report_path = self.base / "runs" / self.run.id / "report.json"
         payload = json.loads(report_path.read_text(encoding="utf-8"))
         self.assertEqual("javascript", payload["validation_profile"])
-        self.assertTrue(payload["test_files"][0].endswith(".test.ts"))
-        self.assertEqual("jest_stub", payload["test_check"]["framework"])
+        self.assertTrue(payload["test_files"][0].endswith(".test.js"))
+        self.assertEqual("node_test", payload["test_check"]["framework"])
 
     def test_local_worker_emits_terraform_profile_evidence(self) -> None:
         self.task.validation_profile = "terraform"

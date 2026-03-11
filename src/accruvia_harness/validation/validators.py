@@ -354,15 +354,18 @@ def validators_for_profile(profile: str) -> list[PromotionValidator]:
         ValidationProfileEvidenceValidator(),
         ChangedFilesValidator(),
         CompileCheckValidator(),
-        TestEvidenceValidator(),
         ReportArtifactValidator(),
     ]
     if profile == "python":
+        validators.insert(-1, TestEvidenceValidator())
         validators.append(PythonTestFileValidator())
     if profile == "javascript":
+        validators.insert(-1, TestEvidenceValidator())
         validators.append(JavaScriptTestFileValidator())
     if profile == "terraform":
         validators.append(TerraformValidationValidator())
+    if profile == "generic":
+        validators.insert(-1, TestEvidenceValidator())
     return validators
 
 

@@ -252,6 +252,14 @@ Current baseline profiles:
 - `javascript`: the generic gates plus JS/TS test-file expectations
 - `terraform`: Terraform file-change and `terraform validate`-style evidence
 
+The profile-aware local worker now uses real local tools when available:
+
+- `python`: `py_compile` + `unittest`
+- `javascript`: `node --check` + `node --test`
+- `terraform`: `terraform validate`
+
+If a tool is unavailable, the worker records that explicitly and falls back to deterministic stub evidence rather than silently inventing a pass.
+
 This is intended to grow into project- or task-class-specific validator bundles without changing the control plane.
 
 ## Promotion Flow

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import py_compile
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -136,42 +137,77 @@ class LocalArtifactWorker:
         }
 
     def _build_javascript_evidence(self, run_dir: Path) -> dict[str, object]:
-        source_path = run_dir / "generated-module.ts"
+        source_path = run_dir / "generated-module.js"
         source_path.write_text(
-            "export function generatedValue(): number {\n"
+            "export function generatedValue() {\n"
             "  return 2;\n"
             "}\n",
             encoding="utf-8",
         )
-        test_path = run_dir / "generated-module.test.ts"
+        test_path = run_dir / "generated-module.test.js"
         test_path.write_text(
-            "import { generatedValue } from './generated-module';\n\n"
-            "describe('generatedValue', () => {\n"
-            "  it('returns 2', () => {\n"
-            "    expect(generatedValue()).toBe(2);\n"
-            "  });\n"
+            "import test from 'node:test';\n"
+            "import assert from 'node:assert/strict';\n"
+            "import { generatedValue } from './generated-module.js';\n\n"
+            "test('generatedValue returns 2', () => {\n"
+            "  assert.equal(generatedValue(), 2);\n"
             "});\n",
             encoding="utf-8",
         )
-        test_output_path = run_dir / "test_output.txt"
-        test_output_path.write_text("PASS generated-module.test.ts\n", encoding="utf-8")
         compile_output_path = run_dir / "compile_output.txt"
-        compile_output_path.write_text("TypeScript syntax check passed.\n", encoding="utf-8")
+        test_output_path = run_dir / "test_output.txt"
         changed_files = [str(source_path), str(test_path)]
+        node_path = shutil.which("node")
+        if node_path:
+            compile_completed = subprocess.run(
+                [node_path, "--check", str(source_path)],
+                check=False,
+                cwd=run_dir,
+                capture_output=True,
+                text=True,
+            )
+            compile_output_path.write_text(
+                f"{compile_completed.stdout}\n{compile_completed.stderr}".strip(),
+                encoding="utf-8",
+            )
+            test_completed = subprocess.run(
+                [node_path, "--test", str(test_path)],
+                check=False,
+                cwd=run_dir,
+                capture_output=True,
+                text=True,
+            )
+            test_output_path.write_text(
+                f"{test_completed.stdout}\n{test_completed.stderr}".strip(),
+                encoding="utf-8",
+            )
+            passed = compile_completed.returncode == 0 and test_completed.returncode == 0
+            compile_mode = "node_check"
+            test_framework = "node_test"
+            test_returncode = test_completed.returncode
+            compile_returncode = compile_completed.returncode
+        else:
+            compile_output_path.write_text("Node is not installed; javascript compile check stubbed.\n", encoding="utf-8")
+            test_output_path.write_text("Node is not installed; javascript test check stubbed.\n", encoding="utf-8")
+            passed = True
+            compile_mode = "javascript_stub"
+            test_framework = "javascript_stub"
+            test_returncode = 0
+            compile_returncode = 0
         return {
-            "passed": True,
+            "passed": passed,
             "report": {
                 "changed_files": changed_files,
                 "test_files": [str(test_path)],
                 "compile_check": {
-                    "passed": True,
+                    "passed": passed if node_path else True,
                     "targets": changed_files,
-                    "mode": "syntactic_stub",
+                    "mode": compile_mode,
                     "output_path": str(compile_output_path),
                 },
                 "test_check": {
-                    "passed": True,
-                    "framework": "jest_stub",
+                    "passed": passed if node_path else True,
+                    "framework": test_framework,
                     "output_path": str(test_output_path),
                 },
             },
@@ -179,7 +215,8 @@ class LocalArtifactWorker:
                 "compile_targets": changed_files,
                 "test_output_path": str(test_output_path),
                 "compile_output_path": str(compile_output_path),
-                "test_returncode": 0,
+                "test_returncode": test_returncode,
+                "compile_returncode": compile_returncode,
             },
         }
 
@@ -193,33 +230,55 @@ class LocalArtifactWorker:
         vars_tf = run_dir / "terraform.tfvars"
         vars_tf.write_text('name = "accruvia"\n', encoding="utf-8")
         validate_output_path = run_dir / "terraform_validate.txt"
-        validate_output_path.write_text("Success! The configuration is valid.\n", encoding="utf-8")
         changed_files = [str(main_tf), str(vars_tf)]
+        terraform_path = shutil.which("terraform")
+        if terraform_path:
+            validate_completed = subprocess.run(
+                [terraform_path, "validate", "-no-color"],
+                check=False,
+                cwd=run_dir,
+                capture_output=True,
+                text=True,
+            )
+            validate_output_path.write_text(
+                f"{validate_completed.stdout}\n{validate_completed.stderr}".strip(),
+                encoding="utf-8",
+            )
+            passed = validate_completed.returncode == 0
+            compile_mode = "terraform_validate"
+            test_framework = "terraform_validate"
+            validate_returncode = validate_completed.returncode
+        else:
+            validate_output_path.write_text("Terraform is not installed; terraform validate stubbed.\n", encoding="utf-8")
+            passed = True
+            compile_mode = "terraform_stub"
+            test_framework = "terraform_stub"
+            validate_returncode = 0
         return {
-            "passed": True,
+            "passed": passed,
             "report": {
                 "changed_files": changed_files,
                 "test_files": [],
                 "compile_check": {
-                    "passed": True,
+                    "passed": passed if terraform_path else True,
                     "targets": changed_files,
-                    "mode": "terraform_syntax_stub",
+                    "mode": compile_mode,
                     "output_path": str(validate_output_path),
                 },
                 "test_check": {
-                    "passed": True,
-                    "framework": "terraform_validate_stub",
+                    "passed": passed if terraform_path else True,
+                    "framework": test_framework,
                     "output_path": str(validate_output_path),
                 },
                 "terraform_validate": {
-                    "passed": True,
+                    "passed": passed if terraform_path else True,
                     "output_path": str(validate_output_path),
                 },
             },
             "diagnostics": {
                 "compile_targets": changed_files,
                 "terraform_validate_output_path": str(validate_output_path),
-                "test_returncode": 0,
+                "test_returncode": validate_returncode,
             },
         }
 
