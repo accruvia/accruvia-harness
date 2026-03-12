@@ -707,6 +707,76 @@ class HarnessEngineTests(unittest.TestCase):
         self.assertEqual(high.id, processed[0]["task"].id)
         self.assertEqual(low.id, processed[1]["task"].id)
 
+    def test_process_next_task_runs_single_attempt_for_retryable_task(self) -> None:
+        engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-single-attempt",
+            worker=MissingArtifactWorker(),
+        )
+        task = engine.create_task_with_policy(
+            project_id=self.project_id,
+            title="Retry later",
+            objective="Should remain pending after one failed attempt",
+            priority=200,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=3,
+            required_artifacts=["plan", "report"],
+        )
+
+        result = engine.process_next_task(worker_id="worker-a", lease_seconds=120)
+        latest_task = self.store.get_task(task.id)
+        runs = self.store.list_runs(task.id)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(task.id, result["task"].id)
+        self.assertEqual(1, len(result["runs"]))
+        self.assertEqual(1, len(runs))
+        self.assertEqual(TaskStatus.PENDING, latest_task.status)
+
+    def test_process_queue_does_not_immediately_retry_same_task(self) -> None:
+        engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-no-immediate-retry",
+            worker=MissingArtifactWorker(),
+        )
+        retrying = engine.create_task_with_policy(
+            project_id=self.project_id,
+            title="Retry later",
+            objective="Should not be retried in same sweep",
+            priority=500,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=3,
+            required_artifacts=["plan", "report"],
+        )
+        second = engine.create_task_with_policy(
+            project_id=self.project_id,
+            title="Second task",
+            objective="Should run after first attempt of retrying task",
+            priority=400,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=3,
+            required_artifacts=["plan", "report"],
+        )
+
+        processed = engine.process_queue(limit=2)
+        processed_ids = [item["task"].id for item in processed]
+
+        self.assertEqual([retrying.id, second.id], processed_ids)
+        self.assertEqual(1, len(self.store.list_runs(retrying.id)))
+        self.assertEqual(1, len(self.store.list_runs(second.id)))
+
     def test_import_issue_task_creates_gitlab_linked_task(self) -> None:
         task = self.engine.import_issue_task(
             project_id=self.project_id,

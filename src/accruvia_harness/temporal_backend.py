@@ -9,16 +9,22 @@ from .config import HarnessConfig
 from .engine import HarnessEngine
 
 try:
+    from temporalio.api.workflowservice.v1 import DescribeNamespaceRequest
     from temporalio import activity, workflow
     from temporalio.client import Client
     from temporalio.common import RetryPolicy
     from temporalio.worker import Worker
 except ModuleNotFoundError:  # pragma: no cover - exercised via availability checks
+    DescribeNamespaceRequest = None
     activity = None
     workflow = None
     Client = None
     RetryPolicy = None
     Worker = None
+
+
+TEMPORAL_CONNECT_ATTEMPTS = 30
+TEMPORAL_CONNECT_DELAY_SECONDS = 1.0
 
 
 def _build_engine(config_payload: str | dict[str, object]) -> HarnessEngine:
@@ -94,6 +100,32 @@ def temporal_support_available() -> bool:
     except ModuleNotFoundError:
         return False
     return True
+
+
+async def connect_temporal_client(
+    client_cls: Any,
+    target: str,
+    namespace: str,
+    *,
+    attempts: int = TEMPORAL_CONNECT_ATTEMPTS,
+    delay_seconds: float = TEMPORAL_CONNECT_DELAY_SECONDS,
+) -> Any:
+    last_error: Exception | None = None
+    for attempt in range(max(attempts, 1)):
+        try:
+            client = await client_cls.connect(target, namespace=namespace)
+            if DescribeNamespaceRequest is not None:
+                await client.service_client.workflow_service.describe_namespace(
+                    DescribeNamespaceRequest(namespace=namespace)
+                )
+            return client
+        except Exception as exc:  # pragma: no cover - covered via runtime tests
+            last_error = exc
+            if attempt == max(attempts, 1) - 1:
+                raise
+            await asyncio.sleep(delay_seconds)
+    assert last_error is not None
+    raise last_error
 
 
 def task_to_stable_activity(config: str, task_id: str) -> dict[str, object]:
@@ -192,7 +224,7 @@ async def run_temporal_worker(
 
     activities = [task_to_stable_activity_defn, process_next_task_activity_defn]
 
-    client = await client_cls.connect(target, namespace=namespace)
+    client = await connect_temporal_client(client_cls, target, namespace)
     worker = Worker(client, task_queue=task_queue, workflows=workflows, activities=activities)
     await worker.run()
 

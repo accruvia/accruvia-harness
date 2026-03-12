@@ -22,6 +22,7 @@ class CognitionService:
         cognition_registry: CognitionAdapterRegistry,
         task_service=None,
         llm_router: LLMRouter | None = None,
+        heartbeat_timeout_seconds: int = 1800,
         telemetry=None,
     ) -> None:
         self.store = store
@@ -30,6 +31,7 @@ class CognitionService:
         self.cognition_registry = cognition_registry
         self.task_service = task_service
         self.llm_router = llm_router
+        self.heartbeat_timeout_seconds = heartbeat_timeout_seconds
         self.telemetry = telemetry
 
     def heartbeat(self, project_id: str) -> HeartbeatResult:
@@ -57,7 +59,7 @@ class CognitionService:
         analysis_path: Path | None = None
         llm_backend: str | None = None
         analysis: dict[str, object]
-        if self.llm_router is None:
+        if self.llm_router is None or not getattr(self.llm_router, "executors", {}):
             analysis = {
                 "summary": "No LLM router configured for heartbeat analysis.",
                 "priority_focus": "",
@@ -84,12 +86,24 @@ class CognitionService:
             if self.telemetry is not None:
                 with self.telemetry.timed("heartbeat_analysis", project_id=project.id, adapter_name=adapter.name):
                     result, llm_backend = self.llm_router.execute(
-                        LLMInvocation(task=task, run=run, prompt=prompt, run_dir=run_dir),
+                        LLMInvocation(
+                            task=task,
+                            run=run,
+                            prompt=prompt,
+                            run_dir=run_dir,
+                            timeout_seconds_override=self.heartbeat_timeout_seconds,
+                        ),
                         telemetry=self.telemetry,
                     )
             else:
                 result, llm_backend = self.llm_router.execute(
-                    LLMInvocation(task=task, run=run, prompt=prompt, run_dir=run_dir),
+                    LLMInvocation(
+                        task=task,
+                        run=run,
+                        prompt=prompt,
+                        run_dir=run_dir,
+                        timeout_seconds_override=self.heartbeat_timeout_seconds,
+                    ),
                     telemetry=self.telemetry,
                 )
             prompt_path = result.prompt_path

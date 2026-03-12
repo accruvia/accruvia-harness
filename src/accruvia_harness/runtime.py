@@ -10,6 +10,7 @@ from .engine import HarnessEngine
 from .temporal_backend import (
     _next_task_runtime_budget_seconds,
     _task_runtime_budget_seconds,
+    connect_temporal_client,
     temporal_support_available,
 )
 
@@ -119,7 +120,7 @@ class TemporalWorkflowRuntime:
 
     async def _run_task_until_stable(self, task_id: str) -> dict[str, object]:
         client_cls = _get_temporal_client_class()
-        client = await client_cls.connect(self.target, namespace=self.namespace)
+        client = await connect_temporal_client(client_cls, self.target, self.namespace)
         timeout_seconds = _task_runtime_budget_seconds(self.config.to_json(), task_id)
         await client.execute_workflow(
             "task_to_stable_workflow",
@@ -138,7 +139,7 @@ class TemporalWorkflowRuntime:
         lease_seconds: int = 300,
     ) -> dict[str, object] | None:
         client_cls = _get_temporal_client_class()
-        client = await client_cls.connect(self.target, namespace=self.namespace)
+        client = await connect_temporal_client(client_cls, self.target, self.namespace)
         timeout_seconds = _next_task_runtime_budget_seconds(self.config.to_json(), project_id, lease_seconds)
         result = await client.execute_workflow(
             "process_next_task_workflow",

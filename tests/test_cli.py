@@ -19,16 +19,280 @@ class CLITests(unittest.TestCase):
         self.env["ACCRUVIA_HARNESS_HOME"] = self.temp_dir.name
         self.env["PYTHONPATH"] = str(self.repo_root / "src")
 
-    def run_cli(self, *args: str) -> dict[str, object]:
-        completed = subprocess.run(
-            [sys.executable, "-m", "accruvia_harness", *args],
+    def run_raw(
+        self,
+        *args: str,
+        input_text: str | None = None,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, *args],
             cwd=self.repo_root,
-            env=self.env,
-            check=True,
+            env=env or self.env,
+            check=False,
             capture_output=True,
             text=True,
+            input=input_text,
         )
+
+    def run_cli(self, *args: str) -> dict[str, object]:
+        completed = self.run_raw("-m", "accruvia_harness", "--json", *args)
+        if completed.returncode != 0:
+            raise subprocess.CalledProcessError(
+                completed.returncode,
+                completed.args,
+                output=completed.stdout,
+                stderr=completed.stderr,
+            )
         return json.loads(completed.stdout)
+
+    def test_package_import_does_not_require_optional_routing_service(self) -> None:
+        completed = self.run_raw("-c", "import accruvia_harness; print('ok')")
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual("ok", completed.stdout.strip())
+
+    def test_status_command_runs_with_only_harness_on_pythonpath(self) -> None:
+        completed = self.run_raw("-m", "accruvia_harness", "--json", "status")
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertEqual([], payload["projects"])
+        self.assertEqual([], payload["tasks"])
+
+    def test_doctor_reports_missing_llm_executor_by_default(self) -> None:
+        payload = self.run_cli("doctor")
+
+        self.assertFalse(payload["heartbeats_ready"])
+        self.assertTrue(payload["readiness"]["inspection_ready"])
+        self.assertTrue(payload["readiness"]["task_execution_ready"])
+        self.assertFalse(payload["readiness"]["autonomous_ready"])
+        self.assertEqual("prototype", payload["prototype"]["stage"])
+        self.assertIn("No LLM executor is configured.", payload["issues"])
+
+    def test_configure_llm_persists_executor_settings_across_fresh_sessions(self) -> None:
+        llm_script = Path(self.temp_dir.name) / "persisted_llm.sh"
+        llm_script.write_text("#!/usr/bin/env bash\nprintf 'ok\\n' > \"$ACCRUVIA_LLM_RESPONSE_PATH\"\n", encoding="utf-8")
+        llm_script.chmod(0o755)
+
+        configure = self.run_raw(
+            "-m",
+            "accruvia_harness",
+            "--json",
+            "configure-llm",
+            "--backend",
+            "command",
+            "--command",
+            str(llm_script),
+        )
+        self.assertEqual(0, configure.returncode, configure.stderr)
+
+        fresh_env = self.env.copy()
+        fresh_env.pop("ACCRUVIA_LLM_BACKEND", None)
+        fresh_env.pop("ACCRUVIA_LLM_COMMAND", None)
+        config = self.run_raw("-m", "accruvia_harness", "--json", "config", env=fresh_env)
+
+        self.assertEqual(0, config.returncode, config.stderr)
+        payload = json.loads(config.stdout)
+        self.assertEqual("command", payload["llm_backend"])
+        self.assertTrue(payload["llm_command"].endswith("persisted_llm.sh [REDACTED]"))
+
+    def test_setup_autodetects_codex_and_persists_it(self) -> None:
+        fake_bin = Path(self.temp_dir.name) / "bin"
+        fake_bin.mkdir()
+        codex = fake_bin / "codex"
+        codex.write_text(
+            "#!/usr/bin/env bash\n"
+            "if [ \"$1\" = \"exec\" ]; then\n"
+            "  printf 'ok\\n' > \"$ACCRUVIA_LLM_RESPONSE_PATH\"\n"
+            "  exit 0\n"
+            "fi\n"
+            "echo codex 1.0\n",
+            encoding="utf-8",
+        )
+        codex.chmod(0o755)
+        setup_env = self.env.copy()
+        setup_env["PATH"] = f"{fake_bin}:{setup_env.get('PATH', '')}"
+
+        completed = self.run_raw("-m", "accruvia_harness", "--json", "setup", "--yes", env=setup_env)
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertTrue(payload["configured"])
+        self.assertEqual("codex", payload["selected"]["backend"])
+        self.assertTrue(payload["probe"]["ok"])
+        self.assertTrue(payload["doctor"]["heartbeats_ready"])
+        self.assertIn("smoke-test", payload["next_steps"][1])
+
+        fresh_config = self.run_raw("-m", "accruvia_harness", "--json", "config", env=setup_env)
+        self.assertEqual(0, fresh_config.returncode, fresh_config.stderr)
+        config_payload = json.loads(fresh_config.stdout)
+        self.assertEqual("codex", config_payload["llm_backend"])
+        self.assertEqual("codex [REDACTED]", config_payload["llm_codex_command"])
+
+    def test_setup_explains_why_an_llm_provider_is_required(self) -> None:
+        fake_bin = Path(self.temp_dir.name) / "bin"
+        fake_bin.mkdir()
+        codex = fake_bin / "codex"
+        codex.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf 'setup ok\\n' > \"$ACCRUVIA_LLM_RESPONSE_PATH\"\n",
+            encoding="utf-8",
+        )
+        codex.chmod(0o755)
+        setup_env = self.env.copy()
+        setup_env["PATH"] = f"{fake_bin}:{setup_env.get('PATH', '')}"
+
+        completed = self.run_raw(
+            "-m",
+            "accruvia_harness",
+            "setup",
+            env=setup_env,
+            input_text="1\n\n",
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIn("needs at least one working LLM provider", completed.stderr)
+        self.assertIn("Installed providers detected on PATH", completed.stderr)
+        self.assertNotIn("env vars to pass through", completed.stderr)
+
+    def test_single_detected_provider_is_auto_configured_for_heartbeat_commands(self) -> None:
+        fake_bin = Path(self.temp_dir.name) / "bin"
+        fake_bin.mkdir()
+        codex = fake_bin / "codex"
+        codex.write_text(
+            "#!/usr/bin/env bash\n"
+            "if [ \"$1\" = \"exec\" ]; then\n"
+            "  printf '{\"summary\":\"Bootstrap backlog\",\"priority_focus\":\"bootstrap\",\"issue_creation_needed\":true,"
+            "\\\"proposed_tasks\\\":[{\\\"title\\\":\\\"Bootstrap task\\\",\\\"objective\\\":\\\"Create the first task\\\",\\\"priority\\\":180,\\\"rationale\\\":\\\"Start the loop\\\"}]}'\n"
+            "  exit 0\n"
+            "fi\n"
+            "exit 2\n",
+            encoding="utf-8",
+        )
+        codex.chmod(0o755)
+        env = self.env.copy()
+        env["PATH"] = f"{fake_bin}:/usr/bin:/bin"
+
+        completed = self.run_raw("-m", "accruvia_harness", "--json", "create-project", "auto", "auto project", env=env)
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertIn("heartbeat", payload)
+
+        config = self.run_raw("-m", "accruvia_harness", "--json", "config", env=env)
+        self.assertEqual(0, config.returncode, config.stderr)
+        config_payload = json.loads(config.stdout)
+        self.assertEqual("codex", config_payload["llm_backend"])
+        self.assertEqual("codex [REDACTED]", config_payload["llm_codex_command"])
+
+    def test_auto_configure_rejects_hanging_detected_provider(self) -> None:
+        fake_bin = Path(self.temp_dir.name) / "bin"
+        fake_bin.mkdir()
+        codex = fake_bin / "codex"
+        codex.write_text(
+            "#!/usr/bin/env bash\n"
+            "sleep 30 &\n"
+            "wait\n",
+            encoding="utf-8",
+        )
+        codex.chmod(0o755)
+        env = self.env.copy()
+        env["PATH"] = f"{fake_bin}:/usr/bin:/bin"
+
+        project_payload = self.run_raw(
+            "-m",
+            "accruvia_harness",
+            "--json",
+            "create-project",
+            "probe-timeout",
+            "probe timeout project",
+            "--no-bootstrap-heartbeat",
+            env=env,
+        )
+        self.assertEqual(0, project_payload.returncode, project_payload.stderr)
+        project = json.loads(project_payload.stdout)["project"]
+
+        completed = self.run_raw("-m", "accruvia_harness", "heartbeat", project["id"], env=env)
+
+        self.assertNotEqual(0, completed.returncode)
+        self.assertIn("detected command is not ready", completed.stderr)
+        self.assertIn("did not finish within 5 seconds", completed.stderr)
+
+    def test_multiple_detected_providers_require_explicit_choice_in_noninteractive_mode(self) -> None:
+        fake_bin = Path(self.temp_dir.name) / "bin"
+        fake_bin.mkdir()
+        for name in ("codex", "claude"):
+            path = fake_bin / name
+            path.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            path.chmod(0o755)
+        env = self.env.copy()
+        env["PATH"] = str(fake_bin)
+
+        completed = self.run_raw("-m", "accruvia_harness", "heartbeat", "project_123", env=env)
+
+        self.assertNotEqual(0, completed.returncode)
+        self.assertIn("multiple installed providers", completed.stderr)
+
+    def test_reset_local_state_requires_explicit_confirmation(self) -> None:
+        completed = self.run_raw("-m", "accruvia_harness", "reset-local-state")
+
+        self.assertNotEqual(0, completed.returncode)
+        self.assertIn("--yes", completed.stderr)
+
+    def test_reset_local_state_can_preserve_config(self) -> None:
+        llm_script = Path(self.temp_dir.name) / "persisted_llm.sh"
+        llm_script.write_text("#!/usr/bin/env bash\nprintf 'ok\\n' > \"$ACCRUVIA_LLM_RESPONSE_PATH\"\n", encoding="utf-8")
+        llm_script.chmod(0o755)
+        self.run_raw(
+            "-m",
+            "accruvia_harness",
+            "--json",
+            "configure-llm",
+            "--backend",
+            "command",
+            "--command",
+            str(llm_script),
+        )
+        payload = self.run_cli("reset-local-state", "--yes", "--keep-config")
+
+        self.assertTrue(payload["reset"])
+        self.assertTrue(any(item.endswith("config.json") for item in payload["preserved"]))
+
+        doctor = self.run_cli("doctor")
+        self.assertTrue(doctor["config_file"]["exists"])
+        self.assertTrue(doctor["database"]["exists"])
+        self.assertTrue(doctor["heartbeats_ready"])
+
+    def test_doctor_is_human_readable_by_default(self) -> None:
+        completed = self.run_raw("-m", "accruvia_harness", "doctor")
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIn("Accruvia Harness doctor", completed.stdout)
+        self.assertIn("Readiness", completed.stdout)
+        self.assertIn("Detected on PATH", completed.stdout)
+        self.assertFalse(completed.stdout.lstrip().startswith("{"))
+
+    def test_smoke_test_is_repeatable_in_same_harness_home(self) -> None:
+        first = self.run_raw("-m", "accruvia_harness", "--json", "smoke-test")
+        second = self.run_raw("-m", "accruvia_harness", "--json", "smoke-test")
+
+        self.assertEqual(0, first.returncode, first.stderr)
+        self.assertEqual(0, second.returncode, second.stderr)
+        first_payload = json.loads(first.stdout)
+        second_payload = json.loads(second.stdout)
+        self.assertEqual("smoke-project", first_payload["project"]["name"])
+        self.assertEqual(first_payload["project"]["id"], second_payload["project"]["id"])
+        self.assertEqual("completed", first_payload["task"]["status"])
+        self.assertEqual("completed", second_payload["task"]["status"])
+
+    def test_smoke_test_is_human_readable_by_default(self) -> None:
+        completed = self.run_raw("-m", "accruvia_harness", "smoke-test")
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIn("Smoke test complete", completed.stdout)
+        self.assertIn("Next step", completed.stdout)
+        self.assertFalse(completed.stdout.lstrip().startswith("{"))
 
     def test_summary_context_packet_and_task_report(self) -> None:
         project = self.run_cli("create-project", "demo", "demo project")["project"]
@@ -51,6 +315,141 @@ class CLITests(unittest.TestCase):
         self.assertEqual(project["id"], context_packet["project_id"])
         self.assertEqual(task["id"], task_report["task"]["id"])
         self.assertEqual(1, len(task_report["runs"]))
+
+    def test_create_project_runs_bootstrap_heartbeat_by_default(self) -> None:
+        llm_script = Path(self.temp_dir.name) / "fake_bootstrap_heartbeat.sh"
+        llm_script.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '{\"summary\":\"Bootstrap backlog\",\"priority_focus\":\"bootstrap\",\"issue_creation_needed\":true,"
+            "\\\"proposed_tasks\\\":[{\\\"title\\\":\\\"Bootstrap task\\\",\\\"objective\\\":\\\"Create the first task\\\",\\\"priority\\\":180,\\\"rationale\\\":\\\"Start the loop\\\"}]}' > \"$ACCRUVIA_LLM_RESPONSE_PATH\"\n",
+            encoding="utf-8",
+        )
+        llm_script.chmod(0o755)
+        self.env["ACCRUVIA_LLM_BACKEND"] = "command"
+        self.env["ACCRUVIA_LLM_COMMAND"] = str(llm_script)
+
+        payload = self.run_cli("create-project", "bootstrap", "bootstrap project")
+        summary = self.run_cli("summary", "--project-id", payload["project"]["id"])
+
+        self.assertIn("heartbeat", payload)
+        self.assertEqual(1, len(payload["heartbeat"]["created_tasks"]))
+        self.assertEqual("Bootstrap task", payload["heartbeat"]["created_tasks"][0]["title"])
+        self.assertEqual(1, summary["metrics"]["tasks_by_status"]["pending"])
+
+    def test_supervise_auto_heartbeats_project_when_queue_is_empty(self) -> None:
+        llm_script = Path(self.temp_dir.name) / "fake_supervise_heartbeat.sh"
+        llm_script.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '{\"summary\":\"Create initial work\",\"priority_focus\":\"bootstrap\",\"issue_creation_needed\":true,"
+            "\\\"proposed_tasks\\\":[{\\\"title\\\":\\\"Initial autonomous task\\\",\\\"objective\\\":\\\"Create and complete the first task\\\",\\\"priority\\\":210,\\\"rationale\\\":\\\"Seed the project backlog\\\"}]}' > \"$ACCRUVIA_LLM_RESPONSE_PATH\"\n",
+            encoding="utf-8",
+        )
+        llm_script.chmod(0o755)
+        self.env["ACCRUVIA_LLM_BACKEND"] = "command"
+        self.env["ACCRUVIA_LLM_COMMAND"] = str(llm_script)
+
+        project = self.run_cli(
+            "create-project",
+            "auto-heartbeat",
+            "auto heartbeat project",
+            "--no-bootstrap-heartbeat",
+        )["project"]
+
+        result = self.run_cli("supervise", "--project-id", project["id"], "--worker-id", "supervisor-a", "--one-shot")
+        summary = self.run_cli("summary", "--project-id", project["id"])
+
+        self.assertEqual(1, result["heartbeat_count"])
+        self.assertEqual([project["id"]], result["heartbeat_project_ids"])
+        self.assertEqual(1, result["processed_count"])
+        self.assertEqual(1, summary["metrics"]["tasks_by_status"]["completed"])
+
+    def test_heartbeat_processes_created_tasks_by_default(self) -> None:
+        llm_script = Path(self.temp_dir.name) / "fake_direct_heartbeat.sh"
+        llm_script.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '{\"summary\":\"Create follow-on work\",\"priority_focus\":\"loop continuity\",\"issue_creation_needed\":true,"
+            "\\\"proposed_tasks\\\":[{\\\"title\\\":\\\"Heartbeat task\\\",\\\"objective\\\":\\\"Complete the task immediately after heartbeat\\\",\\\"priority\\\":220,\\\"rationale\\\":\\\"Keep the loop moving\\\"}]}' > \"$ACCRUVIA_LLM_RESPONSE_PATH\"\n",
+            encoding="utf-8",
+        )
+        llm_script.chmod(0o755)
+        self.env["ACCRUVIA_LLM_BACKEND"] = "command"
+        self.env["ACCRUVIA_LLM_COMMAND"] = str(llm_script)
+
+        project = self.run_cli(
+            "create-project",
+            "heartbeat-default",
+            "heartbeat default processing project",
+            "--no-bootstrap-heartbeat",
+        )["project"]
+
+        payload = self.run_cli("heartbeat", project["id"], "--worker-id", "heartbeat-a")
+        summary = self.run_cli("summary", "--project-id", project["id"])
+
+        self.assertEqual(1, len(payload["heartbeat"]["created_tasks"]))
+        self.assertEqual(1, payload["processing"]["processed_count"])
+        self.assertEqual(1, summary["metrics"]["tasks_by_status"]["completed"])
+
+    def test_heartbeat_can_leave_created_tasks_pending_when_opted_out(self) -> None:
+        llm_script = Path(self.temp_dir.name) / "fake_direct_heartbeat_opt_out.sh"
+        llm_script.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '{\"summary\":\"Create deferred work\",\"priority_focus\":\"operator inspection\",\"issue_creation_needed\":true,"
+            "\\\"proposed_tasks\\\":[{\\\"title\\\":\\\"Deferred heartbeat task\\\",\\\"objective\\\":\\\"Leave the task pending when requested\\\",\\\"priority\\\":220,\\\"rationale\\\":\\\"Allow inspection before execution\\\"}]}' > \"$ACCRUVIA_LLM_RESPONSE_PATH\"\n",
+            encoding="utf-8",
+        )
+        llm_script.chmod(0o755)
+        self.env["ACCRUVIA_LLM_BACKEND"] = "command"
+        self.env["ACCRUVIA_LLM_COMMAND"] = str(llm_script)
+
+        project = self.run_cli(
+            "create-project",
+            "heartbeat-opt-out",
+            "heartbeat opt out project",
+            "--no-bootstrap-heartbeat",
+        )["project"]
+
+        payload = self.run_cli("heartbeat", project["id"], "--no-process-created-tasks")
+        summary = self.run_cli("summary", "--project-id", project["id"])
+
+        self.assertEqual(1, len(payload["heartbeat"]["created_tasks"]))
+        self.assertNotIn("processing", payload)
+        self.assertEqual(1, summary["metrics"]["tasks_by_status"]["pending"])
+
+    def test_nudge_project_records_operator_note_and_processes_heartbeat_tasks(self) -> None:
+        llm_script = Path(self.temp_dir.name) / "fake_nudge_heartbeat.sh"
+        llm_script.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '{\"summary\":\"Respond to operator nudge\",\"priority_focus\":\"onboarding\",\"issue_creation_needed\":true,"
+            "\\\"proposed_tasks\\\":[{\\\"title\\\":\\\"Nudged task\\\",\\\"objective\\\":\\\"Act on the operator note\\\",\\\"priority\\\":220,\\\"rationale\\\":\\\"The nudge should shape the next heartbeat\\\"}]}' > \"$ACCRUVIA_LLM_RESPONSE_PATH\"\n",
+            encoding="utf-8",
+        )
+        llm_script.chmod(0o755)
+        self.env["ACCRUVIA_LLM_BACKEND"] = "command"
+        self.env["ACCRUVIA_LLM_COMMAND"] = str(llm_script)
+
+        project = self.run_cli(
+            "create-project",
+            "nudge-project",
+            "nudge project",
+            "--no-bootstrap-heartbeat",
+        )["project"]
+
+        payload = self.run_cli(
+            "nudge-project",
+            project["id"],
+            "Pay extra attention to onboarding and DX",
+        )
+        context = self.run_cli("context-packet", "--project-id", project["id"])
+        summary = self.run_cli("summary", "--project-id", project["id"])
+
+        self.assertEqual("Pay extra attention to onboarding and DX", payload["nudge"]["payload"]["note"])
+        self.assertEqual(1, len(payload["heartbeat"]["created_tasks"]))
+        self.assertEqual(1, payload["processing"]["processed_count"])
+        self.assertEqual(
+            "Pay extra attention to onboarding and DX",
+            context["operator_nudges"][0]["note"],
+        )
+        self.assertEqual(1, summary["metrics"]["tasks_by_status"]["completed"])
 
     def test_update_project_persists_repo_and_policy_settings(self) -> None:
         project = self.run_cli("create-project", "demo", "demo project")["project"]
@@ -77,6 +476,22 @@ class CLITests(unittest.TestCase):
         self.assertEqual("isolated_required", updated["workspace_policy"])
         self.assertEqual("main", updated["base_branch"])
         self.assertEqual("accruvia/routellect", status["projects"][0]["repo_name"])
+
+    def test_project_name_can_be_used_where_project_id_is_expected(self) -> None:
+        project = self.run_cli("create-project", "accruvia-harness", "self hosting project")["project"]
+
+        task = self.run_cli(
+            "create-task",
+            "accruvia-harness",
+            "Named project task",
+            "Prove project-name resolution works",
+        )["task"]
+        summary = self.run_cli("summary", "--project-id", "accruvia-harness")
+        result = self.run_cli("supervise", "--project-id", "accruvia-harness", "--one-shot")
+
+        self.assertEqual(project["id"], task["project_id"])
+        self.assertEqual(project["id"], summary["project_id"])
+        self.assertEqual(1, result["processed_count"])
 
     def test_ops_report_includes_validation_profile_metrics(self) -> None:
         project = self.run_cli("create-project", "ops", "ops project")["project"]
@@ -153,7 +568,7 @@ class CLITests(unittest.TestCase):
             "100",
         )["task"]
 
-        result = self.run_cli("supervise", "--project-id", project["id"], "--worker-id", "supervisor-a")
+        result = self.run_cli("supervise", "--project-id", project["id"], "--worker-id", "supervisor-a", "--one-shot")
         summary = self.run_cli("summary", "--project-id", project["id"])
 
         self.assertEqual(2, result["processed_count"])

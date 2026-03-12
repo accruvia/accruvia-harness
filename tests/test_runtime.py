@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 import tempfile
 import unittest
@@ -12,6 +13,7 @@ from accruvia_harness.domain import EvaluationVerdict, Project, RunStatus, new_i
 from accruvia_harness.engine import HarnessEngine
 from accruvia_harness.temporal_backend import (
     _build_engine,
+    connect_temporal_client,
     _next_task_runtime_budget_seconds,
     _task_runtime_budget_seconds,
     _process_next_timeout_seconds,
@@ -133,7 +135,12 @@ class RuntimeTests(unittest.TestCase):
         )
         run = self.engine.run_once(task.id)
 
+        fake_workflow_service = mock.Mock()
+        fake_workflow_service.describe_namespace = AsyncMock(return_value=object())
+        fake_service_client = mock.Mock()
+        fake_service_client.workflow_service = fake_workflow_service
         fake_client = mock.Mock()
+        fake_client.service_client = fake_service_client
         fake_client.execute_workflow = AsyncMock(return_value={"task_id": task.id, "task_status": "completed", "run_count": 1})
 
         fake_client_cls = mock.Mock()
@@ -145,6 +152,36 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(task.id, result["task"].id)
         self.assertEqual(run.id, result["runs"][0].id)
+
+    def test_connect_temporal_client_retries_until_temporal_is_ready(self) -> None:
+        fake_workflow_service = mock.Mock()
+        fake_workflow_service.describe_namespace = AsyncMock(return_value=object())
+        fake_service_client = mock.Mock()
+        fake_service_client.workflow_service = fake_workflow_service
+        fake_client = mock.Mock()
+        fake_client.service_client = fake_service_client
+        client_cls = mock.Mock()
+        client_cls.connect = AsyncMock(
+            side_effect=[
+                RuntimeError("Connection refused"),
+                RuntimeError("Connection refused"),
+                fake_client,
+            ]
+        )
+
+        result = asyncio.run(
+            connect_temporal_client(
+                client_cls,
+                "localhost:7233",
+                "default",
+                attempts=3,
+                delay_seconds=0,
+            )
+        )
+
+        self.assertIs(result, fake_client)
+        self.assertEqual(3, client_cls.connect.await_count)
+        fake_workflow_service.describe_namespace.assert_awaited_once()
 
     def test_temporal_engine_builder_uses_configured_external_modules(self) -> None:
         plugin_root = Path(self.temp_dir.name) / "plugins"
@@ -296,3 +333,13 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(RunStatus.BLOCKED, run.status)
         self.assertEqual(EvaluationVerdict.BLOCKED, evaluation.verdict)
+
+    def test_config_reads_dedicated_heartbeat_timeout(self) -> None:
+        with mock.patch.dict("os.environ", {"ACCRUVIA_HEARTBEAT_TIMEOUT_SECONDS": "2400"}, clear=False):
+            config = HarnessConfig.from_env(
+                db_path=self.config.db_path,
+                workspace_root=self.config.workspace_root,
+                log_path=self.config.log_path,
+            )
+
+        self.assertEqual(2400, config.heartbeat_timeout_seconds)

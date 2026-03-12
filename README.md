@@ -39,7 +39,7 @@ The harness is designed around a few non-negotiable rules:
 - system of record: SQLite today
 - observability: JSONL telemetry with optional OpenTelemetry export
 - worker backends: `local`, `shell`, `agent`, `llm`
-- LLM routing: local CLI or `accruvia-client`
+- LLM routing: local CLI or other configured command executors
 
 Core records:
 
@@ -85,7 +85,23 @@ When that remediation task succeeds, the harness updates the existing review bra
 
 ## Quick Start
 
-Create a virtualenv, install the package, and initialize the harness:
+Fastest local path:
+
+```bash
+./bin/accruvia-harness setup
+./bin/accruvia-harness doctor
+```
+
+The repo-local launcher bootstraps `.venv` and installs the package automatically on first use.
+
+Prototype posture:
+
+- treat this as a local operator appliance, not a finished packaged app
+- run `doctor` and `smoke-test` before enabling long-running autonomy
+- prefer one-shot supervision before continuous supervision
+- use `reset-local-state --yes` when local prototype state has drifted or become suspect
+
+If you prefer to manage the environment yourself, create a virtualenv, install the package, and initialize the harness:
 
 ```bash
 python3 -m venv .venv
@@ -94,6 +110,18 @@ pip install -e .
 make init
 make test-fast
 ```
+
+Run the onboarding flow once per harness home:
+
+```bash
+./bin/accruvia-harness setup
+./bin/accruvia-harness doctor
+./bin/accruvia-harness smoke-test
+./bin/accruvia-harness config
+```
+
+`setup` persists operator settings under `.accruvia-harness/config.json` by default, so LLM executor configuration survives
+new shell sessions. Environment variables still work, but they are now best treated as overrides for CI or one-off trials.
 
 Create a project and run a task:
 
@@ -134,27 +162,70 @@ make run ARGS="status"
 Direct CLI entrypoints also work:
 
 ```bash
+./bin/accruvia-harness doctor
+./bin/accruvia-harness status
+./bin/accruvia-harness context-packet
+./bin/accruvia-harness explain-system
+```
+
+After the environment is installed, the package entrypoint also works:
+
+```bash
+accruvia-harness doctor
+accruvia-harness status
+accruvia-harness context-packet
+accruvia-harness explain-system
+```
+
+If you are running directly from the source tree without installing the package, use the development fallback:
+
+```bash
 PYTHONPATH=src python3 -m accruvia_harness status
-PYTHONPATH=src python3 -m accruvia_harness context-packet
-PYTHONPATH=src python3 -m accruvia_harness explain-system
 ```
 
 ## LLM Routing
 
 The harness separates workflow control from model execution.
 
-- local development can route to Codex or Claude Code
-- CI can route to API-backed execution or `accruvia-client`
-- `ACCRUVIA_LLM_BACKEND=auto` chooses an executor by environment
+- `setup` is the default operator path and persists executor settings
+- `configure-llm` is the non-interactive path for scripting or explicit control
+- `doctor` reports whether heartbeats and read-only explanation flows are ready
+- `doctor` now reports readiness levels for inspection, task execution, heartbeats, and autonomy
+- environment variables still override persisted settings when needed
 
 Example:
 
 ```bash
-export ACCRUVIA_WORKER_BACKEND=llm
-export ACCRUVIA_LLM_BACKEND=auto
-export ACCRUVIA_LLM_CODEX_COMMAND='codex exec < "$ACCRUVIA_LLM_PROMPT_PATH" > "$ACCRUVIA_LLM_RESPONSE_PATH"'
-export ACCRUVIA_LLM_ACCRUVIA_CLIENT_COMMAND='accruvia-client llm run --prompt-file "$ACCRUVIA_LLM_PROMPT_PATH" --output-file "$ACCRUVIA_LLM_RESPONSE_PATH"'
+./bin/accruvia-harness configure-llm \
+  --backend codex \
+  --codex-command 'codex exec'
+
+./bin/accruvia-harness doctor
 make run ARGS="process-next --worker-id worker-a --lease-seconds 300"
+```
+
+For ephemeral shell-local overrides:
+
+```bash
+export ACCRUVIA_LLM_BACKEND=auto
+export ACCRUVIA_LLM_CODEX_COMMAND='codex exec'
+```
+
+## Prototype Recovery
+
+If local prototype state becomes untrustworthy, reset it explicitly:
+
+```bash
+./bin/accruvia-harness reset-local-state --yes
+./bin/accruvia-harness setup
+./bin/accruvia-harness init-db
+./bin/accruvia-harness smoke-test
+```
+
+To preserve your persisted operator config while resetting DB, logs, telemetry, and workspaces:
+
+```bash
+./bin/accruvia-harness reset-local-state --yes --keep-config
 ```
 
 ## Interrogation
@@ -200,6 +271,28 @@ Extension points:
 - `ACCRUVIA_COGNITION_MODULES`
 
 That lets a project supply its own workspace preparation, workload evidence generation, promotion checks, and heartbeat logic without editing the harness source.
+
+## Project Brain Overrides
+
+The harness has a global default brain prompt for heartbeat and strategy work. Projects can override it through a cognition adapter.
+
+This is the intended way to steer a project without directly babysitting the LLM CLI:
+
+- keep the global/default brain when the standard harness decision policy is enough
+- provide a project cognition adapter when you want to bias attention toward specific product concerns or constraints
+- use the project brain to clarify what deserves attention, what is out of scope, and what counts as meaningful work
+
+This is useful when you want to nudge a project in a specific direction asynchronously, without sitting in front of the model and re-explaining priorities every run.
+
+Project cognition adapters are loaded via `ACCRUVIA_COGNITION_MODULES`. A project-specific brain can fully replace the default prompt and decision framing when that project needs stronger or different guidance.
+
+If you change brain code or prompt files while a supervisor is already running, the running process will not see that change until it reloads. The easiest operator path is to use `nudge-project`, which records an operator note, runs a fresh heartbeat, and gracefully reloads matching supervisors for that project when needed.
+
+Example:
+
+```bash
+make run ARGS="nudge-project <project_id> 'Pay extra attention to onboarding, DX, and telemetry gaps'"
+```
 
 ## Other Docs
 

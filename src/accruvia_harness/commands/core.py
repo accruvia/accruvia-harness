@@ -98,6 +98,158 @@ def _doctor_text(payload: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
+def _smoke_test_text(payload: dict[str, object]) -> str:
+    project = payload["project"]
+    task = payload["task"]
+    runs = payload.get("runs") or []
+    events = payload.get("events") or []
+    lines = [
+        "Smoke test complete",
+        "",
+        "Project",
+        f"- {project['name']} ({project['id']})",
+        "",
+        "Task",
+        f"- {task['title']} ({task['id']})",
+        f"- Status: {task['status']}",
+        "",
+        "Activity",
+        f"- Runs recorded: {len(runs)}",
+        f"- Events recorded: {len(events)}",
+        "",
+        "Next step",
+        "- Use `./bin/accruvia-harness supervise` to keep the machine running.",
+    ]
+    return "\n".join(lines)
+
+
+def _backlog_delta_text(before: dict[str, object] | None, after: dict[str, object] | None) -> str | None:
+    if not before or not after:
+        return None
+    before_status = dict(before.get("tasks_by_status") or {})
+    after_status = dict(after.get("tasks_by_status") or {})
+    keys = sorted(set(before_status) | set(after_status))
+    parts: list[str] = []
+    for key in keys:
+        previous = int(before_status.get(key, 0) or 0)
+        current = int(after_status.get(key, 0) or 0)
+        if previous == current:
+            continue
+        delta = current - previous
+        sign = "+" if delta > 0 else ""
+        parts.append(f"{key} {previous}->{current} ({sign}{delta})")
+    previous_promotions = int(before.get("pending_promotions", 0) or 0)
+    current_promotions = int(after.get("pending_promotions", 0) or 0)
+    if previous_promotions != current_promotions:
+        delta = current_promotions - previous_promotions
+        sign = "+" if delta > 0 else ""
+        parts.append(f"pending_promotions {previous_promotions}->{current_promotions} ({sign}{delta})")
+    if not parts:
+        return "no backlog change"
+    return ", ".join(parts)
+
+
+def _supervise_start_text(
+    *,
+    project_id: str | None,
+    watch: bool,
+    worker_id: str,
+    heartbeat_project_ids: list[str],
+    heartbeat_all_projects: bool,
+    review_check_enabled: bool,
+) -> str:
+    scope = project_id or "all projects"
+    mode = "continuous" if watch else "one-shot"
+    heartbeat_scope = "all projects" if heartbeat_all_projects else ", ".join(heartbeat_project_ids) if heartbeat_project_ids else "disabled"
+    review_checks = "enabled" if review_check_enabled else "disabled"
+    return "\n".join(
+        [
+            "Supervisor started",
+            f"- Scope: {scope}",
+            f"- Mode: {mode}",
+            f"- Worker: {worker_id}",
+            f"- Heartbeats: {heartbeat_scope}",
+            f"- Review checks: {review_checks}",
+            "Waiting for work...",
+        ]
+    )
+
+
+def _emit_supervise_progress(event: dict[str, object]) -> None:
+    event_type = str(event.get("type"))
+    if event_type == "task_started":
+        print(f"Started task {event['task_title']} ({event['task_id']})", flush=True)
+        return
+    if event_type == "task_finished":
+        print(
+            f"Task {event['task_title']} is now {event['status']} ({event['task_id']})",
+            flush=True,
+        )
+        summary = str(event.get("summary") or "").strip()
+        if summary:
+            print(f"  Summary: {summary}", flush=True)
+        backlog_delta = _backlog_delta_text(event.get("backlog_before"), event.get("backlog_after"))
+        if backlog_delta:
+            print(f"  Backlog delta: {backlog_delta}", flush=True)
+        return
+    if event_type == "task_processed":
+        print(f"Processed task {event['task_title']} ({event['processed_count']} total)", flush=True)
+        return
+    if event_type == "heartbeat_succeeded":
+        print(
+            f"Heartbeat succeeded for {event['project_id']} ({event['heartbeat_count']} total, created {event['created_task_count']} tasks)",
+            flush=True,
+        )
+        summary = str(event.get("summary") or "").strip()
+        if summary:
+            print(f"  Summary: {summary}", flush=True)
+        backlog_delta = _backlog_delta_text(event.get("backlog_before"), event.get("backlog_after"))
+        if backlog_delta:
+            print(f"  Backlog delta: {backlog_delta}", flush=True)
+        return
+    if event_type == "heartbeat_failed":
+        print(
+            f"Heartbeat failed for {event['project_id']} (attempt {event['consecutive_failures']}): {event['message']}",
+            flush=True,
+        )
+        return
+    if event_type == "heartbeat_escalated":
+        print(
+            f"Heartbeat escalated for {event['project_id']} after {event['consecutive_failures']} failures",
+            flush=True,
+        )
+        return
+    if event_type == "heartbeat_disabled":
+        print(
+            f"Heartbeats disabled for {event['project_id']} after {event['consecutive_failures']} failures",
+            flush=True,
+        )
+        return
+    if event_type == "review_checked":
+        print(
+            f"Review check ran: checked {event['checked_count']}, conflicts {event['conflict_count']}, merged {event['merged_count']}",
+            flush=True,
+        )
+        return
+    if event_type == "sleeping":
+        print(f"Idle. Sleeping {event['seconds']}s (idle cycle {event['idle_cycles']})", flush=True)
+        return
+
+
+def _supervise_summary_text(result) -> str:
+    return "\n".join(
+        [
+            "Supervisor stopped",
+            f"- Exit reason: {result.exit_reason}",
+            f"- Tasks processed: {result.processed_count}",
+            f"- Heartbeats run: {result.heartbeat_count}",
+            f"- Review checks: {result.review_check_count}",
+            f"- Idle cycles: {result.idle_cycles}",
+            f"- Slept seconds: {result.slept_seconds}",
+        ]
+    )
+
+
 def _resolved_config_file(args, config) -> Path:
     if getattr(args, "config_file", None):
         return Path(args.config_file)
@@ -648,6 +800,18 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
             ),
             encoding="utf-8",
         )
+        if not args.json:
+            print(
+                _supervise_start_text(
+                    project_id=args.project_id,
+                    watch=args.watch,
+                    worker_id=args.worker_id,
+                    heartbeat_project_ids=heartbeat_project_ids,
+                    heartbeat_all_projects=args.heartbeat_all_projects,
+                    review_check_enabled=args.review_check_enabled or config.pr_check_enabled,
+                ),
+                flush=True,
+            )
         try:
             result = engine.supervise(
                 project_id=args.project_id,
@@ -663,6 +827,7 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
                 review_check_enabled=args.review_check_enabled or config.pr_check_enabled,
                 review_check_interval_seconds=args.review_check_interval_seconds or config.pr_check_interval_seconds,
                 stop_requested=lambda: stop_requested["value"] or stop_request_path.exists(),
+                progress_callback=None if args.json else _emit_supervise_progress,
             )
         finally:
             signal.signal(signal.SIGINT, previous_int)
@@ -671,7 +836,10 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
                 pid_path.unlink()
             if stop_request_path.exists() and not _prune_supervisor_records(config):
                 stop_request_path.unlink()
-        emit(serialize_dataclass(result))
+        if args.json:
+            emit(serialize_dataclass(result))
+        else:
+            print(_supervise_summary_text(result))
         return True
     if args.command == "nudge-project":
         project = store.get_project(args.project_id)
@@ -832,6 +1000,15 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
             required_artifacts=["plan", "report"],
         )
         runs = engine.run_until_stable(task.id)
-        emit({"project": serialize_dataclass(project), "task": serialize_dataclass(store.get_task(task.id)), "runs": [serialize_dataclass(r) for r in runs], "events": [serialize_dataclass(i) for i in store.list_events("task", task.id)]})
+        payload = {
+            "project": serialize_dataclass(project),
+            "task": serialize_dataclass(store.get_task(task.id)),
+            "runs": [serialize_dataclass(r) for r in runs],
+            "events": [serialize_dataclass(i) for i in store.list_events("task", task.id)],
+        }
+        if args.json:
+            emit(payload)
+        else:
+            print(_smoke_test_text(payload))
         return True
     return False

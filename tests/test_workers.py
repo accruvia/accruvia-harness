@@ -11,7 +11,7 @@ from unittest.mock import patch
 from accruvia_harness.adapters import build_adapter_registry
 from accruvia_harness.config import HarnessConfig
 from accruvia_harness.domain import Run, RunStatus, Task, new_id
-from accruvia_harness.llm import build_llm_router, parse_affirmation_response
+from accruvia_harness.llm import CommandLLMExecutor, LLMInvocation, build_llm_router, parse_affirmation_response
 from accruvia_harness.subprocess_env import build_subprocess_env
 from accruvia_harness.telemetry import TelemetrySink
 from accruvia_harness.timeout_policy import ExecutionTimeoutPolicy
@@ -191,6 +191,60 @@ class WorkerTests(unittest.TestCase):
         summary = telemetry.summary()
         self.assertEqual(0.12, summary["cost_totals"]["cost_usd"])
         self.assertEqual(30.0, summary["cost_totals"]["total_tokens"])
+
+    def test_command_llm_executor_allows_invocation_timeout_override(self) -> None:
+        telemetry = TelemetrySink(self.base / "telemetry")
+        timeout_policy = ExecutionTimeoutPolicy(
+            telemetry,
+            min_seconds=1,
+            max_seconds=1,
+            multiplier=1.0,
+        )
+        executor = CommandLLMExecutor(
+            "command",
+            "sleep 2; printf 'done' > \"$ACCRUVIA_LLM_RESPONSE_PATH\"",
+            timeout_policy=timeout_policy,
+        )
+
+        result = executor.execute(
+            LLMInvocation(
+                task=self.task,
+                run=self.run,
+                prompt="Test timeout override",
+                run_dir=self.base / "heartbeat",
+                timeout_seconds_override=3,
+            )
+        )
+
+        self.assertEqual("done", result.response_text)
+        self.assertEqual(3, result.diagnostics["timeout_seconds"])
+
+    def test_build_llm_router_uses_higher_memory_floor_for_llm_clis(self) -> None:
+        config = HarnessConfig(
+            db_path=self.base / "harness.db",
+            workspace_root=self.base,
+            log_path=self.base / "harness.log",
+            default_project_name="demo",
+            default_repo="accruvia/accruvia",
+            runtime_backend="local",
+            temporal_target="localhost:7233",
+            temporal_namespace="default",
+            temporal_task_queue="accruvia-harness",
+            worker_backend="llm",
+            worker_command=None,
+            llm_backend="codex",
+            llm_model=None,
+            llm_command=None,
+            llm_codex_command="printf 'ok' > \"$ACCRUVIA_LLM_RESPONSE_PATH\"",
+            llm_claude_command=None,
+            llm_accruvia_client_command=None,
+            memory_limit_mb=1024,
+        )
+
+        router = build_llm_router(config)
+        executor, _ = router.resolve()
+
+        self.assertEqual(4096, executor.resource_policy.memory_limit_mb)
 
     def test_llm_router_prefers_accruvia_client_in_github_actions(self) -> None:
         config = HarnessConfig(

@@ -43,6 +43,8 @@ class HarnessEngine:
         validator_registry: PromotionValidatorRegistry | None = None,
         cognition_registry: CognitionAdapterRegistry | None = None,
         issue_state_policy: IssueStatePolicy | None = None,
+        heartbeat_timeout_seconds: int = 1800,
+        heartbeat_failure_escalation_threshold: int = 3,
         telemetry=None,
     ) -> None:
         self.store = store
@@ -57,6 +59,8 @@ class HarnessEngine:
         self.validator_registry = validator_registry or build_validator_registry()
         self.cognition_registry = cognition_registry or build_cognition_registry()
         self.issue_state_policy = issue_state_policy or IssueStatePolicy()
+        self.heartbeat_timeout_seconds = heartbeat_timeout_seconds
+        self.heartbeat_failure_escalation_threshold = heartbeat_failure_escalation_threshold
         self.telemetry = telemetry
         self.repository_promotions = RepositoryPromotionService()
 
@@ -95,9 +99,15 @@ class HarnessEngine:
             cognition_registry=self.cognition_registry,
             task_service=self.tasks,
             llm_router=self.llm_router,
+            heartbeat_timeout_seconds=getattr(self, "heartbeat_timeout_seconds", 1800),
             telemetry=self.telemetry,
         )
-        self.supervisor = SupervisorService(self.store, self.queue, self.cognition)
+        self.supervisor = SupervisorService(
+            self.store,
+            self.queue,
+            self.cognition,
+            heartbeat_failure_escalation_threshold=self.heartbeat_failure_escalation_threshold,
+        )
         self.review_watcher = ReviewWatcherService(self.store, task_service=self.tasks)
         self.promotions = PromotionService(
             self.store,
@@ -265,6 +275,8 @@ class HarnessEngine:
         heartbeat_all_projects: bool = False,
         review_check_enabled: bool = False,
         review_check_interval_seconds: int | None = None,
+        stop_requested=None,
+        progress_callback=None,
     ):
         return self.supervisor.run(
             project_id=project_id,
@@ -280,6 +292,8 @@ class HarnessEngine:
             review_check_enabled=review_check_enabled,
             review_check_interval_seconds=review_check_interval_seconds,
             review_watcher=self.review_watcher,
+            stop_requested=stop_requested,
+            progress_callback=progress_callback,
         )
 
     def check_reviews(self, interval_seconds: int):

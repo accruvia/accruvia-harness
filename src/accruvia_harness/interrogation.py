@@ -155,6 +155,81 @@ class HarnessQueryService:
                 | {"lease_expires_at": lease.lease_expires_at.isoformat(), "created_at": lease.created_at.isoformat()}
                 for lease in self.store.list_task_leases(project_id)
             ],
+            "operator_nudges": self._operator_nudges(project_id),
+            "strategy_history": self._strategy_history(project_id),
+            "telemetry_summary": self._telemetry_summary(),
+        }
+
+    def _operator_nudges(self, project_id: str | None) -> list[dict[str, object]]:
+        if project_id is None:
+            return []
+        events = self.store.list_events("project", project_id)
+        nudges = [event for event in events if event.event_type == "operator_nudge"]
+        return [
+            {
+                "created_at": event.created_at.isoformat(),
+                "note": str((event.payload or {}).get("note") or ""),
+                "author": str((event.payload or {}).get("author") or ""),
+            }
+            for event in nudges[-5:]
+        ]
+
+    def _strategy_history(self, project_id: str | None) -> dict[str, object]:
+        if project_id is None:
+            return {
+                "recent_heartbeats": [],
+                "heartbeat_count": 0,
+                "tasks_created_from_heartbeats": 0,
+                "tasks_skipped_from_heartbeats": 0,
+            }
+        events = self.store.list_events("project", project_id)
+        heartbeat_events = [event for event in events if event.event_type == "heartbeat_completed"]
+        recent_heartbeats = []
+        tasks_created = 0
+        tasks_skipped = 0
+        for event in heartbeat_events[-5:]:
+            payload = dict(event.payload or {})
+            created = int(payload.get("created_task_count", 0) or 0)
+            skipped = int(payload.get("skipped_task_count", 0) or 0)
+            tasks_created += created
+            tasks_skipped += skipped
+            recent_heartbeats.append(
+                {
+                    "created_at": event.created_at.isoformat(),
+                    "summary": str(payload.get("summary") or ""),
+                    "adapter_name": str(payload.get("adapter_name") or ""),
+                    "issue_creation_needed": bool(payload.get("issue_creation_needed", False)),
+                    "proposed_task_count": int(payload.get("proposed_task_count", 0) or 0),
+                    "created_task_count": created,
+                    "skipped_task_count": skipped,
+                }
+            )
+        return {
+            "recent_heartbeats": recent_heartbeats,
+            "heartbeat_count": len(heartbeat_events),
+            "tasks_created_from_heartbeats": sum(
+                int((event.payload or {}).get("created_task_count", 0) or 0)
+                for event in heartbeat_events
+            ),
+            "tasks_skipped_from_heartbeats": sum(
+                int((event.payload or {}).get("skipped_task_count", 0) or 0)
+                for event in heartbeat_events
+            ),
+            "recent_window_tasks_created": tasks_created,
+            "recent_window_tasks_skipped": tasks_skipped,
+        }
+
+    def _telemetry_summary(self) -> dict[str, object]:
+        if self.telemetry is None:
+            return {}
+        summary = self.telemetry.summary()
+        return {
+            "metric_totals": dict(summary.get("metric_totals", {})),
+            "span_counts": dict(summary.get("span_counts", {})),
+            "cost_totals": dict(summary.get("cost_totals", {})),
+            "slowest_operations_ms": list(summary.get("dashboard", {}).get("slowest_operations_ms", [])),
+            "highest_volume_metrics": list(summary.get("dashboard", {}).get("highest_volume_metrics", [])),
+            "recent_warnings": list(summary.get("warnings", []))[-5:],
         }
 
     def operations_report(self, project_id: str | None = None) -> dict[str, object]:

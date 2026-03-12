@@ -72,6 +72,36 @@ class CognitionTests(unittest.TestCase):
 
         self.assertEqual("Demo", context["brain_sources"][0]["summary"])
 
+    def test_generic_cognition_prompt_sets_global_brain_policy(self) -> None:
+        adapter = GenericCognitionAdapter()
+        project = type("ProjectStub", (), {"id": "p1", "name": "Demo", "description": "Demo", "adapter_name": "generic"})()
+        prompt = adapter.build_prompt(project, {"project": {"name": "Demo"}, "telemetry": {"runs": 3}})
+
+        self.assertIn("global project brain", prompt)
+        self.assertIn("There is no fixed cap on the number of tasks.", prompt)
+        self.assertIn("Reject feature creep", prompt)
+        self.assertIn("queue behavior, and strategy overhead", prompt)
+        self.assertIn("strict JSON with keys: summary, priority_focus, issue_creation_needed, proposed_tasks, risks", prompt)
+        self.assertIn("next_heartbeat_seconds", prompt)
+
+    def test_generic_cognition_adapter_parses_next_heartbeat_seconds(self) -> None:
+        adapter = GenericCognitionAdapter()
+
+        parsed = adapter.parse_response(
+            json.dumps(
+                {
+                    "summary": "Healthy project",
+                    "priority_focus": "stability",
+                    "issue_creation_needed": False,
+                    "proposed_tasks": [],
+                    "risks": [],
+                    "next_heartbeat_seconds": 2700,
+                }
+            )
+        )
+
+        self.assertEqual(2700, parsed["next_heartbeat_seconds"])
+
     def test_engine_heartbeat_uses_external_cognition_adapter(self) -> None:
         llm_script = self.base / "fake_llm.sh"
         llm_script.write_text(
@@ -272,3 +302,112 @@ class CognitionTests(unittest.TestCase):
 
         total_bytes = sum(len(item["content"].encode("utf-8")) for item in heartbeat.sources)
         self.assertLessEqual(total_bytes, 12000)
+
+    def test_heartbeat_uses_dedicated_timeout_override(self) -> None:
+        os.environ["DEMO_REPO_ROOT"] = str(self.repo_root)
+        self.addCleanup(lambda: os.environ.pop("DEMO_REPO_ROOT", None))
+
+        store = SQLiteHarnessStore(self.base / "heartbeat-timeout.db")
+        store.initialize()
+        config = HarnessConfig.from_payload(
+            {
+                **HarnessConfig.from_env(
+                    db_path=self.base / "heartbeat-timeout.db",
+                    workspace_root=self.base / "workspace-heartbeat-timeout",
+                    log_path=self.base / "harness-heartbeat-timeout.log",
+                ).to_payload(),
+                "project_adapter_modules": (self.module_name,),
+                "cognition_modules": (self.module_name,),
+                "heartbeat_timeout_seconds": 2400,
+            }
+        )
+
+        class TimeoutCapturingRouter:
+            def __init__(self) -> None:
+                self.executors = {"command": object()}
+                self.invocations = []
+
+            def execute(self, invocation, telemetry=None):
+                from accruvia_harness.llm import LLMExecutionResult
+
+                self.invocations.append(invocation)
+                return (
+                    LLMExecutionResult(
+                        backend="command",
+                        response_text='{"summary":"Timeout captured","priority_focus":"heartbeat","issue_creation_needed":false,"proposed_tasks":[]}',
+                        prompt_path=invocation.run_dir / "llm_prompt.txt",
+                        response_path=invocation.run_dir / "llm_response.md",
+                        diagnostics={"timeout_seconds": invocation.timeout_seconds_override},
+                    ),
+                    "command",
+                )
+
+        router = TimeoutCapturingRouter()
+        engine = HarnessEngine(
+            store=store,
+            workspace_root=config.workspace_root,
+            project_adapter_registry=build_project_adapter_registry(config.project_adapter_modules),
+            cognition_registry=build_cognition_registry(config.cognition_modules),
+            heartbeat_timeout_seconds=config.heartbeat_timeout_seconds,
+            llm_router=router,
+        )
+        project = engine.create_project("Routellect", "Demo project", adapter_name="demo")
+
+        heartbeat = engine.heartbeat(project.id)
+
+        self.assertEqual(2400, router.invocations[0].timeout_seconds_override)
+        self.assertEqual("Timeout captured", heartbeat.analysis["summary"])
+
+    def test_heartbeat_falls_back_between_multiple_llm_providers(self) -> None:
+        claude_script = self.base / "fake_heartbeat_claude_fail.sh"
+        claude_script.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf 'claude unavailable\\n' >&2\n"
+            "exit 7\n",
+            encoding="utf-8",
+        )
+        claude_script.chmod(0o755)
+        codex_script = self.base / "fake_heartbeat_codex_success.sh"
+        codex_script.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '{\"summary\":\"Fallback succeeded\",\"priority_focus\":\"router\",\"issue_creation_needed\":false,"
+            "\\\"proposed_tasks\\\":[]}' > \"$ACCRUVIA_LLM_RESPONSE_PATH\"\n",
+            encoding="utf-8",
+        )
+        codex_script.chmod(0o755)
+
+        os.environ["DEMO_REPO_ROOT"] = str(self.repo_root)
+        self.addCleanup(lambda: os.environ.pop("DEMO_REPO_ROOT", None))
+
+        store = SQLiteHarnessStore(self.base / "heartbeat-fallback.db")
+        store.initialize()
+        config = HarnessConfig.from_payload(
+            {
+                **HarnessConfig.from_env(
+                    db_path=self.base / "heartbeat-fallback.db",
+                    workspace_root=self.base / "workspace-heartbeat-fallback",
+                    log_path=self.base / "harness-heartbeat-fallback.log",
+                ).to_payload(),
+                "project_adapter_modules": (self.module_name,),
+                "cognition_modules": (self.module_name,),
+                "llm_backend": "auto",
+                "llm_codex_command": str(codex_script),
+                "llm_claude_command": str(claude_script),
+            }
+        )
+        engine = HarnessEngine(
+            store=store,
+            workspace_root=config.workspace_root,
+            project_adapter_registry=build_project_adapter_registry(config.project_adapter_modules),
+            cognition_registry=build_cognition_registry(config.cognition_modules),
+            heartbeat_timeout_seconds=config.heartbeat_timeout_seconds,
+        )
+        from accruvia_harness.llm import build_llm_router
+
+        engine.set_llm_router(build_llm_router(config))
+        project = engine.create_project("Routellect", "Demo project", adapter_name="demo")
+
+        heartbeat = engine.heartbeat(project.id)
+
+        self.assertEqual("codex", heartbeat.llm_backend)
+        self.assertEqual("Fallback succeeded", heartbeat.analysis["summary"])

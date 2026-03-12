@@ -24,7 +24,7 @@ class LLMEndToEndTests(unittest.TestCase):
 
     def run_cli(self, *args: str) -> dict[str, object]:
         completed = subprocess.run(
-            [sys.executable, "-m", "accruvia_harness", *args],
+            [sys.executable, "-m", "accruvia_harness", "--json", *args],
             cwd=self.repo_root,
             env=self.env,
             check=True,

@@ -19,6 +19,8 @@ NOTIFY_EVENT_TYPES = frozenset({
     "promotion_approved",
     "branch_winner_selected",
     "run_blocked",
+    "heartbeat_escalated",
+    "heartbeat_disabled",
 })
 
 # Bounded pool prevents unbounded thread accumulation when the observer is slow/down.

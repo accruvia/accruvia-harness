@@ -9,7 +9,8 @@ from unittest import mock
 from pathlib import Path
 
 from accruvia_harness.config import HarnessConfig
-from accruvia_harness.commands.core import _redact_command
+from accruvia_harness.commands.core import _build_supervise_restart_command, _redact_command
+from accruvia_harness.cli_parser import build_parser
 from accruvia_harness.logging_utils import HarnessLogger, classify_error
 from accruvia_harness.store import SQLiteHarnessStore
 from accruvia_harness.telemetry import TelemetrySink, _otlp_signal_endpoints
@@ -43,6 +44,7 @@ class Phase1Tests(unittest.TestCase):
         self.assertEqual("accruvia-harness", config.otel_service_name)
         self.assertIsNone(config.otel_exporter_otlp_endpoint)
         self.assertEqual((), config.env_passthrough)
+        self.assertEqual(3, config.heartbeat_failure_escalation_threshold)
         self.assertTrue(config.pr_check_enabled)
         self.assertEqual(28800, config.pr_check_interval_seconds)
 
@@ -117,6 +119,10 @@ class Phase1Tests(unittest.TestCase):
         self.assertEqual(config.runtime_backend, restored.runtime_backend)
         self.assertEqual(config.timeout_multiplier, restored.timeout_multiplier)
         self.assertEqual(config.telemetry_fsync_writes, restored.telemetry_fsync_writes)
+        self.assertEqual(
+            config.heartbeat_failure_escalation_threshold,
+            restored.heartbeat_failure_escalation_threshold,
+        )
         self.assertEqual(config.pr_check_enabled, restored.pr_check_enabled)
         self.assertEqual(config.pr_check_interval_seconds, restored.pr_check_interval_seconds)
 
@@ -133,6 +139,40 @@ class Phase1Tests(unittest.TestCase):
     def test_redact_command_hides_command_tail(self) -> None:
         self.assertEqual("codex [REDACTED]", _redact_command("codex exec --api-key secret"))
         self.assertIsNone(_redact_command(None))
+
+    def test_build_supervise_restart_command_preserves_runtime_options(self) -> None:
+        command = _build_supervise_restart_command(
+            {
+                "project_id": "project_123",
+                "worker_id": "babysitter",
+                "lease_seconds": 300,
+                "watch": True,
+                "idle_sleep_seconds": 15.0,
+                "max_idle_cycles": 4,
+                "max_iterations": 20,
+                "heartbeat_project_ids": ["project_123"],
+                "heartbeat_interval_seconds": 60.0,
+                "heartbeat_all_projects": False,
+                "review_check_enabled": True,
+                "review_check_interval_seconds": 7200,
+            }
+        )
+
+        self.assertIn("supervise", command)
+        self.assertIn("--project-id", command)
+        self.assertIn("--worker-id", command)
+        self.assertIn("--heartbeat-project-id", command)
+        self.assertIn("--review-check-enabled", command)
+
+    def test_supervise_cli_defaults_to_watch_mode(self) -> None:
+        args = build_parser().parse_args(["supervise"])
+
+        self.assertTrue(args.watch)
+
+    def test_build_supervise_restart_command_uses_one_shot_for_non_watch_mode(self) -> None:
+        command = _build_supervise_restart_command({"watch": False})
+
+        self.assertIn("--one-shot", command)
 
     def test_otlp_signal_endpoints_are_derived_per_signal(self) -> None:
         self.assertEqual(

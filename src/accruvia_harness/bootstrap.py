@@ -52,6 +52,8 @@ def build_engine_from_config(
         project_adapter_registry=build_project_adapter_registry(config.project_adapter_modules),
         validator_registry=build_validator_registry(config.validator_modules),
         cognition_registry=build_cognition_registry(config.cognition_modules),
+        heartbeat_timeout_seconds=config.heartbeat_timeout_seconds,
+        heartbeat_failure_escalation_threshold=config.heartbeat_failure_escalation_threshold,
         telemetry=resolved_telemetry,
         issue_state_policy=build_issue_state_policy(config),
     )

@@ -2,12 +2,14 @@ PYTHON ?= .venv/bin/python
 PIP ?= .venv/bin/pip
 PYTHONPATH_VALUE := src
 
-.PHONY: help venv init install install-temporal install-observability run test test-fast test-e2e test-observer test-temporal temporal-up temporal-down
+.PHONY: help venv init install bootstrap install-temporal install-observability run test test-fast test-e2e test-observer test-temporal temporal-up temporal-down
 
 help:
 	@echo "Targets:"
+	@echo "  ./bin/accruvia-harness ... Run the self-bootstrapping local CLI"
 	@echo "  make venv                  Create .venv"
 	@echo "  make init                  Install editable package"
+	@echo "  make bootstrap             Bootstrap .venv and install editable package"
 	@echo "  make install-temporal      Install Temporal extras"
 	@echo "  make install-observability Install observability extras"
 	@echo "  make run ARGS=\"status\"     Run the harness CLI"
@@ -27,6 +29,8 @@ init: venv
 	PYTHONPATH=$(PYTHONPATH_VALUE) $(PYTHON) -m accruvia_harness init-db >/dev/null
 
 install: init
+
+bootstrap: init
 
 install-temporal: venv
 	$(PIP) install -e '.[temporal]'

@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+venv_dir="${ACCRUVIA_VENV_DIR:-$repo_root/.venv}"
+python_bin="$venv_dir/bin/python"
+pip_bin="$venv_dir/bin/pip"
+cli_bin="$venv_dir/bin/accruvia-harness"
+
+if [[ ! -x "$python_bin" ]]; then
+  echo "Bootstrapping Python virtualenv in $venv_dir" >&2
+  python3 -m venv "$venv_dir"
+fi
+
+if [[ ! -x "$cli_bin" ]]; then
+  echo "Installing accruvia-harness into $venv_dir" >&2
+  "$pip_bin" install -e "$repo_root" >&2
+fi
+
+exec "$cli_bin" "$@"

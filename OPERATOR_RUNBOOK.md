@@ -13,25 +13,79 @@ This runbook covers the local operation of `accruvia-harness` during the current
 ## Local Startup
 
 ```bash
-PYTHONPATH=src python3 -m accruvia_harness config
-PYTHONPATH=src python3 -m accruvia_harness init-db
-PYTHONPATH=src python3 -m accruvia_harness smoke-test
+./bin/accruvia-harness setup
+./bin/accruvia-harness doctor
+./bin/accruvia-harness config
+./bin/accruvia-harness init-db
+./bin/accruvia-harness smoke-test
 ```
+
+`setup` writes durable operator settings to `.accruvia-harness/config.json` by default. Use that instead of relying on
+session-local `export` commands for LLM executor setup.
+
+Prototype expectations:
+
+- use `doctor` after setup and before heartbeats
+- run `smoke-test` before enabling long-running watch mode
+- prefer `supervise --one-shot` until the project-specific loop is behaving predictably
+- reset local state explicitly when crash recovery or drift leaves the repo-local state suspect
 
 ## Core Operator Commands
 
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -v
-PYTHONPATH=src python3 -m accruvia_harness status
-PYTHONPATH=src python3 -m accruvia_harness summary
-PYTHONPATH=src python3 -m accruvia_harness context-packet
-PYTHONPATH=src python3 -m accruvia_harness task-report <task_id>
-PYTHONPATH=src python3 -m accruvia_harness dashboard-report
-PYTHONPATH=src python3 -m accruvia_harness telemetry-report
-PYTHONPATH=src python3 -m accruvia_harness explain-system
-PYTHONPATH=src python3 -m accruvia_harness explain-task <task_id>
-PYTHONPATH=src python3 -m accruvia_harness events
+./bin/accruvia-harness doctor
+./bin/accruvia-harness status
+./bin/accruvia-harness summary
+./bin/accruvia-harness context-packet
+./bin/accruvia-harness task-report <task_id>
+./bin/accruvia-harness dashboard-report
+./bin/accruvia-harness telemetry-report
+./bin/accruvia-harness explain-system
+./bin/accruvia-harness explain-task <task_id>
+./bin/accruvia-harness events
 ```
+
+## Onboarding And LLM Setup
+
+Preferred operator path:
+
+```bash
+./bin/accruvia-harness setup
+./bin/accruvia-harness doctor
+./bin/accruvia-harness smoke-test
+./bin/accruvia-harness config
+```
+
+Non-interactive alternative:
+
+```bash
+./bin/accruvia-harness configure-llm \
+  --backend codex \
+  --codex-command 'codex exec'
+```
+
+Installed package entrypoint once `.venv` or another environment is active:
+
+```bash
+accruvia-harness doctor
+```
+
+Development fallback when running directly from the source tree:
+
+```bash
+PYTHONPATH=src python3 -m accruvia_harness doctor
+```
+
+Use `doctor` before enabling autonomous heartbeats. It will report missing executors, preferred-backend mismatches, and
+PATH problems directly instead of leaving the failure to a later heartbeat attempt.
+
+`doctor` readiness levels are meant to be used progressively:
+
+- `inspection_ready`: safe to inspect state
+- `task_execution_ready`: safe to run tasks locally
+- `heartbeats_ready`: LLM executor is configured for heartbeat/explanation flows
+- `autonomous_ready`: suitable for longer-running autonomous supervision
 
 ## Read-Only Observer Boundary
 
@@ -42,15 +96,15 @@ PYTHONPATH=src python3 -m accruvia_harness events
 ## Issue Intake And Reporting
 
 ```bash
-PYTHONPATH=src python3 -m accruvia_harness sync-github-open <project_id> <repo>
-PYTHONPATH=src python3 -m accruvia_harness report-github <task_id> <repo>
-PYTHONPATH=src python3 -m accruvia_harness sync-github-state <task_id> <repo>
-PYTHONPATH=src python3 -m accruvia_harness sync-github-metadata <task_id> <repo>
-PYTHONPATH=src python3 -m accruvia_harness sync-gitlab-open <project_id> <repo>
-PYTHONPATH=src python3 -m accruvia_harness process-next --worker-id worker-a --lease-seconds 300
-PYTHONPATH=src python3 -m accruvia_harness report-gitlab <task_id> <repo>
-PYTHONPATH=src python3 -m accruvia_harness sync-gitlab-state <task_id> <repo>
-PYTHONPATH=src python3 -m accruvia_harness sync-gitlab-metadata <task_id> <repo>
+./bin/accruvia-harness sync-github-open <project_id> <repo>
+./bin/accruvia-harness report-github <task_id> <repo>
+./bin/accruvia-harness sync-github-state <task_id> <repo>
+./bin/accruvia-harness sync-github-metadata <task_id> <repo>
+./bin/accruvia-harness sync-gitlab-open <project_id> <repo>
+./bin/accruvia-harness process-next --worker-id worker-a --lease-seconds 300
+./bin/accruvia-harness report-gitlab <task_id> <repo>
+./bin/accruvia-harness sync-gitlab-state <task_id> <repo>
+./bin/accruvia-harness sync-gitlab-metadata <task_id> <repo>
 ```
 
 ## Queue Arbitration
@@ -62,7 +116,14 @@ PYTHONPATH=src python3 -m accruvia_harness sync-gitlab-metadata <task_id> <repo>
 To inspect current leases:
 
 ```bash
-PYTHONPATH=src python3 -m accruvia_harness status
+./bin/accruvia-harness status
+```
+
+Prototype-first queue progression:
+
+```bash
+./bin/accruvia-harness supervise --one-shot
+./bin/accruvia-harness supervise
 ```
 
 ## Workspace Safety Policy
@@ -99,13 +160,13 @@ Use `direct_main` only after a project has proven it can operate safely without 
 To run a one-shot review check:
 
 ```bash
-PYTHONPATH=src python3 -m accruvia_harness check-reviews
+./bin/accruvia-harness check-reviews
 ```
 
 To let the supervisor perform sparse review checks while watching the queue:
 
 ```bash
-PYTHONPATH=src python3 -m accruvia_harness supervise --watch --review-check-enabled
+./bin/accruvia-harness supervise --review-check-enabled
 ```
 
 If a PR/MR is found to be conflicted, the harness records the conflict and creates one remediation follow-on task tied to
@@ -125,8 +186,8 @@ Generated state lives under `.accruvia-harness/` and should not be committed:
 If local state becomes confusing during development:
 
 ```bash
-rm -rf .accruvia-harness
-PYTHONPATH=src python3 -m accruvia_harness init-db
+./bin/accruvia-harness reset-local-state --yes
+./bin/accruvia-harness init-db
 ```
 
 ## Telemetry Durability

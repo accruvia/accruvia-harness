@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from accruvia_harness.domain import Project, TaskStatus, new_id
+from accruvia_harness.domain import Event, Project, TaskStatus, new_id
 from accruvia_harness.engine import HarnessEngine
 from accruvia_harness.interrogation import HarnessQueryService, InterrogationService
 from accruvia_harness.llm import LLMExecutionResult
@@ -225,6 +225,56 @@ class HarnessQueryServiceTests(unittest.TestCase):
         self.assertEqual(1, len(packet["leases"]))
         self.assertEqual(task_a.id, packet["leases"][0]["task_id"])
         self.assertNotEqual(task_b.id, packet["leases"][0]["task_id"])
+
+    def test_context_packet_includes_strategy_history_and_telemetry_summary(self) -> None:
+        self.store.create_event(
+            Event(
+                id=new_id("event"),
+                entity_type="project",
+                entity_id=self.project.id,
+                event_type="heartbeat_completed",
+                payload={
+                    "adapter_name": "generic",
+                    "summary": "Created a focused backlog slice",
+                    "issue_creation_needed": True,
+                    "proposed_task_count": 2,
+                    "created_task_count": 1,
+                    "skipped_task_count": 1,
+                },
+            )
+        )
+        self.telemetry.metric("run_started", 1)
+        with self.telemetry.timed("heartbeat_analysis", project_id=self.project.id):
+            pass
+        self.telemetry.warn("llm_executor_failure", "provider timeout", backend="claude")
+
+        packet = self.query.context_packet(self.project.id)
+
+        self.assertEqual(1, packet["strategy_history"]["heartbeat_count"])
+        self.assertEqual(1, packet["strategy_history"]["tasks_created_from_heartbeats"])
+        self.assertEqual(
+            "Created a focused backlog slice",
+            packet["strategy_history"]["recent_heartbeats"][0]["summary"],
+        )
+        self.assertEqual(1.0, packet["telemetry_summary"]["metric_totals"]["run_started"])
+        self.assertEqual(1, packet["telemetry_summary"]["span_counts"]["heartbeat_analysis"])
+        self.assertEqual("llm_executor_failure", packet["telemetry_summary"]["recent_warnings"][0]["category"])
+
+    def test_context_packet_includes_recent_operator_nudges(self) -> None:
+        self.store.create_event(
+            Event(
+                id=new_id("event"),
+                entity_type="project",
+                entity_id=self.project.id,
+                event_type="operator_nudge",
+                payload={"note": "Prioritize onboarding and DX", "author": "tester"},
+            )
+        )
+
+        packet = self.query.context_packet(self.project.id)
+
+        self.assertEqual("Prioritize onboarding and DX", packet["operator_nudges"][0]["note"])
+        self.assertEqual("tester", packet["operator_nudges"][0]["author"])
 
     def test_dashboard_queue_depth_counts_only_pending_and_active(self) -> None:
         completed = self.engine.create_task_with_policy(

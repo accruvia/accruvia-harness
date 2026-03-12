@@ -58,7 +58,7 @@ class TemporalEndToEndTests(unittest.TestCase):
         for attempt in range(retries):
             try:
                 completed = subprocess.run(
-                    [sys.executable, "-m", "accruvia_harness", *args],
+                    [sys.executable, "-m", "accruvia_harness", "--json", *args],
                     cwd=self.repo_root,
                     env=self.env,
                     check=True,

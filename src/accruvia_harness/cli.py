@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .cli_handlers import build_context, handle_command
 from .cli_parser import build_parser
+from .commands.common import set_output_mode
 from .config import HarnessConfig
 from .logging_utils import HarnessLogger, classify_error
 
@@ -9,8 +10,9 @@ from .logging_utils import HarnessLogger, classify_error
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+    set_output_mode(json_enabled=bool(getattr(args, "json", False)))
 
-    config = HarnessConfig.from_env(args.db, args.workspace, args.log_path)
+    config = HarnessConfig.from_env(args.db, args.workspace, args.log_path, args.config_file)
     logger = HarnessLogger(config.log_path)
     logger.log("cli_invoked", command=args.command)
 

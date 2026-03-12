@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,7 @@ class LLMInvocation:
     prompt: str
     run_dir: Path
     model: str | None = None
+    timeout_seconds_override: int | None = None
 
 
 @dataclass(slots=True)
@@ -101,8 +103,8 @@ class CommandLLMExecutor:
         if invocation.model:
             env["ACCRUVIA_LLM_MODEL"] = invocation.model
 
-        timeout_seconds = None
-        if self.timeout_policy is not None:
+        timeout_seconds = invocation.timeout_seconds_override
+        if timeout_seconds is None and self.timeout_policy is not None:
             timeout_seconds = self.timeout_policy.timeout_seconds(
                 invocation.task.validation_profile, self.backend_name
             )
@@ -115,28 +117,16 @@ class CommandLLMExecutor:
                     llm_backend=self.backend_name,
                     validation_profile=invocation.task.validation_profile,
                 ):
-                    completed = subprocess.run(
-                        self.command,
-                        shell=True,
-                        check=False,
+                    completed = self._run_command(
                         cwd=invocation.run_dir,
-                        capture_output=True,
-                        text=True,
                         env=env,
-                        timeout=timeout_seconds,
-                        preexec_fn=self.resource_policy.preexec_fn() if self.resource_policy is not None else None,
+                        timeout_seconds=timeout_seconds,
                     )
             else:
-                completed = subprocess.run(
-                    self.command,
-                    shell=True,
-                    check=False,
+                completed = self._run_command(
                     cwd=invocation.run_dir,
-                    capture_output=True,
-                    text=True,
                     env=env,
-                    timeout=timeout_seconds,
-                    preexec_fn=self.resource_policy.preexec_fn() if self.resource_policy is not None else None,
+                    timeout_seconds=timeout_seconds,
                 )
         except subprocess.TimeoutExpired as exc:
             stdout_path.write_text(_coerce_subprocess_output(exc.stdout), encoding="utf-8")
@@ -206,6 +196,50 @@ class CommandLLMExecutor:
             },
         )
 
+    def _run_command(
+        self,
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        timeout_seconds: int | None,
+    ) -> subprocess.CompletedProcess[str]:
+        preexec = self.resource_policy.preexec_fn() if self.resource_policy is not None else None
+        process = subprocess.Popen(
+            self.command,
+            shell=True,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            start_new_session=preexec is None,
+            preexec_fn=preexec,
+        )
+        try:
+            stdout, stderr = process.communicate(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired as exc:
+            os.killpg(process.pid, signal.SIGKILL)
+            try:
+                stdout, stderr = process.communicate(timeout=1)
+            except subprocess.TimeoutExpired:
+                if process.stdout is not None:
+                    process.stdout.close()
+                if process.stderr is not None:
+                    process.stderr.close()
+                process.kill()
+                process.wait(timeout=1)
+                stdout = ""
+                stderr = ""
+            exc.stdout = stdout
+            exc.stderr = stderr
+            raise
+        return subprocess.CompletedProcess(
+            args=self.command,
+            returncode=process.returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
 
 class LLMRouter:
     def __init__(self, backend: str, executors: dict[str, LLMExecutor]) -> None:
@@ -269,6 +303,7 @@ def build_llm_router(config: HarnessConfig, telemetry=None) -> LLMRouter:
     from .resource_limits import ResourceLimitPolicy
     from .timeout_policy import ExecutionTimeoutPolicy
 
+    llm_memory_limit_mb = max(config.memory_limit_mb, 4096)
     timeout_policy = ExecutionTimeoutPolicy(
         telemetry,
         alpha=config.timeout_ema_alpha,
@@ -277,7 +312,7 @@ def build_llm_router(config: HarnessConfig, telemetry=None) -> LLMRouter:
         multiplier=config.timeout_multiplier,
     )
     resource_policy = ResourceLimitPolicy(
-        memory_limit_mb=config.memory_limit_mb,
+        memory_limit_mb=llm_memory_limit_mb,
         cpu_time_limit_seconds=config.cpu_time_limit_seconds,
     )
     executors: dict[str, LLMExecutor] = {}

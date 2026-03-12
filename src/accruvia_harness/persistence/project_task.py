@@ -188,7 +188,13 @@ class ProjectTaskStoreMixin:
                 (status.value, datetime.now(UTC).isoformat(), task_id),
             )
 
-    def acquire_task_lease(self, worker_id: str, lease_seconds: int, project_id: str | None = None) -> Task | None:
+    def acquire_task_lease(
+        self,
+        worker_id: str,
+        lease_seconds: int,
+        project_id: str | None = None,
+        exclude_task_ids: set[str] | None = None,
+    ) -> Task | None:
         now = datetime.now(UTC)
         expires_at = datetime.fromtimestamp(now.timestamp() + lease_seconds, tz=UTC)
         with self.connect() as connection:
@@ -203,6 +209,10 @@ class ProjectTaskStoreMixin:
             if project_id:
                 query += " AND t.project_id = ?"
                 params.append(project_id)
+            if exclude_task_ids:
+                placeholders = ",".join("?" for _ in exclude_task_ids)
+                query += f" AND t.id NOT IN ({placeholders})"
+                params.extend(sorted(exclude_task_ids))
             query += " ORDER BY t.priority DESC, t.created_at"
             candidates = connection.execute(query, tuple(params)).fetchall()
             task_id: str | None = None

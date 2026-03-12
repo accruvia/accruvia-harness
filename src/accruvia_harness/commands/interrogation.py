@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 
 from ..domain import serialize_dataclass
-from .common import CLIContext, emit
+from .common import CLIContext, emit, ensure_llm_ready
 
 
 def handle_interrogation_command(args, ctx: CLIContext) -> bool:
@@ -29,9 +29,25 @@ def handle_interrogation_command(args, ctx: CLIContext) -> bool:
         emit(ctx.query_service.dashboard_report(args.project_id))
         return True
     if args.command == "heartbeat":
-        emit(asdict(ctx.engine.heartbeat(args.project_id)))
+        ensure_llm_ready(args, ctx, reason="Project heartbeat")
+        heartbeat = ctx.engine.heartbeat(args.project_id)
+        payload = {"heartbeat": asdict(heartbeat)}
+        if heartbeat.created_tasks and not args.no_process_created_tasks:
+            payload["processing"] = asdict(
+                ctx.engine.supervise(
+                    project_id=args.project_id,
+                    worker_id=args.worker_id,
+                    lease_seconds=args.lease_seconds,
+                    watch=False,
+                    max_idle_cycles=1,
+                    heartbeat_project_ids=None,
+                    heartbeat_interval_seconds=None,
+                )
+            )
+        emit(payload)
         return True
     if args.command == "explain-system":
+        ensure_llm_ready(args, ctx, reason="System explanation")
         emit(ctx.interrogation_service.explain_system(args.project_id))
         return True
     if args.command == "lineage-report":
@@ -41,6 +57,7 @@ def handle_interrogation_command(args, ctx: CLIContext) -> bool:
         emit(ctx.query_service.task_report(args.task_id))
         return True
     if args.command == "explain-task":
+        ensure_llm_ready(args, ctx, reason="Task explanation")
         emit(ctx.interrogation_service.explain_task(args.task_id))
         return True
     if args.command == "events":

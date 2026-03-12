@@ -274,6 +274,8 @@ class ObserverHookTests(unittest.TestCase):
         self.assertIn("task_failed", NOTIFY_EVENT_TYPES)
         self.assertIn("task_completed", NOTIFY_EVENT_TYPES)
         self.assertIn("branch_winner_selected", NOTIFY_EVENT_TYPES)
+        self.assertIn("heartbeat_escalated", NOTIFY_EVENT_TYPES)
+        self.assertIn("heartbeat_disabled", NOTIFY_EVENT_TYPES)
 
     def test_notify_drops_when_queue_is_full(self) -> None:
         with patch("accruvia_harness.observer_hook._pending.acquire", return_value=False):
