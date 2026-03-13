@@ -186,6 +186,66 @@ class CLITests(unittest.TestCase):
         self.assertEqual("codex", config_payload["llm_backend"])
         self.assertEqual("codex [REDACTED]", config_payload["llm_codex_command"])
 
+    def test_supervise_refreshes_detected_provider_command_on_startup(self) -> None:
+        fake_bin = Path(self.temp_dir.name) / "bin"
+        fake_bin.mkdir()
+        codex = fake_bin / "codex"
+        codex.write_text(
+            "#!/usr/bin/env bash\n"
+            "if [ \"$1\" = \"exec\" ]; then\n"
+            "  printf '{\"summary\":\"No new work\",\"priority_focus\":\"none\",\"issue_creation_needed\":false,\"proposed_tasks\":[]}'\n"
+            "  exit 0\n"
+            "fi\n"
+            "exit 2\n",
+            encoding="utf-8",
+        )
+        codex.chmod(0o755)
+        env = self.env.copy()
+        env["PATH"] = f"{fake_bin}:/usr/bin:/bin"
+
+        configured = self.run_raw(
+            "-m",
+            "accruvia_harness",
+            "configure-llm",
+            "--backend",
+            "codex",
+            "--codex-command",
+            'codex exec < "$ACCRUVIA_LLM_PROMPT_PATH" > "$ACCRUVIA_LLM_RESPONSE_PATH"',
+            env=env,
+        )
+        self.assertEqual(0, configured.returncode, configured.stderr)
+
+        project = json.loads(
+            self.run_raw(
+                "-m",
+                "accruvia_harness",
+                "--json",
+                "create-project",
+                "startup-refresh",
+                "startup refresh project",
+                "--no-bootstrap-heartbeat",
+                env=env,
+            ).stdout
+        )["project"]
+
+        completed = self.run_raw(
+            "-m",
+            "accruvia_harness",
+            "--json",
+            "supervise",
+            "--project-id",
+            project["id"],
+            "--one-shot",
+            env=env,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertEqual(1, payload["heartbeat_count"])
+
+        config_path = Path(self.temp_dir.name) / "config.json"
+        persisted = json.loads(config_path.read_text(encoding="utf-8"))
+        self.assertEqual("codex exec", persisted["llm_codex_command"])
+
     def test_auto_configure_rejects_hanging_detected_provider(self) -> None:
         fake_bin = Path(self.temp_dir.name) / "bin"
         fake_bin.mkdir()
@@ -363,6 +423,42 @@ class CLITests(unittest.TestCase):
         self.assertEqual(1, result["processed_count"])
         self.assertEqual(1, summary["metrics"]["tasks_by_status"]["completed"])
 
+    def test_supervise_heartbeats_before_processing_existing_backlog(self) -> None:
+        llm_script = Path(self.temp_dir.name) / "fake_supervise_ordering_heartbeat.sh"
+        llm_script.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '{\"summary\":\"Create urgent work\",\"priority_focus\":\"bootstrap\",\"issue_creation_needed\":true,"
+            "\\\"proposed_tasks\\\":[{\\\"title\\\":\\\"Urgent heartbeat task\\\",\\\"objective\\\":\\\"Run before queued work\\\",\\\"priority\\\":500,\\\"rationale\\\":\\\"New critical context from heartbeat\\\"}]}' > \"$ACCRUVIA_LLM_RESPONSE_PATH\"\n",
+            encoding="utf-8",
+        )
+        llm_script.chmod(0o755)
+        self.env["ACCRUVIA_LLM_BACKEND"] = "command"
+        self.env["ACCRUVIA_LLM_COMMAND"] = str(llm_script)
+
+        project = self.run_cli(
+            "create-project",
+            "heartbeat-ordering",
+            "heartbeat ordering project",
+            "--no-bootstrap-heartbeat",
+        )["project"]
+        low = self.run_cli(
+            "create-task",
+            project["id"],
+            "Low queued task",
+            "Queued before supervise",
+            "--priority",
+            "100",
+        )["task"]
+
+        result = self.run_cli("supervise", "--project-id", project["id"], "--worker-id", "supervisor-a", "--one-shot")
+        report = self.run_cli("ops-report")
+
+        self.assertEqual(1, result["heartbeat_count"])
+        self.assertEqual(2, result["processed_count"])
+        self.assertEqual(project["id"], result["heartbeat_project_ids"][0])
+        self.assertNotEqual(low["id"], result["processed_task_ids"][0])
+        self.assertEqual(low["id"], result["processed_task_ids"][1])
+
     def test_heartbeat_processes_created_tasks_by_default(self) -> None:
         llm_script = Path(self.temp_dir.name) / "fake_direct_heartbeat.sh"
         llm_script.write_text(
@@ -478,7 +574,22 @@ class CLITests(unittest.TestCase):
         self.assertEqual("accruvia/routellect", status["projects"][0]["repo_name"])
 
     def test_project_name_can_be_used_where_project_id_is_expected(self) -> None:
-        project = self.run_cli("create-project", "accruvia-harness", "self hosting project")["project"]
+        llm_script = Path(self.temp_dir.name) / "named_project_heartbeat.sh"
+        llm_script.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '{\"summary\":\"No backlog changes\",\"priority_focus\":\"none\",\"issue_creation_needed\":false,\"proposed_tasks\":[]}' > \"$ACCRUVIA_LLM_RESPONSE_PATH\"\n",
+            encoding="utf-8",
+        )
+        llm_script.chmod(0o755)
+        self.env["ACCRUVIA_LLM_BACKEND"] = "command"
+        self.env["ACCRUVIA_LLM_COMMAND"] = str(llm_script)
+
+        project = self.run_cli(
+            "create-project",
+            "accruvia-harness",
+            "self hosting project",
+            "--no-bootstrap-heartbeat",
+        )["project"]
 
         task = self.run_cli(
             "create-task",
@@ -491,6 +602,7 @@ class CLITests(unittest.TestCase):
 
         self.assertEqual(project["id"], task["project_id"])
         self.assertEqual(project["id"], summary["project_id"])
+        self.assertEqual(1, result["heartbeat_count"])
         self.assertEqual(1, result["processed_count"])
 
     def test_ops_report_includes_validation_profile_metrics(self) -> None:
@@ -550,7 +662,22 @@ class CLITests(unittest.TestCase):
         self.assertEqual("node_test", payload["test_check"]["framework"])
 
     def test_supervise_drains_queue_until_idle(self) -> None:
-        project = self.run_cli("create-project", "supervisor", "supervisor project")["project"]
+        llm_script = Path(self.temp_dir.name) / "fake_supervise_noop_heartbeat.sh"
+        llm_script.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf '{\"summary\":\"No new work\",\"priority_focus\":\"steady\",\"issue_creation_needed\":false,\"proposed_tasks\":[]}' > \"$ACCRUVIA_LLM_RESPONSE_PATH\"\n",
+            encoding="utf-8",
+        )
+        llm_script.chmod(0o755)
+        self.env["ACCRUVIA_LLM_BACKEND"] = "command"
+        self.env["ACCRUVIA_LLM_COMMAND"] = str(llm_script)
+
+        project = self.run_cli(
+            "create-project",
+            "supervisor",
+            "supervisor project",
+            "--no-bootstrap-heartbeat",
+        )["project"]
         high = self.run_cli(
             "create-task",
             project["id"],

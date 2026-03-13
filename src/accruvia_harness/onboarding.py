@@ -30,13 +30,13 @@ def detect_llm_command_candidates(search_path: str | None = None) -> list[LLMCom
             "codex",
             "Codex CLI",
             "codex",
-            'codex exec < "$ACCRUVIA_LLM_PROMPT_PATH" > "$ACCRUVIA_LLM_RESPONSE_PATH"',
+            "codex exec",
         ),
         (
             "claude",
             "Claude CLI",
             "claude",
-            'claude < "$ACCRUVIA_LLM_PROMPT_PATH" > "$ACCRUVIA_LLM_RESPONSE_PATH"',
+            "claude",
         ),
     ]
     discovered: list[LLMCommandCandidate] = []
@@ -89,6 +89,9 @@ def probe_llm_command(command: str, *, timeout_seconds: int = 20) -> dict[str, o
             command,
             shell=True,
             cwd=root,
+            stdin=subprocess.PIPE
+            if "ACCRUVIA_LLM_PROMPT_PATH" not in command and "ACCRUVIA_LLM_RESPONSE_PATH" not in command
+            else None,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -96,7 +99,12 @@ def probe_llm_command(command: str, *, timeout_seconds: int = 20) -> dict[str, o
             start_new_session=True,
         )
         try:
-            stdout, stderr = process.communicate(timeout=timeout_seconds)
+            stdout, stderr = process.communicate(
+                input=prompt_path.read_text(encoding="utf-8")
+                if "ACCRUVIA_LLM_PROMPT_PATH" not in command and "ACCRUVIA_LLM_RESPONSE_PATH" not in command
+                else None,
+                timeout=timeout_seconds,
+            )
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGKILL)
             try:

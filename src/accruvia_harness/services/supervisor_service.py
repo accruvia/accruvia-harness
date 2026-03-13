@@ -99,29 +99,6 @@ class SupervisorService:
                 break
             iterations += 1
 
-            result = self.queue.process_next_task(
-                project_id=project_id,
-                worker_id=worker_id,
-                lease_seconds=lease_seconds,
-                exclude_task_ids=attempted_task_ids,
-                progress_callback=progress,
-            )
-            if result is not None:
-                processed_task_ids.append(result["task"].id)
-                attempted_task_ids.add(result["task"].id)
-                progress(
-                    {
-                        "type": "task_processed",
-                        "task_id": result["task"].id,
-                        "task_title": result["task"].title,
-                        "status": result["task"].status.value,
-                        "run_summary": result["runs"][-1].summary if result.get("runs") else "",
-                        "processed_count": len(processed_task_ids),
-                    }
-                )
-                idle_cycles = 0
-                continue
-
             due_heartbeats = self._due_heartbeat_projects(
                 explicit_project_ids=heartbeat_project_ids or [],
                 heartbeat_all_projects=heartbeat_all_projects,
@@ -228,6 +205,29 @@ class SupervisorService:
                         recommended = heartbeat.analysis.get("next_heartbeat_seconds")
                     if isinstance(recommended, (int, float)) and recommended > 0:
                         heartbeat_intervals[heartbeat_project_id] = float(recommended)
+                idle_cycles = 0
+                continue
+
+            result = self.queue.process_next_task(
+                project_id=project_id,
+                worker_id=worker_id,
+                lease_seconds=lease_seconds,
+                exclude_task_ids=attempted_task_ids,
+                progress_callback=progress,
+            )
+            if result is not None:
+                processed_task_ids.append(result["task"].id)
+                attempted_task_ids.add(result["task"].id)
+                progress(
+                    {
+                        "type": "task_processed",
+                        "task_id": result["task"].id,
+                        "task_title": result["task"].title,
+                        "status": result["task"].status.value,
+                        "run_summary": result["runs"][-1].summary if result.get("runs") else "",
+                        "processed_count": len(processed_task_ids),
+                    }
+                )
                 idle_cycles = 0
                 continue
 

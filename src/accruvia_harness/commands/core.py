@@ -743,15 +743,7 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
             max_idle_cycles = None if args.watch else 1
         heartbeat_project_ids = list(args.heartbeat_project_ids or [])
         heartbeat_interval_seconds = args.heartbeat_interval_seconds
-        llm_configured = any(
-            (
-                config.llm_command,
-                config.llm_codex_command,
-                config.llm_claude_command,
-                config.llm_accruvia_client_command,
-            )
-        )
-        if args.project_id and not args.heartbeat_all_projects and not heartbeat_project_ids and llm_configured:
+        if args.project_id and not args.heartbeat_all_projects and not heartbeat_project_ids:
             heartbeat_project_ids = [args.project_id]
         if heartbeat_project_ids and heartbeat_interval_seconds is None:
             heartbeat_interval_seconds = 1800.0

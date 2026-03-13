@@ -156,6 +156,31 @@ def resolve_project_args(args, ctx: CLIContext) -> None:
 
 def ensure_llm_ready(args, ctx: CLIContext, *, reason: str) -> HarnessConfig:
     config = ctx.config
+    available = [item for item in detect_llm_command_candidates() if item.available]
+    existing_updates: dict[str, object] = {}
+    if config.llm_codex_command and any(item.backend == "codex" for item in available):
+        detected_codex = next(item for item in available if item.backend == "codex")
+        if config.llm_codex_command != detected_codex.command:
+            existing_updates["llm_codex_command"] = detected_codex.command
+    if config.llm_claude_command and any(item.backend == "claude" for item in available):
+        detected_claude = next(item for item in available if item.backend == "claude")
+        if config.llm_claude_command != detected_claude.command:
+            existing_updates["llm_claude_command"] = detected_claude.command
+    if existing_updates:
+        config_path = _resolved_config_file(args, config)
+        payload = config.persisted_payload()
+        payload.update(existing_updates)
+        write_persisted_config(config_path, payload)
+        resolved = HarnessConfig.from_env(
+            getattr(args, "db", None),
+            getattr(args, "workspace", None),
+            getattr(args, "log_path", None),
+            getattr(args, "config_file", None),
+        )
+        ctx.config = resolved
+        ctx.engine.set_llm_router(build_llm_router(resolved, telemetry=ctx.telemetry))
+        ctx.interrogation_service.llm_router = ctx.engine.llm_router
+        config = resolved
     if any(
         (
             config.llm_command,
@@ -165,7 +190,6 @@ def ensure_llm_ready(args, ctx: CLIContext, *, reason: str) -> HarnessConfig:
         )
     ):
         return config
-    available = [item for item in detect_llm_command_candidates() if item.available]
     if not available:
         raise ValueError(
             f"{reason} requires a configured LLM provider. Install Codex or Claude, or run `./bin/accruvia-harness configure-llm`."

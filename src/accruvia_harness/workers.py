@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
+import sys
 from pathlib import Path
 from typing import Protocol
 
@@ -21,9 +23,24 @@ class WorkerExecutionError(RuntimeError):
     """Raised when a worker backend fails to produce a usable result."""
 
 
+def _coerce_subprocess_output(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
 def _prepared_project_workspace(run_dir: Path) -> Path:
     workspace = run_dir / "workspace"
     return workspace if workspace.exists() else run_dir
+
+
+def _default_agent_worker_command() -> str:
+    script_path = Path(__file__).resolve().parents[2] / "bin" / "accruvia-codex-worker"
+    if script_path.exists():
+        return f"{shlex.quote(sys.executable)} {shlex.quote(str(script_path))}"
+    return f"{shlex.quote(sys.executable)} -m accruvia_harness.agent_worker"
 
 
 class LocalArtifactWorker:
@@ -84,17 +101,19 @@ class CommandWorker:
         timeout_policy=None,
         resource_policy=None,
         env_passthrough: tuple[str, ...] = (),
+        extra_env: dict[str, str] | None = None,
     ) -> None:
         self.command = command
         self.backend_name = backend_name
         self.timeout_policy = timeout_policy
         self.resource_policy = resource_policy
         self.env_passthrough = env_passthrough
+        self.extra_env = dict(extra_env or {})
 
     def work(self, task: Task, run: Run, workspace_root: Path) -> WorkResult:
-        run_dir = workspace_root / "runs" / run.id
+        run_dir = (workspace_root / "runs" / run.id).resolve()
         run_dir.mkdir(parents=True, exist_ok=True)
-        project_workspace = _prepared_project_workspace(run_dir)
+        project_workspace = _prepared_project_workspace(run_dir).resolve()
         env = {
             "ACCRUVIA_TASK_ID": task.id,
             "ACCRUVIA_RUN_ID": run.id,
@@ -103,6 +122,7 @@ class CommandWorker:
             "ACCRUVIA_RUN_DIR": str(run_dir),
             "ACCRUVIA_PROJECT_WORKSPACE": str(project_workspace),
             "ACCRUVIA_TASK_SCOPE_JSON": json.dumps(task.scope, sort_keys=True),
+            **self.extra_env,
         }
         timeout_seconds = None
         if self.timeout_policy is not None:
@@ -123,9 +143,9 @@ class CommandWorker:
             )
         except subprocess.TimeoutExpired as exc:
             stdout_path = run_dir / "worker.stdout.txt"
-            stdout_path.write_text(exc.stdout or "", encoding="utf-8")
+            stdout_path.write_text(_coerce_subprocess_output(exc.stdout), encoding="utf-8")
             stderr_path = run_dir / "worker.stderr.txt"
-            stderr_path.write_text(exc.stderr or "", encoding="utf-8")
+            stderr_path.write_text(_coerce_subprocess_output(exc.stderr), encoding="utf-8")
             report_path = run_dir / "report.json"
             report_path.write_text(
                 json.dumps(
@@ -140,6 +160,10 @@ class CommandWorker:
                         "command": self.command,
                         "timeout_seconds": timeout_seconds,
                         "timed_out": True,
+                        "worker_outcome": "blocked",
+                        "blocked": True,
+                        "infrastructure_failure": True,
+                        "failure_category": "executor_timeout",
                         "memory_limit_mb": getattr(self.resource_policy, "memory_limit_mb", None),
                         "cpu_time_limit_seconds": getattr(self.resource_policy, "cpu_time_limit_seconds", None),
                     },
@@ -149,17 +173,20 @@ class CommandWorker:
                 encoding="utf-8",
             )
             return WorkResult(
-                summary=f"Executed {self.backend_name} worker command and timed out.",
+                summary=f"Executed {self.backend_name} worker command and timed out before task work completed.",
                 artifacts=[
                     ("worker_stdout", str(stdout_path), "Captured shell worker stdout"),
                     ("worker_stderr", str(stderr_path), "Captured shell worker stderr"),
                     ("report", str(report_path), "Structured run report"),
                 ],
-                outcome="failed",
+                outcome="blocked",
                 diagnostics={
                     "worker_backend": self.backend_name,
                     "command": self.command,
                     "timed_out": True,
+                    "blocked": True,
+                    "infrastructure_failure": True,
+                    "failure_category": "executor_timeout",
                     "timeout_seconds": timeout_seconds,
                     "memory_limit_mb": getattr(self.resource_policy, "memory_limit_mb", None),
                     "cpu_time_limit_seconds": getattr(self.resource_policy, "cpu_time_limit_seconds", None),
@@ -177,6 +204,27 @@ class CommandWorker:
                 payload = json.loads(report_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 payload = {}
+        reported_outcome = payload.get("worker_outcome")
+        blocked = payload.get("blocked") is True or payload.get("promotion_blocked") is True
+        infrastructure_failure = bool(payload.get("infrastructure_failure"))
+        if isinstance(reported_outcome, str) and reported_outcome in {"success", "failed", "blocked"}:
+            outcome = reported_outcome
+        elif blocked:
+            outcome = "blocked"
+        elif completed.returncode != 0 and not payload:
+            outcome = "blocked"
+            infrastructure_failure = True
+            payload = {
+                "worker_outcome": "blocked",
+                "blocked": True,
+                "infrastructure_failure": True,
+                "failure_category": "executor_process_failure",
+                "failure_message": (
+                    completed.stderr.strip() or completed.stdout.strip() or f"{self.backend_name} worker exited non-zero"
+                ),
+            }
+        else:
+            outcome = "success" if completed.returncode == 0 else "failed"
         report_path.write_text(
             json.dumps(
                 {
@@ -189,10 +237,11 @@ class CommandWorker:
                     "worker_backend": self.backend_name,
                     "validation_profile": task.validation_profile,
                     "command": self.command,
-                        "returncode": completed.returncode,
-                        "memory_limit_mb": getattr(self.resource_policy, "memory_limit_mb", None),
-                        "cpu_time_limit_seconds": getattr(self.resource_policy, "cpu_time_limit_seconds", None),
-                    },
+                    "returncode": completed.returncode,
+                    "memory_limit_mb": getattr(self.resource_policy, "memory_limit_mb", None),
+                    "cpu_time_limit_seconds": getattr(self.resource_policy, "cpu_time_limit_seconds", None),
+                    "worker_outcome": outcome,
+                },
                 indent=2,
                 sort_keys=True,
             ),
@@ -202,14 +251,6 @@ class CommandWorker:
         plan_path = run_dir / "plan.txt"
         if plan_path.exists():
             plan_artifact.append(("plan", str(plan_path), "Structured plan artifact"))
-        reported_outcome = payload.get("worker_outcome")
-        blocked = payload.get("blocked") is True or payload.get("promotion_blocked") is True
-        if isinstance(reported_outcome, str) and reported_outcome in {"success", "failed", "blocked"}:
-            outcome = reported_outcome
-        elif blocked:
-            outcome = "blocked"
-        else:
-            outcome = "success" if completed.returncode == 0 else "failed"
         return WorkResult(
             summary=f"Executed {self.backend_name} worker command and captured output.",
             artifacts=[
@@ -223,6 +264,9 @@ class CommandWorker:
                 "worker_backend": self.backend_name,
                 "command": self.command,
                 "returncode": completed.returncode,
+                "blocked": outcome == "blocked",
+                "infrastructure_failure": infrastructure_failure,
+                "failure_category": payload.get("failure_category"),
                 "timeout_seconds": timeout_seconds,
                 "memory_limit_mb": getattr(self.resource_policy, "memory_limit_mb", None),
                 "cpu_time_limit_seconds": getattr(self.resource_policy, "cpu_time_limit_seconds", None),
@@ -233,7 +277,12 @@ class CommandWorker:
 
 class ShellCommandWorker(CommandWorker):
     def __init__(
-        self, command: str, timeout_policy=None, resource_policy=None, env_passthrough: tuple[str, ...] = ()
+        self,
+        command: str,
+        timeout_policy=None,
+        resource_policy=None,
+        env_passthrough: tuple[str, ...] = (),
+        extra_env: dict[str, str] | None = None,
     ) -> None:
         super().__init__(
             command=command,
@@ -241,12 +290,18 @@ class ShellCommandWorker(CommandWorker):
             timeout_policy=timeout_policy,
             resource_policy=resource_policy,
             env_passthrough=env_passthrough,
+            extra_env=extra_env,
         )
 
 
 class AgentCommandWorker(CommandWorker):
     def __init__(
-        self, command: str, timeout_policy=None, resource_policy=None, env_passthrough: tuple[str, ...] = ()
+        self,
+        command: str,
+        timeout_policy=None,
+        resource_policy=None,
+        env_passthrough: tuple[str, ...] = (),
+        extra_env: dict[str, str] | None = None,
     ) -> None:
         super().__init__(
             command=command,
@@ -254,6 +309,7 @@ class AgentCommandWorker(CommandWorker):
             timeout_policy=timeout_policy,
             resource_policy=resource_policy,
             env_passthrough=env_passthrough,
+            extra_env=extra_env,
         )
 
 
@@ -301,7 +357,10 @@ class LLMTaskWorker:
                         "error": str(exc),
                         "validation_profile": task.validation_profile,
                         "project_workspace": str(project_workspace),
-                        "worker_outcome": "failed",
+                        "worker_outcome": "blocked",
+                        "blocked": True,
+                        "infrastructure_failure": True,
+                        "failure_category": "llm_executor_failure",
                     },
                     indent=2,
                     sort_keys=True,
@@ -309,17 +368,20 @@ class LLMTaskWorker:
                 encoding="utf-8",
             )
             return WorkResult(
-                summary=f"LLM worker failed via {routed_backend}.",
+                summary=f"LLM worker failed via {routed_backend} before task work completed.",
                 artifacts=[
                     ("report", str(report_path), "Structured run report"),
                     ("llm_error", str(error_path), "LLM execution failure"),
                 ],
-                outcome="failed",
+                outcome="blocked",
                 diagnostics={
                     "worker_backend": "llm",
                     "llm_backend": routed_backend,
                     "llm_model": self.model,
                     "error": str(exc),
+                    "blocked": True,
+                    "infrastructure_failure": True,
+                    "failure_category": "llm_executor_failure",
                     "project_workspace": str(project_workspace),
                 },
             )
@@ -394,7 +456,7 @@ def build_worker(backend: str, shell_command: str | None = None) -> WorkerBacken
 
 
 def build_worker_from_config(config: HarnessConfig, telemetry=None) -> WorkerBackend:
-    from .resource_limits import ResourceLimitPolicy
+    from .resource_limits import ResourceLimitPolicy, resolve_memory_limit_mb
     from .timeout_policy import ExecutionTimeoutPolicy
 
     adapter_registry = build_adapter_registry(config.adapter_modules)
@@ -406,7 +468,19 @@ def build_worker_from_config(config: HarnessConfig, telemetry=None) -> WorkerBac
         multiplier=config.timeout_multiplier,
     )
     resource_policy = ResourceLimitPolicy(
-        memory_limit_mb=config.memory_limit_mb,
+        memory_limit_mb=resolve_memory_limit_mb(
+            config.memory_limit_mb,
+            backend_names=tuple(
+                backend
+                for backend, command in (
+                    ("command", config.llm_command),
+                    ("codex", config.llm_codex_command),
+                    ("claude", config.llm_claude_command),
+                    ("accruvia_client", config.llm_accruvia_client_command),
+                )
+                if command
+            ),
+        ) if config.worker_backend == "agent" else config.memory_limit_mb,
         cpu_time_limit_seconds=config.cpu_time_limit_seconds,
     )
     if config.worker_backend == "llm":
@@ -423,12 +497,22 @@ def build_worker_from_config(config: HarnessConfig, telemetry=None) -> WorkerBac
             env_passthrough=config.env_passthrough,
         )
     if config.worker_backend == "agent":
-        if not config.worker_command:
-            raise ValueError("Agent worker backend requires ACCRUVIA_WORKER_COMMAND")
+        command = config.worker_command or _default_agent_worker_command()
         return AgentCommandWorker(
-            config.worker_command,
+            command,
             timeout_policy=timeout_policy,
             resource_policy=resource_policy,
             env_passthrough=config.env_passthrough,
+            extra_env={
+                key: value
+                for key, value in {
+                    "ACCRUVIA_WORKER_LLM_BACKEND": config.llm_backend,
+                    "ACCRUVIA_LLM_COMMAND": config.llm_command,
+                    "ACCRUVIA_LLM_CODEX_COMMAND": config.llm_codex_command,
+                    "ACCRUVIA_LLM_CLAUDE_COMMAND": config.llm_claude_command,
+                    "ACCRUVIA_LLM_ACCRUVIA_CLIENT_COMMAND": config.llm_accruvia_client_command,
+                }.items()
+                if value
+            },
         )
     return build_worker(config.worker_backend, config.worker_command)

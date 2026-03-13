@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from dataclasses import dataclass
 
 from .domain import Artifact, DecisionAction, EvaluationVerdict, Run, Task
@@ -73,6 +75,26 @@ class DefaultPlanner:
         )
 
 class DefaultAnalyzer:
+    def _failure_details(
+        self,
+        task: Task,
+        diagnostics: dict[str, object] | None = None,
+    ) -> dict[str, Any]:
+        details: dict[str, Any] = {"task_title": task.title, "strategy": task.strategy}
+        if diagnostics:
+            details["diagnostics"] = diagnostics
+            if bool(diagnostics.get("infrastructure_failure")):
+                details["infrastructure_failure"] = True
+                details["failure_category"] = str(diagnostics.get("failure_category") or "executor_failure")
+                message = (
+                    diagnostics.get("failure_message")
+                    or diagnostics.get("error")
+                    or diagnostics.get("blocked_reason")
+                )
+                if message:
+                    details["root_cause_hint"] = str(message)
+        return details
+
     def analyze(self, task: Task, run: Run, artifacts: list[Artifact]) -> AnalyzeResult:
         artifact_kinds = sorted({artifact.kind for artifact in artifacts})
         missing = sorted(set(task.required_artifacts) - set(artifact_kinds))
@@ -108,30 +130,37 @@ class DefaultAnalyzer:
         )
 
     def blocked(self, task: Task, run: Run, diagnostics: dict[str, object] | None = None) -> AnalyzeResult:
-        details = {"task_title": task.title, "strategy": task.strategy}
-        if diagnostics:
-            details["diagnostics"] = diagnostics
+        details = self._failure_details(task, diagnostics)
+        summary = "Run ended with a blocked diagnosis."
+        if details.get("infrastructure_failure"):
+            summary = "Run ended with an executor/infrastructure failure."
         return AnalyzeResult(
             verdict=EvaluationVerdict.BLOCKED,
             confidence=0.95,
-            summary="Run ended with a blocked diagnosis.",
+            summary=summary,
             details=details,
         )
 
     def failed(self, task: Task, run: Run, diagnostics: dict[str, object] | None = None) -> AnalyzeResult:
-        details = {"task_title": task.title, "strategy": task.strategy}
-        if diagnostics:
-            details["diagnostics"] = diagnostics
+        details = self._failure_details(task, diagnostics)
+        summary = "Run ended with a failed worker outcome."
+        if details.get("infrastructure_failure"):
+            summary = "Run ended with an executor/infrastructure failure."
         return AnalyzeResult(
             verdict=EvaluationVerdict.FAILED,
             confidence=0.95,
-            summary="Run ended with a failed worker outcome.",
+            summary=summary,
             details=details,
         )
 
 
 class DefaultDecider:
     def decide(self, analysis: AnalyzeResult, run: Run, task: Task) -> DecideResult:
+        if bool(analysis.details.get("infrastructure_failure")):
+            return DecideResult(
+                action=DecisionAction.FAIL,
+                rationale="Executor/infrastructure failure captured; retry suppressed in favor of bounded remediation.",
+            )
         if analysis.verdict == EvaluationVerdict.ACCEPTABLE:
             return DecideResult(
                 action=DecisionAction.PROMOTE,

@@ -78,6 +78,32 @@ class FailedDiagnosisWorker(PromotionBlockedWorker):
         return result
 
 
+class InfrastructureBlockedWorker(PromotionBlockedWorker):
+    def work(self, task, run, workspace_root: Path) -> WorkResult:  # type: ignore[override]
+        result = super().work(task, run, workspace_root)
+        result.outcome = "blocked"
+        result.diagnostics = {
+            "infrastructure_failure": True,
+            "failure_category": "executor_process_failure",
+            "failure_message": "Worker bootstrap crashed before producing artifacts.",
+        }
+        return result
+
+
+class InfrastructureFailedWorker(LocalArtifactWorker):
+    def work(self, task, run, workspace_root: Path) -> WorkResult:  # type: ignore[override]
+        return WorkResult(
+            summary="Executor crashed before durable artifacts were written.",
+            artifacts=[],
+            outcome="failed",
+            diagnostics={
+                "infrastructure_failure": True,
+                "failure_category": "executor_process_failure",
+                "failure_message": "Worker bootstrap crashed before producing artifacts.",
+            },
+        )
+
+
 class ScopeSplitWorker(PromotionBlockedWorker):
     def work(self, task, run, workspace_root: Path) -> WorkResult:  # type: ignore[override]
         result = super().work(task, run, workspace_root)
@@ -1045,6 +1071,99 @@ class HarnessEngineTests(unittest.TestCase):
         self.assertEqual("failed", run.status.value)
         self.assertEqual("failed", evaluation.verdict)
         self.assertEqual("fail", decision.action.value)
+
+    def test_infrastructure_blocked_worker_creates_executor_repair_follow_on(self) -> None:
+        engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-infra-blocked",
+            worker=InfrastructureBlockedWorker(),
+        )
+        task = engine.create_task_with_policy(
+            project_id=self.project_id,
+            title="Executor failure",
+            objective="Do not burn retry budget on infrastructure failures",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=3,
+            required_artifacts=["plan", "report"],
+        )
+
+        run = engine.run_once(task.id)
+
+        children = self.store.list_child_tasks(task.id)
+        decision = self.store.list_decisions(run.id)[0]
+        self.assertEqual("blocked", run.status.value)
+        self.assertEqual("fail", decision.action.value)
+        self.assertEqual(1, len(children))
+        self.assertEqual("executor_repair", children[0].strategy)
+        self.assertEqual("pending", children[0].status.value)
+        self.assertEqual("failed", self.store.get_task(task.id).status.value)
+
+    def test_infrastructure_failed_worker_persists_report_and_creates_one_repair_follow_on(self) -> None:
+        engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-infra-failed",
+            worker=InfrastructureFailedWorker(),
+        )
+        task = engine.create_task_with_policy(
+            project_id=self.project_id,
+            title="Executor exit failure",
+            objective="Persist actionable failure evidence for executor exits",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=3,
+            required_artifacts=["plan", "report"],
+        )
+
+        run = engine.run_once(task.id)
+
+        artifacts = self.store.list_artifacts(run.id)
+        evaluations = self.store.list_evaluations(run.id)
+        decisions = self.store.list_decisions(run.id)
+        children = self.store.list_child_tasks(task.id)
+
+        self.assertEqual("failed", run.status.value)
+        self.assertIn("report", [artifact.kind for artifact in artifacts])
+        report_artifact = next(artifact for artifact in artifacts if artifact.kind == "report")
+        self.assertTrue(Path(report_artifact.path).exists())
+        self.assertTrue(evaluations[0].details["infrastructure_failure"])
+        self.assertEqual("fail", decisions[0].action.value)
+        self.assertEqual(1, len(children))
+        self.assertEqual("executor_repair", children[0].strategy)
+
+    def test_executor_repair_task_does_not_spawn_recursive_repair_follow_on(self) -> None:
+        engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-infra-repair",
+            worker=InfrastructureBlockedWorker(),
+        )
+        task = engine.create_task_with_policy(
+            project_id=self.project_id,
+            title="Repair executor runtime",
+            objective="Repair executor/runtime failure",
+            priority=900,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="executor_repair",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+
+        run = engine.run_once(task.id)
+
+        children = self.store.list_child_tasks(task.id)
+        self.assertEqual("blocked", run.status.value)
+        self.assertEqual([], children)
 
     def test_review_promotion_dedupes_follow_on_for_same_run(self) -> None:
         engine = HarnessEngine(

@@ -60,6 +60,65 @@ def _coerce_subprocess_output(value: object) -> str:
     return str(value)
 
 
+def command_uses_file_contract(command: str) -> bool:
+    return any(
+        token in command
+        for token in (
+            "ACCRUVIA_LLM_PROMPT_PATH",
+            "ACCRUVIA_LLM_RESPONSE_PATH",
+            "ACCRUVIA_LLM_METADATA_PATH",
+        )
+    )
+
+
+def run_command_process(
+    command: str,
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    timeout_seconds: int | None,
+    stdin_text: str | None,
+    resource_policy=None,
+) -> subprocess.CompletedProcess[str]:
+    preexec = resource_policy.preexec_fn() if resource_policy is not None else None
+    process = subprocess.Popen(
+        command,
+        shell=True,
+        cwd=cwd,
+        stdin=subprocess.PIPE if stdin_text is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+        start_new_session=preexec is None,
+        preexec_fn=preexec,
+    )
+    try:
+        stdout, stderr = process.communicate(input=stdin_text, timeout=timeout_seconds)
+    except subprocess.TimeoutExpired as exc:
+        os.killpg(process.pid, signal.SIGKILL)
+        try:
+            stdout, stderr = process.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+            process.kill()
+            process.wait(timeout=1)
+            stdout = ""
+            stderr = ""
+        exc.stdout = stdout
+        exc.stderr = stderr
+        raise
+    return subprocess.CompletedProcess(
+        args=command,
+        returncode=process.returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
 class CommandLLMExecutor:
     def __init__(
         self,
@@ -79,11 +138,12 @@ class CommandLLMExecutor:
 
     def execute(self, invocation: LLMInvocation) -> LLMExecutionResult:
         invocation.run_dir.mkdir(parents=True, exist_ok=True)
-        prompt_path = invocation.run_dir / "llm_prompt.txt"
-        response_path = invocation.run_dir / "llm_response.md"
-        metadata_path = invocation.run_dir / "llm_metadata.json"
-        stdout_path = invocation.run_dir / "llm.stdout.txt"
-        stderr_path = invocation.run_dir / "llm.stderr.txt"
+        run_dir = invocation.run_dir.resolve()
+        prompt_path = run_dir / "llm_prompt.txt"
+        response_path = run_dir / "llm_response.md"
+        metadata_path = run_dir / "llm_metadata.json"
+        stdout_path = run_dir / "llm.stdout.txt"
+        stderr_path = run_dir / "llm.stderr.txt"
         prompt_path.write_text(invocation.prompt, encoding="utf-8")
 
         env = build_subprocess_env(
@@ -93,7 +153,7 @@ class CommandLLMExecutor:
             "ACCRUVIA_TASK_OBJECTIVE": invocation.task.objective,
             "ACCRUVIA_TASK_TITLE": invocation.task.title,
             "ACCRUVIA_TASK_STRATEGY": invocation.task.strategy,
-            "ACCRUVIA_RUN_DIR": str(invocation.run_dir),
+            "ACCRUVIA_RUN_DIR": str(run_dir),
             "ACCRUVIA_LLM_PROMPT_PATH": str(prompt_path),
             "ACCRUVIA_LLM_RESPONSE_PATH": str(response_path),
             "ACCRUVIA_LLM_METADATA_PATH": str(metadata_path),
@@ -118,15 +178,17 @@ class CommandLLMExecutor:
                     validation_profile=invocation.task.validation_profile,
                 ):
                     completed = self._run_command(
-                        cwd=invocation.run_dir,
+                        cwd=run_dir,
                         env=env,
                         timeout_seconds=timeout_seconds,
+                        stdin_text=invocation.prompt if not command_uses_file_contract(self.command) else None,
                     )
             else:
                 completed = self._run_command(
-                    cwd=invocation.run_dir,
+                    cwd=run_dir,
                     env=env,
                     timeout_seconds=timeout_seconds,
+                    stdin_text=invocation.prompt if not command_uses_file_contract(self.command) else None,
                 )
         except subprocess.TimeoutExpired as exc:
             stdout_path.write_text(_coerce_subprocess_output(exc.stdout), encoding="utf-8")
@@ -202,42 +264,15 @@ class CommandLLMExecutor:
         cwd: Path,
         env: dict[str, str],
         timeout_seconds: int | None,
+        stdin_text: str | None,
     ) -> subprocess.CompletedProcess[str]:
-        preexec = self.resource_policy.preexec_fn() if self.resource_policy is not None else None
-        process = subprocess.Popen(
+        return run_command_process(
             self.command,
-            shell=True,
             cwd=cwd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
             env=env,
-            start_new_session=preexec is None,
-            preexec_fn=preexec,
-        )
-        try:
-            stdout, stderr = process.communicate(timeout=timeout_seconds)
-        except subprocess.TimeoutExpired as exc:
-            os.killpg(process.pid, signal.SIGKILL)
-            try:
-                stdout, stderr = process.communicate(timeout=1)
-            except subprocess.TimeoutExpired:
-                if process.stdout is not None:
-                    process.stdout.close()
-                if process.stderr is not None:
-                    process.stderr.close()
-                process.kill()
-                process.wait(timeout=1)
-                stdout = ""
-                stderr = ""
-            exc.stdout = stdout
-            exc.stderr = stderr
-            raise
-        return subprocess.CompletedProcess(
-            args=self.command,
-            returncode=process.returncode,
-            stdout=stdout,
-            stderr=stderr,
+            timeout_seconds=timeout_seconds,
+            stdin_text=stdin_text,
+            resource_policy=self.resource_policy,
         )
 
 
@@ -300,10 +335,19 @@ class LLMRouter:
 
 
 def build_llm_router(config: HarnessConfig, telemetry=None) -> LLMRouter:
-    from .resource_limits import ResourceLimitPolicy
+    from .resource_limits import ResourceLimitPolicy, resolve_memory_limit_mb
     from .timeout_policy import ExecutionTimeoutPolicy
 
-    llm_memory_limit_mb = max(config.memory_limit_mb, 4096)
+    llm_backends = tuple(
+        backend
+        for backend, command in (
+            ("command", config.llm_command),
+            ("codex", config.llm_codex_command),
+            ("claude", config.llm_claude_command),
+            ("accruvia_client", config.llm_accruvia_client_command),
+        )
+        if command
+    )
     timeout_policy = ExecutionTimeoutPolicy(
         telemetry,
         alpha=config.timeout_ema_alpha,
@@ -312,7 +356,7 @@ def build_llm_router(config: HarnessConfig, telemetry=None) -> LLMRouter:
         multiplier=config.timeout_multiplier,
     )
     resource_policy = ResourceLimitPolicy(
-        memory_limit_mb=llm_memory_limit_mb,
+        memory_limit_mb=resolve_memory_limit_mb(config.memory_limit_mb, backend_names=llm_backends),
         cpu_time_limit_seconds=config.cpu_time_limit_seconds,
     )
     executors: dict[str, LLMExecutor] = {}

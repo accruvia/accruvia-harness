@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from ..domain import (
@@ -218,6 +219,7 @@ class RunService:
                 work = worker.work(task, run, self.workspace_root)
         else:
             work = worker.work(task, run, self.workspace_root)
+        work = self._ensure_failure_evidence(task, run, work)
         self.store.create_event(
             Event(
                 id=new_id("event"),
@@ -328,6 +330,8 @@ class RunService:
                 payload={"run_id": run.id, "action": decision.action.value},
             )
         )
+        if bool(analysis.details.get("infrastructure_failure")):
+            self._create_infrastructure_failure_follow_on(task, run, analysis)
         if analysis.verdict == EvaluationVerdict.BLOCKED:
             self._reshape_scope_violation(task, run, analysis)
 
@@ -381,6 +385,94 @@ class RunService:
                 validation_profile=task.validation_profile,
             )
         return run
+
+    def _ensure_failure_evidence(self, task, run, work):
+        if work.outcome not in {"blocked", "failed"}:
+            return work
+        artifact_kinds = {kind for kind, _, _ in work.artifacts}
+        if "report" in artifact_kinds:
+            return work
+        run_dir = self.workspace_root / "runs" / run.id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics = dict(work.diagnostics or {})
+        failure_message = (
+            diagnostics.get("failure_message")
+            or diagnostics.get("error")
+            or diagnostics.get("blocked_reason")
+            or work.summary
+        )
+        report_path = run_dir / "report.json"
+        report_path.write_text(
+            json.dumps(
+                {
+                    "task_id": task.id,
+                    "run_id": run.id,
+                    "attempt": run.attempt,
+                    "strategy": task.strategy,
+                    "objective": task.objective,
+                    "worker_outcome": work.outcome,
+                    "infrastructure_failure": bool(diagnostics.get("infrastructure_failure")),
+                    "failure_category": diagnostics.get("failure_category"),
+                    "root_cause_hint": str(failure_message),
+                    "diagnostics": diagnostics,
+                },
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        work.artifacts.append(("report", str(report_path), "Structured failure evidence report"))
+        return work
+
+    def _create_infrastructure_failure_follow_on(self, task, run, analysis) -> None:
+        if self.task_service is None:
+            return
+        if task.strategy == "executor_repair":
+            return
+        diagnostics = analysis.details.get("diagnostics")
+        if not isinstance(diagnostics, dict):
+            return
+        if not bool(diagnostics.get("infrastructure_failure")):
+            return
+        existing = self.store.find_follow_on_task(task.id, run.id)
+        if existing is not None and existing.strategy == "executor_repair":
+            return
+        queued_repairs = [
+            child
+            for child in self.store.list_child_tasks(task.id)
+            if child.strategy == "executor_repair" and child.status in {TaskStatus.PENDING, TaskStatus.ACTIVE}
+        ]
+        if queued_repairs:
+            return
+        category = str(diagnostics.get("failure_category") or "executor_failure")
+        message = str(
+            diagnostics.get("failure_message")
+            or diagnostics.get("error")
+            or diagnostics.get("blocked_reason")
+            or analysis.summary
+        ).strip()
+        follow_on = self.task_service.create_follow_on_task(
+            parent_task_id=task.id,
+            source_run_id=run.id,
+            title=f"{task.title}: repair executor/runtime failure",
+            objective=(
+                "Repair the harness executor/runtime failure blocking task execution. "
+                f"Latest category: {category}. Latest symptom: {message}"
+            ),
+            priority=max(task.priority + 100, 900),
+            strategy="executor_repair",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+        self.store.create_event(
+            Event(
+                id=new_id("event"),
+                entity_type="task",
+                entity_id=follow_on.id,
+                event_type="executor_failure_follow_on_created",
+                payload={"parent_task_id": task.id, "run_id": run.id, "failure_category": category},
+            )
+        )
 
     def _reshape_scope_violation(self, task, run, analysis) -> None:
         if self.task_service is None:

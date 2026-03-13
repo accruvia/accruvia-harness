@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from accruvia_harness.agent_worker import run_agent_worker, select_worker_llm_command
 from accruvia_harness.adapters import build_adapter_registry
 from accruvia_harness.config import HarnessConfig
 from accruvia_harness.domain import Run, RunStatus, Task, new_id
 from accruvia_harness.llm import CommandLLMExecutor, LLMInvocation, build_llm_router, parse_affirmation_response
+from accruvia_harness.resource_limits import resolve_memory_limit_mb
 from accruvia_harness.subprocess_env import build_subprocess_env
 from accruvia_harness.telemetry import TelemetrySink
 from accruvia_harness.timeout_policy import ExecutionTimeoutPolicy
@@ -20,6 +23,7 @@ from accruvia_harness.workers import (
     LocalArtifactWorker,
     LLMTaskWorker,
     ShellCommandWorker,
+    _default_agent_worker_command,
     build_worker,
     build_worker_from_config,
 )
@@ -137,9 +141,27 @@ class WorkerTests(unittest.TestCase):
 
         result = worker.work(self.task, self.run, self.base)
 
-        self.assertEqual("failed", result.outcome)
+        self.assertEqual("blocked", result.outcome)
         self.assertTrue(result.diagnostics["timed_out"])
         self.assertEqual(1, result.diagnostics["timeout_seconds"])
+
+    def test_shell_worker_timeout_handles_bytes_stderr(self) -> None:
+        telemetry = TelemetrySink(self.base / "telemetry")
+        timeout_policy = ExecutionTimeoutPolicy(
+            telemetry,
+            min_seconds=1,
+            max_seconds=1,
+            multiplier=1.0,
+        )
+        worker = ShellCommandWorker("sleep 2", timeout_policy=timeout_policy)
+
+        timeout = subprocess.TimeoutExpired("cmd", timeout=1, output=b"partial stdout", stderr=b"partial stderr")
+        with patch("accruvia_harness.workers.subprocess.run", side_effect=timeout):
+            result = worker.work(self.task, self.run, self.base)
+
+        stderr_path = self.base / "runs" / self.run.id / "worker.stderr.txt"
+        self.assertEqual("blocked", result.outcome)
+        self.assertEqual("partial stderr", stderr_path.read_text(encoding="utf-8"))
 
     def test_agent_worker_captures_failure_without_raising(self) -> None:
         worker = AgentCommandWorker("printf 'boom' >&2; exit 7")
@@ -219,6 +241,121 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual("done", result.response_text)
         self.assertEqual(3, result.diagnostics["timeout_seconds"])
 
+    def test_command_llm_executor_uses_absolute_prompt_paths_for_relative_run_dir(self) -> None:
+        cwd = Path.cwd()
+        os.chdir(self.base)
+        self.addCleanup(lambda: os.chdir(cwd))
+
+        executor = CommandLLMExecutor(
+            "command",
+            'cat < "$ACCRUVIA_LLM_PROMPT_PATH" > "$ACCRUVIA_LLM_RESPONSE_PATH"',
+        )
+
+        result = executor.execute(
+            LLMInvocation(
+                task=self.task,
+                run=self.run,
+                prompt="relative path prompt",
+                run_dir=Path("relative-run"),
+            )
+        )
+
+        self.assertEqual("relative path prompt", result.response_text)
+        self.assertTrue(result.prompt_path.is_absolute())
+        self.assertTrue(result.response_path.is_absolute())
+
+    def test_agent_worker_marks_executor_bootstrap_failures_blocked(self) -> None:
+        worker = AgentCommandWorker("exit 7")
+
+        result = worker.work(self.task, self.run, self.base)
+
+        self.assertEqual("blocked", result.outcome)
+        self.assertTrue(result.diagnostics["infrastructure_failure"])
+        self.assertEqual("executor_process_failure", result.diagnostics["failure_category"])
+
+    def test_select_worker_llm_command_prefers_selected_backend(self) -> None:
+        backend, command = select_worker_llm_command(
+            {
+                "ACCRUVIA_WORKER_LLM_BACKEND": "claude",
+                "ACCRUVIA_LLM_CODEX_COMMAND": "codex exec",
+                "ACCRUVIA_LLM_CLAUDE_COMMAND": "claude",
+            }
+        )
+
+        self.assertEqual("claude", backend)
+        self.assertEqual("claude", command)
+
+    def test_run_agent_worker_uses_shared_stdin_command_path(self) -> None:
+        workspace = self.base / "workspace"
+        tests_dir = workspace / "tests"
+        tests_dir.mkdir(parents=True)
+        for name in ("test_cli.py", "test_phase1.py", "test_supervisor.py", "test_observer.py"):
+            (tests_dir / name).write_text(
+                "import unittest\n\n"
+                "class Smoke(unittest.TestCase):\n"
+                "    def test_ok(self):\n"
+                "        self.assertTrue(True)\n",
+                encoding="utf-8",
+            )
+        subprocess.run(["git", "init", "-b", "main"], cwd=workspace, check=True, capture_output=True, text=True)
+        cli_script = self.base / "fake_codex.sh"
+        cli_script.write_text(
+            "#!/usr/bin/env bash\n"
+            "cat > shared_prompt.txt\n"
+            "printf 'worker summary\\n'\n"
+            "printf 'value = 1\\n' > changed_module.py\n",
+            encoding="utf-8",
+        )
+        cli_script.chmod(0o755)
+        run_dir = self.base / "run"
+        result = run_agent_worker(
+            {
+                "ACCRUVIA_RUN_DIR": str(run_dir),
+                "ACCRUVIA_PROJECT_WORKSPACE": str(workspace),
+                "ACCRUVIA_TASK_ID": self.task.id,
+                "ACCRUVIA_RUN_ID": self.run.id,
+                "ACCRUVIA_TASK_OBJECTIVE": self.task.objective,
+                "ACCRUVIA_RUN_SUMMARY": self.run.summary,
+                "ACCRUVIA_TASK_STRATEGY": "default",
+                "ACCRUVIA_WORKER_LLM_BACKEND": "codex",
+                "ACCRUVIA_LLM_CODEX_COMMAND": str(cli_script),
+            }
+        )
+
+        report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
+        self.assertEqual(0, result)
+        self.assertEqual("codex", report["llm_backend"])
+        self.assertEqual("success", report["worker_outcome"])
+        self.assertIn("changed_module.py", report["changed_files"])
+        self.assertIn("Objective: Verify worker abstraction", (run_dir / "codex_worker_prompt.txt").read_text(encoding="utf-8"))
+        self.assertIn("Objective: Verify worker abstraction", (workspace / "shared_prompt.txt").read_text(encoding="utf-8"))
+
+    def test_build_worker_from_config_defaults_agent_worker_command(self) -> None:
+        config = HarnessConfig(
+            db_path=self.base / "harness.db",
+            workspace_root=self.base,
+            log_path=self.base / "harness.log",
+            default_project_name="demo",
+            default_repo="accruvia/accruvia",
+            runtime_backend="local",
+            temporal_target="localhost:7233",
+            temporal_namespace="default",
+            temporal_task_queue="accruvia-harness",
+            worker_backend="agent",
+            worker_command=None,
+            llm_backend="codex",
+            llm_model=None,
+            llm_command=None,
+            llm_codex_command="codex exec",
+            llm_claude_command=None,
+            llm_accruvia_client_command=None,
+        )
+
+        worker = build_worker_from_config(config)
+
+        self.assertIsInstance(worker, AgentCommandWorker)
+        self.assertEqual(_default_agent_worker_command(), worker.command)
+
     def test_build_llm_router_uses_higher_memory_floor_for_llm_clis(self) -> None:
         config = HarnessConfig(
             db_path=self.base / "harness.db",
@@ -245,6 +382,39 @@ class WorkerTests(unittest.TestCase):
         executor, _ = router.resolve()
 
         self.assertEqual(4096, executor.resource_policy.memory_limit_mb)
+
+    def test_agent_worker_uses_same_higher_memory_floor_for_llm_clis(self) -> None:
+        config = HarnessConfig(
+            db_path=self.base / "harness.db",
+            workspace_root=self.base,
+            log_path=self.base / "harness.log",
+            default_project_name="demo",
+            default_repo="accruvia/accruvia",
+            runtime_backend="local",
+            temporal_target="localhost:7233",
+            temporal_namespace="default",
+            temporal_task_queue="accruvia-harness",
+            worker_backend="agent",
+            worker_command="printf ok",
+            llm_backend="codex",
+            llm_model=None,
+            llm_command=None,
+            llm_codex_command="codex exec",
+            llm_claude_command=None,
+            llm_accruvia_client_command=None,
+            memory_limit_mb=1024,
+        )
+
+        worker = build_worker_from_config(config)
+
+        self.assertIsInstance(worker, AgentCommandWorker)
+        self.assertEqual(4096, worker.resource_policy.memory_limit_mb)
+
+    def test_resolve_memory_limit_disables_cap_when_large_heap_floor_exceeds_machine_budget(self) -> None:
+        with patch("accruvia_harness.resource_limits._total_memory_mb", return_value=3072):
+            memory_limit_mb = resolve_memory_limit_mb(1024, backend_names=("codex",))
+
+        self.assertIsNone(memory_limit_mb)
 
     def test_llm_router_prefers_accruvia_client_in_github_actions(self) -> None:
         config = HarnessConfig(
