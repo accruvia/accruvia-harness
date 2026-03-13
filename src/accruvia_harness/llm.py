@@ -312,10 +312,13 @@ class LLMRouter:
             except LLMExecutionError as exc:
                 failures.append({"backend": backend, "error": str(exc)})
                 if telemetry is not None:
+                    category = "executor_timeout" if "timed out" in str(exc).lower() else "llm_executor_failure"
                     telemetry.warn(
-                        "llm_executor_failure",
+                        category,
                         str(exc),
                         backend=backend,
+                        worker_backend=backend,
+                        validation_profile=invocation.task.validation_profile,
                         task_id=invocation.task.id,
                         run_id=invocation.run.id,
                     )
@@ -352,7 +355,7 @@ def build_llm_router(config: HarnessConfig, telemetry=None) -> LLMRouter:
         telemetry,
         alpha=config.timeout_ema_alpha,
         min_seconds=config.timeout_min_seconds,
-        max_seconds=config.timeout_max_seconds,
+        max_seconds=min(config.timeout_max_seconds, config.task_llm_timeout_seconds),
         multiplier=config.timeout_multiplier,
     )
     resource_policy = ResourceLimitPolicy(

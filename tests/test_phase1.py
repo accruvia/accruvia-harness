@@ -14,6 +14,7 @@ from accruvia_harness.cli_parser import build_parser
 from accruvia_harness.logging_utils import HarnessLogger, classify_error
 from accruvia_harness.store import SQLiteHarnessStore
 from accruvia_harness.telemetry import TelemetrySink, _otlp_signal_endpoints
+from accruvia_harness.timeout_policy import ExecutionTimeoutPolicy
 
 
 def _write_telemetry_metric(root: str, prefix: str, count: int) -> None:
@@ -40,6 +41,11 @@ class Phase1Tests(unittest.TestCase):
         self.assertEqual("local", config.runtime_backend)
         self.assertEqual(1024, config.memory_limit_mb)
         self.assertEqual(300, config.cpu_time_limit_seconds)
+        self.assertEqual(1200, config.task_run_timeout_seconds)
+        self.assertEqual(420, config.task_llm_timeout_seconds)
+        self.assertEqual(300, config.task_validation_timeout_seconds)
+        self.assertEqual(120, config.task_compile_timeout_seconds)
+        self.assertEqual(30, config.task_git_timeout_seconds)
         self.assertFalse(config.telemetry_fsync_writes)
         self.assertEqual("accruvia-harness", config.otel_service_name)
         self.assertIsNone(config.otel_exporter_otlp_endpoint)
@@ -96,6 +102,7 @@ class Phase1Tests(unittest.TestCase):
             "ACCRUVIA_TIMEOUT_EMA_ALPHA": "abc",
             "ACCRUVIA_TIMEOUT_MIN_SECONDS": "oops",
             "ACCRUVIA_MEMORY_LIMIT_MB": "nah",
+            "ACCRUVIA_TASK_RUN_TIMEOUT_SECONDS": "later",
         }
         with mock.patch.dict(os.environ, env, clear=False):
             config = HarnessConfig.from_env()
@@ -103,6 +110,7 @@ class Phase1Tests(unittest.TestCase):
         self.assertEqual(0.5, config.timeout_ema_alpha)
         self.assertEqual(30, config.timeout_min_seconds)
         self.assertEqual(1024, config.memory_limit_mb)
+        self.assertEqual(1200, config.task_run_timeout_seconds)
 
     def test_config_payload_round_trip_preserves_runtime_settings(self) -> None:
         config = HarnessConfig.from_env(
@@ -123,8 +131,22 @@ class Phase1Tests(unittest.TestCase):
             config.heartbeat_failure_escalation_threshold,
             restored.heartbeat_failure_escalation_threshold,
         )
+        self.assertEqual(config.task_run_timeout_seconds, restored.task_run_timeout_seconds)
+        self.assertEqual(config.task_llm_timeout_seconds, restored.task_llm_timeout_seconds)
         self.assertEqual(config.pr_check_enabled, restored.pr_check_enabled)
         self.assertEqual(config.pr_check_interval_seconds, restored.pr_check_interval_seconds)
+
+    def test_timeout_policy_tightens_after_repeated_timeout_failures(self) -> None:
+        telemetry = TelemetrySink(self.base / "telemetry")
+        telemetry.span("work", duration_ms=100000, validation_profile="generic", worker_backend="agent")
+        telemetry.span("work", duration_ms=120000, validation_profile="generic", worker_backend="agent")
+        telemetry.warn("validation_timeout", "timed out", validation_profile="generic", worker_backend="agent")
+        telemetry.warn("validation_timeout", "timed out", validation_profile="generic", worker_backend="agent")
+        telemetry.warn("validation_timeout", "timed out", validation_profile="generic", worker_backend="agent")
+
+        policy = ExecutionTimeoutPolicy(telemetry, min_seconds=30, max_seconds=1200, multiplier=2.5)
+
+        self.assertLess(policy.timeout_seconds("generic", "agent"), 250)
 
     def test_config_reads_telemetry_fsync_flag(self) -> None:
         with mock.patch.dict(

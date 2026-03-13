@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 from pathlib import Path
 from typing import Mapping
@@ -10,10 +11,17 @@ from .llm import _coerce_subprocess_output, command_uses_file_contract, run_comm
 
 
 DEFAULT_AGENT_TEST_TIMEOUT_SECONDS = 300
+DEFAULT_AGENT_LLM_TIMEOUT_SECONDS = 420
+DEFAULT_AGENT_COMPILE_TIMEOUT_SECONDS = 120
+DEFAULT_AGENT_GIT_TIMEOUT_SECONDS = 30
 
 
 def _agent_test_timeout_seconds(environ: Mapping[str, str]) -> int:
-    raw_value = str(environ.get("ACCRUVIA_AGENT_TEST_TIMEOUT_SECONDS", "")).strip()
+    raw_value = str(
+        environ.get("ACCRUVIA_AGENT_TEST_TIMEOUT_SECONDS")
+        or environ.get("ACCRUVIA_TASK_VALIDATION_TIMEOUT_SECONDS")
+        or ""
+    ).strip()
     if not raw_value:
         return DEFAULT_AGENT_TEST_TIMEOUT_SECONDS
     try:
@@ -21,6 +29,52 @@ def _agent_test_timeout_seconds(environ: Mapping[str, str]) -> int:
     except ValueError:
         return DEFAULT_AGENT_TEST_TIMEOUT_SECONDS
     return parsed if parsed > 0 else DEFAULT_AGENT_TEST_TIMEOUT_SECONDS
+
+
+def _env_timeout_seconds(environ: Mapping[str, str], key: str, default: int) -> int:
+    raw_value = str(environ.get(key, "")).strip()
+    if not raw_value:
+        return default
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _run_bounded_process(
+    args: list[str],
+    *,
+    cwd: Path,
+    timeout_seconds: int,
+) -> subprocess.CompletedProcess[str]:
+    process = subprocess.Popen(
+        args,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired as exc:
+        os.killpg(process.pid, signal.SIGKILL)
+        try:
+            stdout, stderr = process.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+            process.kill()
+            process.wait(timeout=1)
+            stdout = ""
+            stderr = ""
+        exc.stdout = stdout
+        exc.stderr = stderr
+        raise
+    return subprocess.CompletedProcess(args=args, returncode=process.returncode, stdout=stdout, stderr=stderr)
 
 
 def select_worker_llm_command(environ: Mapping[str, str]) -> tuple[str, str]:
@@ -66,6 +120,13 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
     prompt_path = run_dir / "codex_worker_prompt.txt"
     metadata_path = run_dir / "codex_worker.metadata.json"
     test_timeout_seconds = _agent_test_timeout_seconds(env)
+    llm_timeout_seconds = _env_timeout_seconds(env, "ACCRUVIA_TASK_LLM_TIMEOUT_SECONDS", DEFAULT_AGENT_LLM_TIMEOUT_SECONDS)
+    compile_timeout_seconds = _env_timeout_seconds(
+        env,
+        "ACCRUVIA_TASK_COMPILE_TIMEOUT_SECONDS",
+        DEFAULT_AGENT_COMPILE_TIMEOUT_SECONDS,
+    )
+    git_timeout_seconds = _env_timeout_seconds(env, "ACCRUVIA_TASK_GIT_TIMEOUT_SECONDS", DEFAULT_AGENT_GIT_TIMEOUT_SECONDS)
 
     plan_path.write_text(
         "\n".join(
@@ -118,7 +179,7 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
             llm_command,
             cwd=workspace,
             env=llm_env,
-            timeout_seconds=None,
+            timeout_seconds=llm_timeout_seconds,
             stdin_text=prompt_text if not command_uses_file_contract(llm_command) else None,
         )
     except subprocess.TimeoutExpired as exc:
@@ -139,6 +200,7 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
                     "infrastructure_failure": True,
                     "failure_category": "executor_timeout",
                     "failure_message": f"{llm_backend} worker command timed out",
+                    "timeout_seconds": llm_timeout_seconds,
                     "changed_files": [],
                     "test_files": [],
                 },
@@ -152,27 +214,50 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
     stdout_path.write_text(completed.stdout, encoding="utf-8")
     stderr_path.write_text(completed.stderr, encoding="utf-8")
 
-    python_files = subprocess.run(
-        ["git", "-C", str(workspace), "diff", "--name-only", "--", "*.py"],
-        check=False,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    if python_files:
-        compile_completed = subprocess.run(
-            ["python3", "-m", "py_compile", *python_files.splitlines()],
+    compile_timed_out = False
+    git_timed_out = False
+    compile_failure_message = ""
+    git_failure_message = ""
+    try:
+        python_files = _run_bounded_process(
+            ["git", "-C", str(workspace), "diff", "--name-only", "--", "*.py"],
             cwd=workspace,
-            check=False,
-            capture_output=True,
-            text=True,
+            timeout_seconds=git_timeout_seconds,
+        ).stdout.strip()
+    except subprocess.TimeoutExpired as exc:
+        git_timed_out = True
+        python_files = ""
+        git_failure_message = (
+            f"Git metadata scan for changed Python files exceeded {git_timeout_seconds} seconds and was terminated."
         )
-        compile_output_path.write_text(
-            (compile_completed.stdout or "") + (compile_completed.stderr or ""),
-            encoding="utf-8",
-        )
-        compile_rc = compile_completed.returncode
+        compile_output_path.write_text(_coerce_subprocess_output(exc.stderr), encoding="utf-8")
+    if python_files:
+        try:
+            compile_completed = _run_bounded_process(
+                ["python3", "-m", "py_compile", *python_files.splitlines()],
+                cwd=workspace,
+                timeout_seconds=compile_timeout_seconds,
+            )
+            compile_output_path.write_text(
+                (compile_completed.stdout or "") + (compile_completed.stderr or ""),
+                encoding="utf-8",
+            )
+            compile_rc = compile_completed.returncode
+        except subprocess.TimeoutExpired as exc:
+            compile_timed_out = True
+            compile_rc = 124
+            compile_failure_message = (
+                f"Compile validation exceeded {compile_timeout_seconds} seconds and was terminated."
+            )
+            compile_output_path.write_text(
+                compile_failure_message + "\n" + _coerce_subprocess_output(exc.stdout) + _coerce_subprocess_output(exc.stderr),
+                encoding="utf-8",
+            )
     else:
-        compile_output_path.write_text("No Python files changed.\n", encoding="utf-8")
+        if git_timed_out:
+            compile_output_path.write_text(git_failure_message + "\n", encoding="utf-8")
+        else:
+            compile_output_path.write_text("No Python files changed.\n", encoding="utf-8")
         compile_rc = 0
 
     test_command = [
@@ -211,26 +296,34 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
             encoding="utf-8",
         )
 
-    changed_files = [
-        line.strip()
-        for line in subprocess.run(
+    try:
+        changed_stdout = _run_bounded_process(
             ["git", "-C", str(workspace), "diff", "--name-only"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.splitlines()
-        if line.strip()
-    ]
-    untracked_files = [
-        line.strip()
-        for line in subprocess.run(
+            cwd=workspace,
+            timeout_seconds=git_timeout_seconds,
+        ).stdout
+    except subprocess.TimeoutExpired:
+        git_timed_out = True
+        changed_stdout = ""
+        if not git_failure_message:
+            git_failure_message = (
+                f"Git metadata scan exceeded {git_timeout_seconds} seconds and was terminated."
+            )
+    changed_files = [line.strip() for line in changed_stdout.splitlines() if line.strip()]
+    try:
+        untracked_stdout = _run_bounded_process(
             ["git", "-C", str(workspace), "ls-files", "--others", "--exclude-standard"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.splitlines()
-        if line.strip()
-    ]
+            cwd=workspace,
+            timeout_seconds=git_timeout_seconds,
+        ).stdout
+    except subprocess.TimeoutExpired:
+        git_timed_out = True
+        untracked_stdout = ""
+        if not git_failure_message:
+            git_failure_message = (
+                f"Git metadata scan exceeded {git_timeout_seconds} seconds and was terminated."
+            )
+    untracked_files = [line.strip() for line in untracked_stdout.splitlines() if line.strip()]
     all_changed = sorted(dict.fromkeys(changed_files + untracked_files))
     test_files = [
         path for path in all_changed if "/test" in path or path.startswith("tests/") or path.endswith("_test.py") or path.endswith(".test.js")
@@ -242,7 +335,7 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
     llm_failed = completed.returncode != 0
     worker_outcome = "blocked" if llm_failed else "success"
     failure_message = _first_nonempty_line(completed.stderr) or _first_nonempty_line(completed.stdout)
-    if not llm_failed and (compile_rc != 0 or test_completed.returncode != 0):
+    if not llm_failed and (compile_rc != 0 or test_completed.returncode != 0 or git_timed_out):
         worker_outcome = "failed"
     payload = {
         "task_id": task_id,
@@ -260,6 +353,8 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
             "targets": [path for path in all_changed if path.endswith(".py")],
             "mode": "py_compile",
             "output_path": str(compile_output_path),
+            "timeout_seconds": compile_timeout_seconds,
+            "timed_out": compile_timed_out,
         },
         "test_check": {
             "passed": test_completed.returncode == 0,
@@ -276,6 +371,20 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
             {
                 "failure_category": "validation_timeout",
                 "failure_message": f"Focused unit-test validation exceeded {test_timeout_seconds} seconds and was terminated.",
+            }
+        )
+    elif compile_timed_out:
+        payload.update(
+            {
+                "failure_category": "compile_timeout",
+                "failure_message": compile_failure_message,
+            }
+        )
+    elif git_timed_out:
+        payload.update(
+            {
+                "failure_category": "git_timeout",
+                "failure_message": git_failure_message,
             }
         )
     if llm_failed:

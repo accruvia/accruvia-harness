@@ -270,7 +270,7 @@ class CommandWorker:
                 encoding="utf-8",
             )
             return WorkResult(
-                summary=f"Executed {self.backend_name} worker command and timed out before task work completed.",
+                summary=f"Timed out in task_run_timeout after {timeout_seconds}s while executing the {self.backend_name} worker command.",
                 artifacts=[
                     ("worker_stdout", str(stdout_path), "Captured shell worker stdout"),
                     ("worker_stderr", str(stderr_path), "Captured shell worker stderr"),
@@ -348,8 +348,12 @@ class CommandWorker:
         plan_path = run_dir / "plan.txt"
         if plan_path.exists():
             plan_artifact.append(("plan", str(plan_path), "Structured plan artifact"))
+        summary = f"Executed {self.backend_name} worker command and captured output."
+        failure_category = str(payload.get("failure_category") or "").strip()
+        if failure_category:
+            summary = f"Worker finished with {failure_category}."
         return WorkResult(
-            summary=f"Executed {self.backend_name} worker command and captured output.",
+            summary=summary,
             artifacts=[
                 *plan_artifact,
                 ("worker_stdout", str(stdout_path), "Captured shell worker stdout"),
@@ -581,7 +585,7 @@ def build_worker_from_config(config: HarnessConfig, telemetry=None) -> WorkerBac
         telemetry,
         alpha=config.timeout_ema_alpha,
         min_seconds=config.timeout_min_seconds,
-        max_seconds=config.timeout_max_seconds,
+        max_seconds=min(config.timeout_max_seconds, config.task_run_timeout_seconds),
         multiplier=config.timeout_multiplier,
     )
     resource_policy = ResourceLimitPolicy(
@@ -628,6 +632,11 @@ def build_worker_from_config(config: HarnessConfig, telemetry=None) -> WorkerBac
                     "ACCRUVIA_LLM_CODEX_COMMAND": config.llm_codex_command,
                     "ACCRUVIA_LLM_CLAUDE_COMMAND": config.llm_claude_command,
                     "ACCRUVIA_LLM_ACCRUVIA_CLIENT_COMMAND": config.llm_accruvia_client_command,
+                    "ACCRUVIA_TASK_RUN_TIMEOUT_SECONDS": str(config.task_run_timeout_seconds),
+                    "ACCRUVIA_TASK_LLM_TIMEOUT_SECONDS": str(config.task_llm_timeout_seconds),
+                    "ACCRUVIA_TASK_VALIDATION_TIMEOUT_SECONDS": str(config.task_validation_timeout_seconds),
+                    "ACCRUVIA_TASK_COMPILE_TIMEOUT_SECONDS": str(config.task_compile_timeout_seconds),
+                    "ACCRUVIA_TASK_GIT_TIMEOUT_SECONDS": str(config.task_git_timeout_seconds),
                 }.items()
                 if value
             },

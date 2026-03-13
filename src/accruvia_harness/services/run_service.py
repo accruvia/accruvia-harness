@@ -301,6 +301,16 @@ class RunService:
                 outcome=work.outcome,
                 validation_profile=task.validation_profile,
             )
+            failure_category = str((work.diagnostics or {}).get("failure_category") or "").strip()
+            if failure_category.endswith("_timeout"):
+                self.telemetry.warn(
+                    failure_category,
+                    work.summary,
+                    task_id=task.id,
+                    run_id=run.id,
+                    validation_profile=task.validation_profile,
+                    worker_backend=type(worker).__name__,
+                )
         if self.telemetry is not None:
             with self.telemetry.timed(
                 "analyze",
