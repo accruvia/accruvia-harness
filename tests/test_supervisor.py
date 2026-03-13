@@ -87,6 +87,7 @@ class _FakeStore:
         self.project_ids = project_ids or []
         self.events = []
         self.metrics_calls: dict[str | None, int] = {}
+        self.recoveries: list[dict[str, int]] = []
 
     def list_projects(self):
         return [_FakeProject(project_id) for project_id in self.project_ids]
@@ -100,6 +101,11 @@ class _FakeStore:
         if count == 0:
             return {"tasks_by_status": {"pending": 1}, "pending_promotions": 0}
         return {"tasks_by_status": {"completed": 1}, "pending_promotions": 0}
+
+    def recover_stale_state(self):
+        if self.recoveries:
+            return self.recoveries.pop(0)
+        return {"runs": 0, "tasks": 0, "leases": 0}
 
 
 class _FakeReviewWatcher:
@@ -169,6 +175,29 @@ class SupervisorServiceTests(unittest.TestCase):
         self.assertEqual(5.0, result.slept_seconds)
         self.assertEqual([2.5, 2.5], clock.sleeps)
         self.assertEqual("max_idle_cycles_reached", result.exit_reason)
+
+    def test_supervisor_recovers_stale_state_before_sleeping(self) -> None:
+        clock = _FakeClock()
+        store = _FakeStore()
+        store.recoveries = [
+            {"runs": 1, "tasks": 1, "leases": 0},
+            {"runs": 0, "tasks": 0, "leases": 0},
+            {"runs": 0, "tasks": 0, "leases": 0},
+        ]
+        progress_events: list[dict[str, object]] = []
+        service = SupervisorService(store, _FakeQueue([]), _FakeCognition(), sleeper=clock.sleep, monotonic=clock.monotonic)
+
+        result = service.run(
+            watch=True,
+            idle_sleep_seconds=2.0,
+            max_idle_cycles=2,
+            progress_callback=progress_events.append,
+        )
+
+        self.assertEqual("max_idle_cycles_reached", result.exit_reason)
+        self.assertEqual(1, result.sleep_count)
+        self.assertEqual([2.0], clock.sleeps)
+        self.assertTrue(any(event["type"] == "stale_state_recovered" for event in progress_events))
 
     def test_supervisor_runs_heartbeat_only_when_due(self) -> None:
         clock = _FakeClock()

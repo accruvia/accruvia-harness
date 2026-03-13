@@ -248,6 +248,17 @@ class SupervisorService:
                     idle_cycles = 0
                     continue
 
+            recovered = self.store.recover_stale_state()
+            if any(int(count or 0) > 0 for count in recovered.values()):
+                progress(
+                    {
+                        "type": "stale_state_recovered",
+                        "recovered": recovered,
+                    }
+                )
+                idle_cycles = 0
+                continue
+
             idle_cycles += 1
             if not watch:
                 exit_reason = "idle"

@@ -167,7 +167,7 @@ class WorkerTests(unittest.TestCase):
         worker = AgentCommandWorker("printf 'boom' >&2; exit 7")
         result = worker.work(self.task, self.run, self.base)
 
-        self.assertEqual("failed", result.outcome)
+        self.assertEqual("blocked", result.outcome)
         self.assertEqual(7, result.diagnostics["returncode"])
         self.assertTrue((self.base / "runs" / self.run.id / "worker.stderr.txt").exists())
 
@@ -529,7 +529,7 @@ class WorkerTests(unittest.TestCase):
         worker = build_worker_from_config(config, telemetry=TelemetrySink(self.base / "telemetry"))
         result = worker.work(self.task, self.run, self.base)
 
-        self.assertEqual("failed", result.outcome)
+        self.assertEqual("blocked", result.outcome)
         error_path = self.base / "runs" / self.run.id / "llm_error.txt"
         self.assertTrue(error_path.exists())
 

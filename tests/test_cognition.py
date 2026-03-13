@@ -81,6 +81,7 @@ class CognitionTests(unittest.TestCase):
         self.assertIn("There is no fixed cap on the number of tasks.", prompt)
         self.assertIn("Reject feature creep", prompt)
         self.assertIn("queue behavior, and strategy overhead", prompt)
+        self.assertIn("Do not treat failed, blocked, stale, or crash-looping tasks as adequate backlog coverage", prompt)
         self.assertIn("strict JSON with keys: summary, priority_focus, issue_creation_needed, proposed_tasks, risks", prompt)
         self.assertIn("next_heartbeat_seconds", prompt)
 

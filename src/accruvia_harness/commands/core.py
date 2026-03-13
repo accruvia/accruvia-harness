@@ -234,6 +234,14 @@ def _emit_supervise_progress(event: dict[str, object]) -> None:
     if event_type == "sleeping":
         print(f"Idle. Sleeping {event['seconds']}s (idle cycle {event['idle_cycles']})", flush=True)
         return
+    if event_type == "stale_state_recovered":
+        recovered = event.get("recovered") or {}
+        print(
+            "Recovered stale state before idling: "
+            f"runs={recovered.get('runs', 0)}, tasks={recovered.get('tasks', 0)}, leases={recovered.get('leases', 0)}",
+            flush=True,
+        )
+        return
 
 
 def _supervise_summary_text(result) -> str:
