@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import io
 import multiprocessing
 import os
 import tempfile
@@ -9,7 +10,7 @@ from unittest import mock
 from pathlib import Path
 
 from accruvia_harness.config import HarnessConfig
-from accruvia_harness.commands.core import _build_supervise_restart_command, _redact_command
+from accruvia_harness.commands.core import _build_supervise_restart_command, _emit_supervise_progress, _redact_command
 from accruvia_harness.cli_parser import build_parser
 from accruvia_harness.logging_utils import HarnessLogger, classify_error
 from accruvia_harness.store import SQLiteHarnessStore
@@ -201,6 +202,31 @@ class Phase1Tests(unittest.TestCase):
         command = _build_supervise_restart_command({"watch": False})
 
         self.assertIn("--one-shot", command)
+
+    def test_supervise_progress_prints_atomicity_follow_on_and_retry_reset(self) -> None:
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            _emit_supervise_progress(
+                {
+                    "type": "atomicity_follow_on_created",
+                    "task_id": "task_parent",
+                    "task_title": "Tighten operator scope",
+                    "follow_on_task_id": "task_child",
+                    "follow_on_title": "Tighten operator scope: narrower atomic slice",
+                    "failure_category": "policy_self_modification",
+                }
+            )
+            _emit_supervise_progress(
+                {
+                    "type": "queue_retry_cycle_reset",
+                    "queue_depth": 2,
+                }
+            )
+
+        output = stdout.getvalue()
+        self.assertIn("Atomicity split queued for Tighten operator scope (task_parent)", output)
+        self.assertIn("Follow-on: Tighten operator scope: narrower atomic slice (task_child)", output)
+        self.assertIn("Reason: policy_self_modification", output)
+        self.assertIn("Retryable tasks still pending; starting another sweep of 2 queued tasks", output)
 
     def test_otlp_signal_endpoints_are_derived_per_signal(self) -> None:
         self.assertEqual(

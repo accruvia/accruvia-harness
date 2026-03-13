@@ -258,6 +258,26 @@ def _emit_supervise_progress(event: dict[str, object]) -> None:
     if event_type == "task_processed":
         print(_timestamped(f"Processed task {event['task_title']} ({event['processed_count']} total)"), flush=True)
         return
+    if event_type == "atomicity_follow_on_created":
+        print(
+            _timestamped(
+                f"Atomicity split queued for {event['task_title']} ({event['task_id']})"
+            ),
+            flush=True,
+        )
+        print(
+            _timestamped(
+                f"  Follow-on: {event['follow_on_title']} ({event['follow_on_task_id']})"
+            ),
+            flush=True,
+        )
+        print(
+            _timestamped(
+                f"  Reason: {event['failure_category']}"
+            ),
+            flush=True,
+        )
+        return
     if event_type == "heartbeat_succeeded":
         print(
             _timestamped(
@@ -322,6 +342,14 @@ def _emit_supervise_progress(event: dict[str, object]) -> None:
             _timestamped(
                 "Recovered stale state before idling: "
                 f"runs={recovered.get('runs', 0)}, tasks={recovered.get('tasks', 0)}, leases={recovered.get('leases', 0)}"
+            ),
+            flush=True,
+        )
+        return
+    if event_type == "queue_retry_cycle_reset":
+        print(
+            _timestamped(
+                f"Retryable tasks still pending; starting another sweep of {event['queue_depth']} queued tasks"
             ),
             flush=True,
         )

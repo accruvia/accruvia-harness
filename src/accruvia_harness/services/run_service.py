@@ -399,7 +399,19 @@ class RunService:
         )
         if bool(analysis.details.get("infrastructure_failure")):
             self._create_infrastructure_failure_follow_on(task, run, analysis)
-        self._create_atomicity_follow_on(task, run, analysis)
+        atomicity_follow_on = self._create_atomicity_follow_on(task, run, analysis)
+        if atomicity_follow_on is not None:
+            progress(
+                {
+                    "type": "atomicity_follow_on_created",
+                    "task_id": task.id,
+                    "task_title": task.title,
+                    "run_id": run.id,
+                    "follow_on_task_id": atomicity_follow_on["task_id"],
+                    "follow_on_title": atomicity_follow_on["title"],
+                    "failure_category": atomicity_follow_on["failure_category"],
+                }
+            )
         if analysis.verdict == EvaluationVerdict.BLOCKED:
             self._reshape_scope_violation(task, run, analysis)
         self._create_timeout_decomposition_follow_on(task, run, analysis)
@@ -655,25 +667,25 @@ class RunService:
             )
         )
 
-    def _create_atomicity_follow_on(self, task, run, analysis) -> None:
+    def _create_atomicity_follow_on(self, task, run, analysis) -> dict[str, str] | None:
         if self.task_service is None:
-            return
+            return None
         diagnostics = analysis.details.get("diagnostics")
         if not isinstance(diagnostics, dict):
-            return
+            return None
         category = str(diagnostics.get("failure_category") or "").strip()
         if category not in {"atomicity_decomposition", "policy_self_modification"}:
-            return
+            return None
         existing = self.store.find_follow_on_task(task.id, run.id)
         if existing is not None and existing.strategy == "atomicity_split":
-            return
+            return None
         queued_children = [
             child
             for child in self.store.list_child_tasks(task.id)
             if child.strategy == "atomicity_split" and child.status in {TaskStatus.PENDING, TaskStatus.ACTIVE}
         ]
         if queued_children:
-            return
+            return None
         rationale = str(diagnostics.get("failure_message") or analysis.summary).strip()
         follow_on = self.task_service.create_follow_on_task(
             parent_task_id=task.id,
@@ -698,6 +710,11 @@ class RunService:
                 payload={"parent_task_id": task.id, "run_id": run.id, "failure_category": category},
             )
         )
+        return {
+            "task_id": follow_on.id,
+            "title": follow_on.title,
+            "failure_category": category,
+        }
 
     def run_until_stable(self, task_id: str) -> list[Run]:
         completed_runs: list[Run] = []
