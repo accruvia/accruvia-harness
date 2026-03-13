@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -153,10 +154,29 @@ class WorkerTests(unittest.TestCase):
             max_seconds=1,
             multiplier=1.0,
         )
-        worker = ShellCommandWorker("sleep 2", timeout_policy=timeout_policy)
+        monotonic_values = iter([0.0, 2.0])
 
-        timeout = subprocess.TimeoutExpired("cmd", timeout=1, output=b"partial stdout", stderr=b"partial stderr")
-        with patch("accruvia_harness.workers.subprocess.run", side_effect=timeout):
+        class _FakeProcess:
+            pid = 12345
+            returncode = -9
+
+            def poll(self):
+                return None
+
+            def kill(self):
+                return None
+
+            def communicate(self):
+                return (b"partial stdout", b"partial stderr")
+
+        worker = ShellCommandWorker(
+            "sleep 2",
+            timeout_policy=timeout_policy,
+            monotonic=lambda: next(monotonic_values),
+            sleep_fn=lambda _seconds: None,
+        )
+
+        with patch("accruvia_harness.workers.subprocess.Popen", return_value=_FakeProcess()):
             result = worker.work(self.task, self.run, self.base)
 
         stderr_path = self.base / "runs" / self.run.id / "worker.stderr.txt"
@@ -272,6 +292,29 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual("blocked", result.outcome)
         self.assertTrue(result.diagnostics["infrastructure_failure"])
         self.assertEqual("executor_process_failure", result.diagnostics["failure_category"])
+
+    def test_shell_worker_emits_live_progress_for_long_running_child(self) -> None:
+        progress_events: list[dict[str, object]] = []
+        run_dir = self.base / "runs" / self.run.id
+        run_dir.mkdir(parents=True)
+        plan_path = run_dir / "plan.txt"
+        plan_path.write_text("plan\n", encoding="utf-8")
+        command = f"{shlex.quote(sys.executable)} -c {shlex.quote('import time; time.sleep(0.25)')}"
+        worker = ShellCommandWorker(
+            command,
+            progress_callback=progress_events.append,
+            status_interval_seconds=0.05,
+            stale_after_seconds=0.05,
+        )
+
+        result = worker.work(self.task, self.run, self.base)
+
+        self.assertEqual("success", result.outcome)
+        self.assertEqual("worker_launched", progress_events[0]["type"])
+        status_events = [event for event in progress_events if event["type"] == "worker_status"]
+        self.assertTrue(status_events)
+        self.assertTrue(any(event["latest_artifact"] == "plan.txt" for event in status_events))
+        self.assertTrue(any(bool(event["stale"]) for event in status_events))
 
     def test_select_worker_llm_command_prefers_selected_backend(self) -> None:
         backend, command = select_worker_llm_command(

@@ -180,10 +180,61 @@ def _timestamped(text: str) -> str:
     return f"{datetime.now().astimezone().strftime('%H:%M:%S')} {text}"
 
 
+def _format_duration(seconds: object) -> str:
+    if not isinstance(seconds, (int, float)):
+        return "unknown"
+    total_seconds = max(0, int(seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
 def _emit_supervise_progress(event: dict[str, object]) -> None:
     event_type = str(event.get("type"))
     if event_type == "task_started":
         print(_timestamped(f"Started task {event['task_title']} ({event['task_id']})"), flush=True)
+        return
+    if event_type == "run_created":
+        print(
+            _timestamped(
+                f"Opened run {event['run_id']} for {event['task_title']} (attempt {event['attempt']})"
+            ),
+            flush=True,
+        )
+        return
+    if event_type == "run_phase_changed":
+        detail = str(event.get("detail") or "").strip()
+        print(_timestamped(f"Run {event['run_id']} entered {event['phase']}"), flush=True)
+        if detail:
+            print(_timestamped(f"  Detail: {detail}"), flush=True)
+        return
+    if event_type == "worker_launched":
+        timeout = event.get("timeout_seconds")
+        timeout_text = f", timeout {_format_duration(timeout)}" if isinstance(timeout, (int, float)) else ""
+        print(
+            _timestamped(
+                f"Worker launched for {event['run_id']}: {event['backend_name']} pid {event['pid']} running {event['command_summary']}{timeout_text}"
+            ),
+            flush=True,
+        )
+        return
+    if event_type == "worker_status":
+        latest_artifact = event.get("latest_artifact")
+        latest_age = event.get("latest_artifact_age_seconds")
+        artifact_text = (
+            f"last artifact {latest_artifact} {_format_duration(latest_age)} ago"
+            if latest_artifact
+            else "no durable artifacts yet"
+        )
+        stale_text = " [stale]" if event.get("stale") else ""
+        print(
+            _timestamped(
+                f"Working: {event['run_id']} via {event['backend_name']} pid {event['pid']}, elapsed {_format_duration(event.get('elapsed_seconds'))}, {artifact_text}, child: {event['command_summary']}{stale_text}"
+            ),
+            flush=True,
+        )
         return
     if event_type == "task_finished":
         print(

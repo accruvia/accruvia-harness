@@ -49,7 +49,7 @@ class RunService:
         self.telemetry = telemetry
         self.workspace_policy_enforcer = workspace_policy_enforcer or WorkspacePolicyEnforcer()
 
-    def run_once(self, task_id: str) -> Run:
+    def run_once(self, task_id: str, progress_callback=None) -> Run:
         task = self.store.get_task(task_id)
         if task is None:
             raise ValueError(f"Unknown task: {task_id}")
@@ -66,10 +66,11 @@ class RunService:
                 validation_profile=task.validation_profile,
                 strategy=task.strategy,
             ):
-                return self._run_once(task, project)
-        return self._run_once(task, project)
+                return self._run_once(task, project, progress_callback=progress_callback)
+        return self._run_once(task, project, progress_callback=progress_callback)
 
-    def _run_once(self, task, project) -> Run:
+    def _run_once(self, task, project, progress_callback=None) -> Run:
+        progress = progress_callback or (lambda _event: None)
 
         self.store.update_task_status(task.id, TaskStatus.ACTIVE)
         self.store.create_event(
@@ -95,6 +96,15 @@ class RunService:
             summary="Run created.",
         )
         self.store.create_run(run)
+        progress(
+            {
+                "type": "run_created",
+                "task_id": task.id,
+                "task_title": task.title,
+                "run_id": run.id,
+                "attempt": attempt,
+            }
+        )
         self.store.create_event(
             Event(
                 id=new_id("event"),
@@ -187,6 +197,16 @@ class RunService:
                 plan = self.planner.plan(task, retry_context)
         else:
             plan = self.planner.plan(task, retry_context)
+        progress(
+            {
+                "type": "run_phase_changed",
+                "task_id": task.id,
+                "task_title": task.title,
+                "run_id": run.id,
+                "phase": "planning",
+                "detail": plan.summary,
+            }
+        )
         self.store.create_event(
             Event(
                 id=new_id("event"),
@@ -207,18 +227,35 @@ class RunService:
                 )
             )
         run = self.store.mark_run(run, RunStatus.WORKING, plan.summary)
-        if self.telemetry is not None:
-            with self.telemetry.timed(
-                "work",
-                task_id=task.id,
-                run_id=run.id,
-                attempt=attempt,
-                validation_profile=task.validation_profile,
-                worker_backend=type(worker).__name__,
-            ):
+        progress(
+            {
+                "type": "run_phase_changed",
+                "task_id": task.id,
+                "task_title": task.title,
+                "run_id": run.id,
+                "phase": "working",
+                "detail": "Executing worker command and waiting for durable artifacts.",
+            }
+        )
+        set_progress_callback = getattr(worker, "set_progress_callback", None)
+        if callable(set_progress_callback):
+            set_progress_callback(progress)
+        try:
+            if self.telemetry is not None:
+                with self.telemetry.timed(
+                    "work",
+                    task_id=task.id,
+                    run_id=run.id,
+                    attempt=attempt,
+                    validation_profile=task.validation_profile,
+                    worker_backend=type(worker).__name__,
+                ):
+                    work = worker.work(task, run, self.workspace_root)
+            else:
                 work = worker.work(task, run, self.workspace_root)
-        else:
-            work = worker.work(task, run, self.workspace_root)
+        finally:
+            if callable(set_progress_callback):
+                set_progress_callback(None)
         work = self._ensure_failure_evidence(task, run, work)
         self.store.create_event(
             Event(
@@ -245,6 +282,16 @@ class RunService:
                 )
             )
         run = self.store.mark_run(run, RunStatus.ANALYZING, work.summary)
+        progress(
+            {
+                "type": "run_phase_changed",
+                "task_id": task.id,
+                "task_title": task.title,
+                "run_id": run.id,
+                "phase": "analyzing",
+                "detail": work.summary,
+            }
+        )
         if self.telemetry is not None:
             self.telemetry.metric(
                 "worker_result",
@@ -294,6 +341,16 @@ class RunService:
             )
         )
         run = self.store.mark_run(run, RunStatus.DECIDING, analysis.summary)
+        progress(
+            {
+                "type": "run_phase_changed",
+                "task_id": task.id,
+                "task_title": task.title,
+                "run_id": run.id,
+                "phase": "deciding",
+                "detail": analysis.summary,
+            }
+        )
         if self.telemetry is not None:
             self.telemetry.metric(
                 "evaluation_recorded",

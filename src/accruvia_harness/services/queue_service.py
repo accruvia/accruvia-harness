@@ -36,7 +36,7 @@ class QueueService:
             }
         )
         try:
-            run = self.runner.run_once(task.id)
+            run = self.runner.run_once(task.id, progress_callback=progress)
             runs = [run]
             updated_task = self.store.get_task(task.id)
             backlog_after = self.store.metrics_snapshot(task.project_id)

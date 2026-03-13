@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Protocol
 
@@ -102,6 +104,11 @@ class CommandWorker:
         resource_policy=None,
         env_passthrough: tuple[str, ...] = (),
         extra_env: dict[str, str] | None = None,
+        progress_callback=None,
+        status_interval_seconds: float = 60.0,
+        stale_after_seconds: float = 300.0,
+        monotonic=None,
+        sleep_fn=None,
     ) -> None:
         self.command = command
         self.backend_name = backend_name
@@ -109,6 +116,39 @@ class CommandWorker:
         self.resource_policy = resource_policy
         self.env_passthrough = env_passthrough
         self.extra_env = dict(extra_env or {})
+        self.progress_callback = progress_callback
+        self.status_interval_seconds = status_interval_seconds
+        self.stale_after_seconds = stale_after_seconds
+        self._monotonic = monotonic or time.monotonic
+        self._sleep = sleep_fn or time.sleep
+
+    def set_progress_callback(self, callback) -> None:
+        self.progress_callback = callback
+
+    def _emit_progress(self, event: dict[str, object]) -> None:
+        if self.progress_callback is not None:
+            self.progress_callback(event)
+
+    def _command_summary(self) -> str:
+        tokens = shlex.split(self.command)
+        if not tokens:
+            return self.command.strip() or self.backend_name
+        return " ".join(tokens[:6])
+
+    def _latest_artifact_details(self, run_dir: Path) -> tuple[str | None, float | None]:
+        latest_path: Path | None = None
+        latest_mtime = 0.0
+        for child in run_dir.iterdir():
+            if not child.is_file():
+                continue
+            stat = child.stat()
+            if stat.st_mtime > latest_mtime:
+                latest_mtime = stat.st_mtime
+                latest_path = child
+        if latest_path is None:
+            return None, None
+        age_seconds = max(0.0, time.time() - latest_mtime)
+        return latest_path.name, age_seconds
 
     def work(self, task: Task, run: Run, workspace_root: Path) -> WorkResult:
         run_dir = (workspace_root / "runs" / run.id).resolve()
@@ -130,16 +170,73 @@ class CommandWorker:
                 task.validation_profile, self.backend_name
             )
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 self.command,
                 shell=True,
-                check=False,
                 cwd=project_workspace,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 env=build_subprocess_env(env, passthrough=self.env_passthrough),
-                timeout=timeout_seconds,
+                bufsize=1,
                 preexec_fn=self.resource_policy.preexec_fn() if self.resource_policy is not None else None,
+            )
+            started_at = self._monotonic()
+            last_status_at = started_at
+            command_summary = self._command_summary()
+            self._emit_progress(
+                {
+                    "type": "worker_launched",
+                    "task_id": task.id,
+                    "run_id": run.id,
+                    "backend_name": self.backend_name,
+                    "command_summary": command_summary,
+                    "pid": process.pid,
+                    "timeout_seconds": timeout_seconds,
+                }
+            )
+            while True:
+                returncode = process.poll()
+                now = self._monotonic()
+                if returncode is not None:
+                    break
+                if timeout_seconds is not None and now - started_at >= timeout_seconds:
+                    process.kill()
+                    stdout_text, stderr_text = process.communicate()
+                    raise subprocess.TimeoutExpired(
+                        self.command,
+                        timeout=timeout_seconds,
+                        output=stdout_text,
+                        stderr=stderr_text,
+                    )
+                if self.status_interval_seconds > 0 and now - last_status_at >= self.status_interval_seconds:
+                    latest_artifact, latest_artifact_age_seconds = self._latest_artifact_details(run_dir)
+                    stale = bool(
+                        latest_artifact_age_seconds is not None
+                        and latest_artifact_age_seconds >= self.stale_after_seconds
+                    )
+                    self._emit_progress(
+                        {
+                            "type": "worker_status",
+                            "task_id": task.id,
+                            "run_id": run.id,
+                            "backend_name": self.backend_name,
+                            "command_summary": command_summary,
+                            "pid": process.pid,
+                            "elapsed_seconds": now - started_at,
+                            "latest_artifact": latest_artifact,
+                            "latest_artifact_age_seconds": latest_artifact_age_seconds,
+                            "stale": stale,
+                        }
+                    )
+                    last_status_at = now
+                self._sleep(0.2)
+            stdout_text, stderr_text = process.communicate()
+            completed = subprocess.CompletedProcess(
+                args=self.command,
+                returncode=process.returncode,
+                stdout=stdout_text,
+                stderr=stderr_text,
             )
         except subprocess.TimeoutExpired as exc:
             stdout_path = run_dir / "worker.stdout.txt"
@@ -283,6 +380,11 @@ class ShellCommandWorker(CommandWorker):
         resource_policy=None,
         env_passthrough: tuple[str, ...] = (),
         extra_env: dict[str, str] | None = None,
+        progress_callback=None,
+        status_interval_seconds: float = 60.0,
+        stale_after_seconds: float = 300.0,
+        monotonic=None,
+        sleep_fn=None,
     ) -> None:
         super().__init__(
             command=command,
@@ -291,6 +393,11 @@ class ShellCommandWorker(CommandWorker):
             resource_policy=resource_policy,
             env_passthrough=env_passthrough,
             extra_env=extra_env,
+            progress_callback=progress_callback,
+            status_interval_seconds=status_interval_seconds,
+            stale_after_seconds=stale_after_seconds,
+            monotonic=monotonic,
+            sleep_fn=sleep_fn,
         )
 
 
@@ -302,6 +409,11 @@ class AgentCommandWorker(CommandWorker):
         resource_policy=None,
         env_passthrough: tuple[str, ...] = (),
         extra_env: dict[str, str] | None = None,
+        progress_callback=None,
+        status_interval_seconds: float = 60.0,
+        stale_after_seconds: float = 300.0,
+        monotonic=None,
+        sleep_fn=None,
     ) -> None:
         super().__init__(
             command=command,
@@ -310,6 +422,11 @@ class AgentCommandWorker(CommandWorker):
             resource_policy=resource_policy,
             env_passthrough=env_passthrough,
             extra_env=extra_env,
+            progress_callback=progress_callback,
+            status_interval_seconds=status_interval_seconds,
+            stale_after_seconds=stale_after_seconds,
+            monotonic=monotonic,
+            sleep_fn=sleep_fn,
         )
 
 
