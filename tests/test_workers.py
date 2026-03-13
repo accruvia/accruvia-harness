@@ -373,6 +373,61 @@ class WorkerTests(unittest.TestCase):
         self.assertIn("Objective: Verify worker abstraction", (run_dir / "codex_worker_prompt.txt").read_text(encoding="utf-8"))
         self.assertIn("Objective: Verify worker abstraction", (workspace / "shared_prompt.txt").read_text(encoding="utf-8"))
 
+    def test_run_agent_worker_fails_fast_when_focused_tests_exceed_timeout(self) -> None:
+        workspace = self.base / "workspace"
+        tests_dir = workspace / "tests"
+        tests_dir.mkdir(parents=True)
+        for name in ("test_phase1.py", "test_supervisor.py", "test_observer.py"):
+            (tests_dir / name).write_text(
+                "import unittest\n\n"
+                "class Smoke(unittest.TestCase):\n"
+                "    def test_ok(self):\n"
+                "        self.assertTrue(True)\n",
+                encoding="utf-8",
+            )
+        (tests_dir / "test_cli.py").write_text(
+            "import time\n"
+            "import unittest\n\n"
+            "class Slow(unittest.TestCase):\n"
+            "    def test_slow(self):\n"
+            "        time.sleep(2)\n",
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "init", "-b", "main"], cwd=workspace, check=True, capture_output=True, text=True)
+        cli_script = self.base / "fake_codex.sh"
+        cli_script.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf 'worker summary\\n'\n"
+            "printf 'value = 1\\n' > changed_module.py\n",
+            encoding="utf-8",
+        )
+        cli_script.chmod(0o755)
+        run_dir = self.base / "run-timeout"
+
+        result = run_agent_worker(
+            {
+                "ACCRUVIA_RUN_DIR": str(run_dir),
+                "ACCRUVIA_PROJECT_WORKSPACE": str(workspace),
+                "ACCRUVIA_TASK_ID": self.task.id,
+                "ACCRUVIA_RUN_ID": self.run.id,
+                "ACCRUVIA_TASK_OBJECTIVE": self.task.objective,
+                "ACCRUVIA_RUN_SUMMARY": self.run.summary,
+                "ACCRUVIA_TASK_STRATEGY": "default",
+                "ACCRUVIA_WORKER_LLM_BACKEND": "codex",
+                "ACCRUVIA_LLM_CODEX_COMMAND": str(cli_script),
+                "ACCRUVIA_AGENT_TEST_TIMEOUT_SECONDS": "1",
+            }
+        )
+
+        report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
+        self.assertEqual(1, result)
+        self.assertEqual("failed", report["worker_outcome"])
+        self.assertEqual("validation_timeout", report["failure_category"])
+        self.assertTrue(report["test_check"]["timed_out"])
+        self.assertEqual(1, report["test_check"]["timeout_seconds"])
+        self.assertIn("terminated", (run_dir / "test_output.txt").read_text(encoding="utf-8"))
+        self.assertIn("changed_module.py", report["changed_files"])
+
     def test_build_worker_from_config_defaults_agent_worker_command(self) -> None:
         config = HarnessConfig(
             db_path=self.base / "harness.db",

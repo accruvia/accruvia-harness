@@ -9,6 +9,20 @@ from typing import Mapping
 from .llm import _coerce_subprocess_output, command_uses_file_contract, run_command_process
 
 
+DEFAULT_AGENT_TEST_TIMEOUT_SECONDS = 300
+
+
+def _agent_test_timeout_seconds(environ: Mapping[str, str]) -> int:
+    raw_value = str(environ.get("ACCRUVIA_AGENT_TEST_TIMEOUT_SECONDS", "")).strip()
+    if not raw_value:
+        return DEFAULT_AGENT_TEST_TIMEOUT_SECONDS
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        return DEFAULT_AGENT_TEST_TIMEOUT_SECONDS
+    return parsed if parsed > 0 else DEFAULT_AGENT_TEST_TIMEOUT_SECONDS
+
+
 def select_worker_llm_command(environ: Mapping[str, str]) -> tuple[str, str]:
     preferred = str(environ.get("ACCRUVIA_WORKER_LLM_BACKEND", "")).strip().lower()
     commands = {
@@ -51,6 +65,7 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
     test_output_path = run_dir / "test_output.txt"
     prompt_path = run_dir / "codex_worker_prompt.txt"
     metadata_path = run_dir / "codex_worker.metadata.json"
+    test_timeout_seconds = _agent_test_timeout_seconds(env)
 
     plan_path.write_text(
         "\n".join(
@@ -160,14 +175,41 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
         compile_output_path.write_text("No Python files changed.\n", encoding="utf-8")
         compile_rc = 0
 
-    test_completed = subprocess.run(
-        ["python3", "-m", "unittest", "tests.test_cli", "tests.test_phase1", "tests.test_supervisor", "tests.test_observer"],
-        cwd=workspace,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    test_output_path.write_text((test_completed.stdout or "") + (test_completed.stderr or ""), encoding="utf-8")
+    test_command = [
+        "python3",
+        "-m",
+        "unittest",
+        "tests.test_cli",
+        "tests.test_phase1",
+        "tests.test_supervisor",
+        "tests.test_observer",
+    ]
+    test_timed_out = False
+    try:
+        test_completed = subprocess.run(
+            test_command,
+            cwd=workspace,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=test_timeout_seconds,
+        )
+        test_output_path.write_text((test_completed.stdout or "") + (test_completed.stderr or ""), encoding="utf-8")
+    except subprocess.TimeoutExpired as exc:
+        test_timed_out = True
+        test_completed = subprocess.CompletedProcess(
+            args=test_command,
+            returncode=124,
+            stdout=_coerce_subprocess_output(exc.stdout),
+            stderr=_coerce_subprocess_output(exc.stderr),
+        )
+        timeout_summary = (
+            f"Focused unit-test validation hit the {test_timeout_seconds}s ceiling and was terminated.\n"
+        )
+        test_output_path.write_text(
+            timeout_summary + (test_completed.stdout or "") + (test_completed.stderr or ""),
+            encoding="utf-8",
+        )
 
     changed_files = [
         line.strip()
@@ -223,10 +265,19 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
             "passed": test_completed.returncode == 0,
             "framework": "unittest",
             "output_path": str(test_output_path),
+            "timeout_seconds": test_timeout_seconds,
+            "timed_out": test_timed_out,
         },
         "summary": summary_text,
         "command": llm_command,
     }
+    if test_timed_out:
+        payload.update(
+            {
+                "failure_category": "validation_timeout",
+                "failure_message": f"Focused unit-test validation exceeded {test_timeout_seconds} seconds and was terminated.",
+            }
+        )
     if llm_failed:
         payload.update(
             {
