@@ -114,6 +114,7 @@ class Task:
     external_ref_id: str | None = None
     external_ref_metadata: dict[str, Any] = field(default_factory=dict)
     validation_profile: str = "generic"
+    validation_mode: str = "default_focused"
     scope: dict[str, Any] = field(default_factory=dict)
     strategy: str = "default"
     max_attempts: int = 3

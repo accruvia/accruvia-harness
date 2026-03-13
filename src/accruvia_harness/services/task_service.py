@@ -7,6 +7,18 @@ from ..store import SQLiteHarnessStore
 from .common import task_created_payload
 
 
+LIGHTWEIGHT_REPAIR_STRATEGIES = frozenset({"executor_repair", "timeout_decomposition", "bounded_unblocker", "deterministic_reliability"})
+
+
+def resolve_validation_mode(validation_mode: str | None, strategy: str) -> str:
+    candidate = str(validation_mode or "").strip()
+    if candidate:
+        return candidate
+    if strategy in LIGHTWEIGHT_REPAIR_STRATEGIES:
+        return "lightweight_repair"
+    return "default_focused"
+
+
 class TaskService:
     def __init__(self, store: SQLiteHarnessStore) -> None:
         self.store = store
@@ -99,6 +111,7 @@ class TaskService:
         external_ref_id: str | None,
         external_ref_metadata: dict[str, object] | None = None,
         validation_profile: str = "generic",
+        validation_mode: str | None = None,
         scope: dict[str, object] | None = None,
         strategy: str = "default",
         max_attempts: int = 3,
@@ -118,6 +131,7 @@ class TaskService:
                 external_ref_id=external_ref_id,
                 external_ref_metadata=external_ref_metadata or {},
                 validation_profile=validation_profile,
+                validation_mode=resolve_validation_mode(validation_mode, strategy),
                 scope=scope or {},
                 strategy=strategy,
                 max_attempts=max_attempts,
@@ -134,6 +148,7 @@ class TaskService:
         objective: str,
         priority: int | None = None,
         strategy: str | None = None,
+        validation_mode: str | None = None,
         max_attempts: int | None = None,
         required_artifacts: list[str] | None = None,
     ) -> Task:
@@ -151,6 +166,7 @@ class TaskService:
             external_ref_id=parent.external_ref_id,
             external_ref_metadata=dict(parent.external_ref_metadata),
             validation_profile=parent.validation_profile,
+            validation_mode=validation_mode if validation_mode is not None else parent.validation_mode,
             scope=dict(parent.scope),
             strategy=strategy or parent.strategy,
             max_attempts=max_attempts if max_attempts is not None else parent.max_attempts,

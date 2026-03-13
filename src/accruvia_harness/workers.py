@@ -162,6 +162,9 @@ class CommandWorker:
             "ACCRUVIA_RUN_DIR": str(run_dir),
             "ACCRUVIA_PROJECT_WORKSPACE": str(project_workspace),
             "ACCRUVIA_TASK_SCOPE_JSON": json.dumps(task.scope, sort_keys=True),
+            "ACCRUVIA_TASK_STRATEGY": task.strategy,
+            "ACCRUVIA_TASK_VALIDATION_PROFILE": task.validation_profile,
+            "ACCRUVIA_TASK_VALIDATION_MODE": task.validation_mode,
             **self.extra_env,
         }
         timeout_seconds = None

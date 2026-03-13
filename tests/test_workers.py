@@ -450,21 +450,13 @@ class WorkerTests(unittest.TestCase):
         self.assertIn("terminated", (run_dir / "test_output.txt").read_text(encoding="utf-8"))
         self.assertIn("changed_module.py", report["changed_files"])
 
-    def test_focused_test_command_uses_lightweight_suite_for_repair_strategies(self) -> None:
+    def test_focused_test_command_uses_lightweight_suite_for_repair_mode(self) -> None:
         self.assertEqual(
             ["python3", "-m", "unittest", "tests.test_workers"],
-            _focused_test_command("executor_repair"),
-        )
-        self.assertEqual(
-            ["python3", "-m", "unittest", "tests.test_workers"],
-            _focused_test_command("timeout_decomposition"),
-        )
-        self.assertEqual(
-            ["python3", "-m", "unittest", "tests.test_workers"],
-            _focused_test_command("bounded_unblocker"),
+            _focused_test_command("lightweight_repair"),
         )
 
-    def test_focused_test_command_keeps_default_suite_for_normal_work(self) -> None:
+    def test_focused_test_command_keeps_default_suite_for_default_mode(self) -> None:
         self.assertEqual(
             [
                 "python3",
@@ -475,7 +467,7 @@ class WorkerTests(unittest.TestCase):
                 "tests.test_supervisor",
                 "tests.test_observer",
             ],
-            _focused_test_command("default"),
+            _focused_test_command("default_focused"),
         )
 
     def test_build_worker_from_config_defaults_agent_worker_command(self) -> None:

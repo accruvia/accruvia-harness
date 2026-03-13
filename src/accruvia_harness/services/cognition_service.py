@@ -203,6 +203,7 @@ class CognitionService:
                 external_ref_type=None,
                 external_ref_id=None,
                 validation_profile=str(item.get("validation_profile") or "generic"),
+                validation_mode=(str(item.get("validation_mode")).strip() if item.get("validation_mode") else None),
                 scope=scope,
                 strategy=str(item.get("strategy") or "heartbeat"),
                 max_attempts=int(item.get("max_attempts", 3)),

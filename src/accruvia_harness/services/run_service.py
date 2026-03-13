@@ -529,6 +529,7 @@ class RunService:
             ),
             priority=max(task.priority + 100, 900),
             strategy="executor_repair",
+            validation_mode="lightweight_repair",
             max_attempts=1,
             required_artifacts=["plan", "report"],
         )
@@ -576,6 +577,7 @@ class RunService:
                 external_ref_id=task.external_ref_id,
                 external_ref_metadata=dict(task.external_ref_metadata),
                 validation_profile=task.validation_profile,
+                validation_mode=task.validation_mode,
                 scope={"allowed_paths": [path]},
                 strategy="scope_split",
                 max_attempts=task.max_attempts,
@@ -638,6 +640,7 @@ class RunService:
             ),
             priority=max(task.priority + 5, 1),
             strategy="timeout_decomposition",
+            validation_mode="lightweight_repair",
             max_attempts=1,
             required_artifacts=["plan", "report"],
         )

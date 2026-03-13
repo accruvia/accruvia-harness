@@ -178,6 +178,17 @@ MIGRATIONS: list[Migration] = [
         ALTER TABLE projects ADD COLUMN base_branch TEXT NOT NULL DEFAULT 'main';
         """,
     ),
+    Migration(
+        version=10,
+        name="task_validation_modes",
+        sql="""
+        ALTER TABLE tasks ADD COLUMN validation_mode TEXT NOT NULL DEFAULT 'default_focused';
+        UPDATE tasks
+        SET validation_mode = 'lightweight_repair'
+        WHERE validation_mode = 'default_focused'
+          AND strategy IN ('executor_repair', 'timeout_decomposition', 'bounded_unblocker', 'deterministic_reliability');
+        """,
+    ),
 ]
 
 

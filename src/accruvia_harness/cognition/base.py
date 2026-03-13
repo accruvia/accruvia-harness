@@ -112,7 +112,7 @@ class GenericCognitionAdapter:
                 "Tasks must be atomic, concrete, and single-objective. Split broad multi-objective work into smaller tasks.",
                 "Return strict JSON with keys: summary, priority_focus, issue_creation_needed, proposed_tasks, risks.",
                 "Each proposed_tasks item must include title, objective, priority, rationale.",
-                "Optional proposed_tasks keys: split_of_task_id, strategy, validation_profile, allowed_paths, forbidden_paths.",
+                "Optional proposed_tasks keys: split_of_task_id, strategy, validation_profile, validation_mode, allowed_paths, forbidden_paths.",
                 "Optional top-level key: next_heartbeat_seconds. Use it to recommend when the next strategy loop should run.",
                 "Priority must be one of P0, P1, P2, P3, or a numeric priority.",
                 "Set issue_creation_needed to false when no worthwhile work is justified. If false, proposed_tasks should be empty.",

@@ -13,6 +13,7 @@ def task_created_payload(task: Task) -> dict[str, object]:
         "external_ref_id": task.external_ref_id,
         "external_ref_metadata": task.external_ref_metadata,
         "validation_profile": task.validation_profile,
+        "validation_mode": task.validation_mode,
         "scope": task.scope,
         "strategy": task.strategy,
         "max_attempts": task.max_attempts,

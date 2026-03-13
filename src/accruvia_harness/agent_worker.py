@@ -14,11 +14,10 @@ DEFAULT_AGENT_TEST_TIMEOUT_SECONDS = 300
 DEFAULT_AGENT_LLM_TIMEOUT_SECONDS = 420
 DEFAULT_AGENT_COMPILE_TIMEOUT_SECONDS = 120
 DEFAULT_AGENT_GIT_TIMEOUT_SECONDS = 30
-LIGHTWEIGHT_REPAIR_STRATEGIES = frozenset({"executor_repair", "timeout_decomposition", "bounded_unblocker"})
 
 
-def _focused_test_command(strategy: str) -> list[str]:
-    if strategy in LIGHTWEIGHT_REPAIR_STRATEGIES:
+def _focused_test_command(validation_mode: str) -> list[str]:
+    if validation_mode == "lightweight_repair":
         return ["python3", "-m", "unittest", "tests.test_workers"]
     return [
         "python3",
@@ -124,6 +123,8 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
     objective = env["ACCRUVIA_TASK_OBJECTIVE"]
     summary = env.get("ACCRUVIA_RUN_SUMMARY", "")
     strategy = env.get("ACCRUVIA_TASK_STRATEGY", "default")
+    validation_profile = env.get("ACCRUVIA_TASK_VALIDATION_PROFILE", "generic")
+    validation_mode = env.get("ACCRUVIA_TASK_VALIDATION_MODE", "default_focused")
 
     run_dir.mkdir(parents=True, exist_ok=True)
     plan_path = run_dir / "plan.txt"
@@ -209,7 +210,8 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
                     "strategy": strategy,
                     "worker_backend": "agent",
                     "llm_backend": llm_backend,
-                    "validation_profile": "generic",
+                    "validation_profile": validation_profile,
+                    "validation_mode": validation_mode,
                     "worker_outcome": "blocked",
                     "blocked": True,
                     "infrastructure_failure": True,
@@ -275,8 +277,7 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
             compile_output_path.write_text("No Python files changed.\n", encoding="utf-8")
         compile_rc = 0
 
-    test_command = _focused_test_command(strategy)
-    validation_selection = "lightweight_repair" if strategy in LIGHTWEIGHT_REPAIR_STRATEGIES else "default_focused"
+    test_command = _focused_test_command(validation_mode)
     test_timed_out = False
     try:
         test_completed = subprocess.run(
@@ -352,7 +353,8 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
         "strategy": strategy,
         "worker_backend": "agent",
         "llm_backend": llm_backend,
-        "validation_profile": "generic",
+        "validation_profile": validation_profile,
+        "validation_mode": validation_mode,
         "worker_outcome": worker_outcome,
         "changed_files": all_changed,
         "test_files": test_files or ["tests/test_cli.py"],
@@ -369,7 +371,7 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
             "framework": "unittest",
             "command": test_command,
             "output_path": str(test_output_path),
-            "selection": validation_selection,
+            "selection": validation_mode,
             "timeout_seconds": test_timeout_seconds,
             "timed_out": test_timed_out,
         },
