@@ -65,6 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
     create_task.add_argument("--external-ref-type")
     create_task.add_argument("--external-ref-id")
     create_task.add_argument("--validation-profile", default="generic")
+    create_task.add_argument("--validation-mode", default="default_focused")
     create_task.add_argument("--strategy", default="default")
     create_task.add_argument("--max-attempts", type=int, default=3)
     create_task.add_argument("--max-branches", type=int, default=1)

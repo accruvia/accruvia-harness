@@ -82,6 +82,8 @@ class CognitionTests(unittest.TestCase):
         self.assertIn("Reject feature creep", prompt)
         self.assertIn("queue behavior, and strategy overhead", prompt)
         self.assertIn("Do not treat failed, blocked, stale, or crash-looping tasks as adequate backlog coverage", prompt)
+        self.assertIn("Healthy idle is not completion", prompt)
+        self.assertIn("do not recommend more than 1800 seconds before the next heartbeat", prompt)
         self.assertIn("strict JSON with keys: summary, priority_focus, issue_creation_needed, proposed_tasks, risks", prompt)
         self.assertIn("next_heartbeat_seconds", prompt)
 

@@ -399,6 +399,7 @@ class RunService:
         )
         if bool(analysis.details.get("infrastructure_failure")):
             self._create_infrastructure_failure_follow_on(task, run, analysis)
+        self._create_atomicity_follow_on(task, run, analysis)
         if analysis.verdict == EvaluationVerdict.BLOCKED:
             self._reshape_scope_violation(task, run, analysis)
         self._create_timeout_decomposition_follow_on(task, run, analysis)
@@ -650,6 +651,50 @@ class RunService:
                 entity_type="task",
                 entity_id=follow_on.id,
                 event_type="timeout_decomposition_follow_on_created",
+                payload={"parent_task_id": task.id, "run_id": run.id, "failure_category": category},
+            )
+        )
+
+    def _create_atomicity_follow_on(self, task, run, analysis) -> None:
+        if self.task_service is None:
+            return
+        diagnostics = analysis.details.get("diagnostics")
+        if not isinstance(diagnostics, dict):
+            return
+        category = str(diagnostics.get("failure_category") or "").strip()
+        if category not in {"atomicity_decomposition", "policy_self_modification"}:
+            return
+        existing = self.store.find_follow_on_task(task.id, run.id)
+        if existing is not None and existing.strategy == "atomicity_split":
+            return
+        queued_children = [
+            child
+            for child in self.store.list_child_tasks(task.id)
+            if child.strategy == "atomicity_split" and child.status in {TaskStatus.PENDING, TaskStatus.ACTIVE}
+        ]
+        if queued_children:
+            return
+        rationale = str(diagnostics.get("failure_message") or analysis.summary).strip()
+        follow_on = self.task_service.create_follow_on_task(
+            parent_task_id=task.id,
+            source_run_id=run.id,
+            title=f"{task.title}: narrower atomic slice",
+            objective=(
+                "Reduce this task to one narrower slice that avoids self-referential control-plane changes and "
+                f"matches a bounded validation surface. Latest atomicity category: {category}. Latest rationale: {rationale}"
+            ),
+            priority=max(task.priority + 5, 1),
+            strategy="atomicity_split",
+            validation_mode=task.validation_mode,
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+        self.store.create_event(
+            Event(
+                id=new_id("event"),
+                entity_type="task",
+                entity_id=follow_on.id,
+                event_type="atomicity_follow_on_created",
                 payload={"parent_task_id": task.id, "run_id": run.id, "failure_category": category},
             )
         )

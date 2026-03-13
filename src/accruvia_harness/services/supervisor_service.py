@@ -187,6 +187,27 @@ class SupervisorService:
                     heartbeat_failures.pop(heartbeat_project_id, None)
                     heartbeat_last_run[heartbeat_project_id] = self._monotonic()
                     backlog_after = self._metrics_snapshot(heartbeat_project_id)
+                    recommended = None
+                    if hasattr(heartbeat, "analysis") and isinstance(heartbeat.analysis, dict):
+                        recommended = heartbeat.analysis.get("next_heartbeat_seconds")
+                    interval_seconds = float(heartbeat_interval_seconds or 1800.0)
+                    source = "default"
+                    if isinstance(recommended, (int, float)) and recommended > 0:
+                        interval_seconds = float(recommended)
+                        source = "brain_recommended"
+                    heartbeat_intervals[heartbeat_project_id] = interval_seconds
+                    self.store.create_event(
+                        Event(
+                            id=new_id("event"),
+                            entity_type="project",
+                            entity_id=heartbeat_project_id,
+                            event_type="heartbeat_scheduled",
+                            payload={
+                                "interval_seconds": interval_seconds,
+                                "source": source,
+                            },
+                        )
+                    )
                     progress(
                         {
                             "type": "heartbeat_succeeded",
@@ -198,13 +219,10 @@ class SupervisorService:
                             "issue_creation_needed": bool(heartbeat.analysis.get("issue_creation_needed", False)),
                             "backlog_before": backlog_before,
                             "backlog_after": backlog_after,
+                            "heartbeat_interval_seconds": interval_seconds,
+                            "heartbeat_schedule_source": source,
                         }
                     )
-                    recommended = None
-                    if hasattr(heartbeat, "analysis") and isinstance(heartbeat.analysis, dict):
-                        recommended = heartbeat.analysis.get("next_heartbeat_seconds")
-                    if isinstance(recommended, (int, float)) and recommended > 0:
-                        heartbeat_intervals[heartbeat_project_id] = float(recommended)
                 idle_cycles = 0
                 continue
 
@@ -229,6 +247,20 @@ class SupervisorService:
                     }
                 )
                 idle_cycles = 0
+                continue
+
+            queue_metrics = self._metrics_snapshot(project_id)
+            queue_depth = int(queue_metrics.get("tasks_by_status", {}).get("pending", 0)) + int(
+                queue_metrics.get("tasks_by_status", {}).get("active", 0)
+            )
+            if watch and attempted_task_ids and queue_depth > 0:
+                attempted_task_ids.clear()
+                progress(
+                    {
+                        "type": "queue_retry_cycle_reset",
+                        "queue_depth": queue_depth,
+                    }
+                )
                 continue
 
             if review_check_enabled and review_check_interval_seconds is not None and review_watcher is not None:
@@ -274,6 +306,13 @@ class SupervisorService:
                     "type": "sleeping",
                     "idle_cycles": idle_cycles,
                     "seconds": idle_sleep_seconds,
+                    "queue_depth": queue_depth,
+                    "heartbeat_project_ids": list(heartbeat_project_ids or []),
+                    "next_heartbeat_seconds": self._next_heartbeat_due_seconds(
+                        heartbeat_project_ids or ([] if not heartbeat_all_projects else [p.id for p in self.store.list_projects()]),
+                        heartbeat_last_run,
+                        heartbeat_intervals,
+                    ),
                 }
             )
             self._sleep(idle_sleep_seconds)
@@ -302,6 +341,25 @@ class SupervisorService:
             slept_seconds=slept_seconds,
             exit_reason=exit_reason,
         )
+
+    def _next_heartbeat_due_seconds(
+        self,
+        project_ids: list[str],
+        last_run: dict[str, float],
+        intervals: dict[str, float],
+    ) -> float | None:
+        if not project_ids:
+            return None
+        now = self._monotonic()
+        due_values: list[float] = []
+        for project_id in project_ids:
+            if project_id not in last_run:
+                return 0.0
+            interval = float(intervals.get(project_id, 1800.0))
+            due_values.append(max(0.0, interval - (now - last_run[project_id])))
+        if not due_values:
+            return None
+        return min(due_values)
 
     def _due_heartbeat_projects(
         self,

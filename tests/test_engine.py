@@ -90,6 +90,21 @@ class ValidationTimeoutWorker(PromotionBlockedWorker):
         return result
 
 
+class AtomicityBlockedWorker(PromotionBlockedWorker):
+    def __init__(self, category: str) -> None:
+        super().__init__()
+        self.category = category
+
+    def work(self, task, run, workspace_root: Path) -> WorkResult:  # type: ignore[override]
+        result = super().work(task, run, workspace_root)
+        result.outcome = "blocked"
+        result.diagnostics = {
+            "failure_category": self.category,
+            "failure_message": "Atomicity gate rejected the attempt before validation.",
+        }
+        return result
+
+
 class InfrastructureBlockedWorker(PromotionBlockedWorker):
     def work(self, task, run, workspace_root: Path) -> WorkResult:  # type: ignore[override]
         result = super().work(task, run, workspace_root)
@@ -1206,6 +1221,36 @@ class HarnessEngineTests(unittest.TestCase):
         self.assertEqual("pending", children[0].status.value)
         self.assertIn("validation budget", children[0].objective)
         self.assertEqual("failed", self.store.get_task(task.id).status.value)
+
+    def test_atomicity_blocked_worker_creates_atomicity_split_follow_on(self) -> None:
+        engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-atomicity-follow-on",
+            worker=AtomicityBlockedWorker("atomicity_decomposition"),
+        )
+        task = engine.create_task_with_policy(
+            project_id=self.project_id,
+            title="Operator task",
+            objective="Keep this slice atomic.",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            validation_profile="generic",
+            validation_mode="lightweight_operator",
+            strategy="operator_ergonomics",
+            max_attempts=3,
+            required_artifacts=["plan", "report"],
+        )
+
+        run = engine.run_once(task.id)
+
+        children = self.store.list_child_tasks(task.id)
+        self.assertEqual("blocked", run.status.value)
+        self.assertEqual(1, len(children))
+        self.assertEqual("atomicity_split", children[0].strategy)
+        self.assertIn("narrower slice", children[0].objective)
 
     def test_review_promotion_dedupes_follow_on_for_same_run(self) -> None:
         engine = HarnessEngine(

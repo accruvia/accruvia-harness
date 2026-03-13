@@ -240,7 +240,17 @@ class HarnessQueryServiceTests(unittest.TestCase):
                     "proposed_task_count": 2,
                     "created_task_count": 1,
                     "skipped_task_count": 1,
+                    "next_heartbeat_seconds": 1800,
                 },
+            )
+        )
+        self.store.create_event(
+            Event(
+                id=new_id("event"),
+                entity_type="project",
+                entity_id=self.project.id,
+                event_type="heartbeat_scheduled",
+                payload={"interval_seconds": 1800, "source": "default"},
             )
         )
         self.telemetry.metric("run_started", 1)
@@ -256,9 +266,52 @@ class HarnessQueryServiceTests(unittest.TestCase):
             "Created a focused backlog slice",
             packet["strategy_history"]["recent_heartbeats"][0]["summary"],
         )
+        self.assertEqual(1800, packet["strategy_history"]["recent_heartbeats"][0]["next_heartbeat_seconds"])
         self.assertEqual(1.0, packet["telemetry_summary"]["metric_totals"]["run_started"])
         self.assertEqual(1, packet["telemetry_summary"]["span_counts"]["heartbeat_analysis"])
         self.assertEqual("llm_executor_failure", packet["telemetry_summary"]["recent_warnings"][0]["category"])
+        self.assertEqual("idle", packet["loop_status"]["status"])
+        self.assertEqual(1800, packet["loop_status"]["heartbeat_interval_seconds"])
+
+    def test_project_summary_reports_healthy_idle_after_recent_completion(self) -> None:
+        task = self.engine.create_task_with_policy(
+            project_id=self.project.id,
+            title="Healthy idle task",
+            objective="Complete and idle cleanly",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+        self.engine.run_until_stable(task.id)
+        self.store.create_event(
+            Event(
+                id=new_id("event"),
+                entity_type="project",
+                entity_id=self.project.id,
+                event_type="heartbeat_completed",
+                payload={"summary": "No new tasks are justified right now.", "next_heartbeat_seconds": 1800},
+            )
+        )
+        self.store.create_event(
+            Event(
+                id=new_id("event"),
+                entity_type="project",
+                entity_id=self.project.id,
+                event_type="heartbeat_scheduled",
+                payload={"interval_seconds": 1800, "source": "default"},
+            )
+        )
+
+        summary = self.query.project_summary(self.project.id)
+
+        self.assertTrue(summary["loop_status"]["healthy_idle"])
+        self.assertEqual("healthy_idle", summary["loop_status"]["status"])
+        self.assertEqual(task.id, summary["loop_status"]["last_completed_task_id"])
 
     def test_context_packet_includes_recent_operator_nudges(self) -> None:
         self.store.create_event(

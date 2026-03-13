@@ -129,6 +129,7 @@ class CognitionService:
                     "created_task_count": len(created_tasks),
                     "skipped_task_count": len(skipped_tasks),
                     "summary": str(analysis.get("summary") or ""),
+                    "next_heartbeat_seconds": analysis.get("next_heartbeat_seconds"),
                 },
             )
         )
@@ -193,6 +194,7 @@ class CognitionService:
             if isinstance(item.get("forbidden_paths"), list):
                 scope["forbidden_paths"] = [str(path) for path in item.get("forbidden_paths") if path]
             priority = self._parse_priority(item.get("priority", 100))
+            strategy = str(item.get("strategy") or "heartbeat")
             created_task = self.task_service.create_task_with_policy(
                 project_id=project.id,
                 title=title,
@@ -203,9 +205,13 @@ class CognitionService:
                 external_ref_type=None,
                 external_ref_id=None,
                 validation_profile=str(item.get("validation_profile") or "generic"),
-                validation_mode=(str(item.get("validation_mode")).strip() if item.get("validation_mode") else None),
+                validation_mode=(
+                    str(item.get("validation_mode")).strip()
+                    if item.get("validation_mode")
+                    else self._default_validation_mode(strategy)
+                ),
                 scope=scope,
-                strategy=str(item.get("strategy") or "heartbeat"),
+                strategy=strategy,
                 max_attempts=int(item.get("max_attempts", 3)),
                 max_branches=int(item.get("max_branches", 1)),
                 required_artifacts=list(item.get("required_artifacts") or ["plan", "report"]),
@@ -226,6 +232,12 @@ class CognitionService:
             )
             created.append(serialize_dataclass(created_task))
         return created, skipped
+
+    @staticmethod
+    def _default_validation_mode(strategy: str) -> str | None:
+        if strategy in {"operator_ergonomics", "operator_observability"}:
+            return "lightweight_operator"
+        return None
 
     @staticmethod
     def _parse_priority(value: object) -> int:

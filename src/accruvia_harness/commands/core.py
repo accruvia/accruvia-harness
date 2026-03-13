@@ -163,6 +163,13 @@ def _supervise_start_text(
     mode = "continuous" if watch else "one-shot"
     heartbeat_scope = "all projects" if heartbeat_all_projects else ", ".join(heartbeat_project_ids) if heartbeat_project_ids else "disabled"
     review_checks = "enabled" if review_check_enabled else "disabled"
+    startup_actions: list[str] = []
+    if heartbeat_project_ids or heartbeat_all_projects:
+        startup_actions.append("heartbeats")
+    startup_actions.append("backlog")
+    if review_check_enabled:
+        startup_actions.append("reviews")
+    startup_line = f"Starting {', '.join(startup_actions)} pass..."
     return "\n".join(
         [
             _timestamped("Supervisor started"),
@@ -171,7 +178,7 @@ def _supervise_start_text(
             _timestamped(f"- Worker: {worker_id}"),
             _timestamped(f"- Heartbeats: {heartbeat_scope}"),
             _timestamped(f"- Review checks: {review_checks}"),
-            _timestamped("Waiting for work..."),
+            _timestamped(startup_line),
         ]
     )
 
@@ -264,6 +271,10 @@ def _emit_supervise_progress(event: dict[str, object]) -> None:
         backlog_delta = _backlog_delta_text(event.get("backlog_before"), event.get("backlog_after"))
         if backlog_delta:
             print(_timestamped(f"  Backlog delta: {backlog_delta}"), flush=True)
+        interval_seconds = event.get("heartbeat_interval_seconds")
+        if interval_seconds is not None:
+            source = str(event.get("heartbeat_schedule_source") or "default")
+            print(_timestamped(f"  Next heartbeat in {interval_seconds}s ({source})"), flush=True)
         return
     if event_type == "heartbeat_failed":
         print(
@@ -298,7 +309,12 @@ def _emit_supervise_progress(event: dict[str, object]) -> None:
         )
         return
     if event_type == "sleeping":
-        print(_timestamped(f"Idle. Sleeping {event['seconds']}s (idle cycle {event['idle_cycles']})"), flush=True)
+        message = f"Idle. Sleeping {event['seconds']}s (idle cycle {event['idle_cycles']})"
+        next_heartbeat = event.get("next_heartbeat_seconds")
+        queue_depth = event.get("queue_depth")
+        if queue_depth == 0 and next_heartbeat is not None:
+            message += f" - healthy idle, next heartbeat due in {next_heartbeat:.0f}s"
+        print(_timestamped(message), flush=True)
         return
     if event_type == "stale_state_recovered":
         recovered = event.get("recovered") or {}
@@ -763,6 +779,7 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
             external_ref_type=args.external_ref_type,
             external_ref_id=args.external_ref_id,
             validation_profile=args.validation_profile,
+            validation_mode=args.validation_mode,
             scope=scope,
             strategy=args.strategy,
             max_attempts=args.max_attempts,

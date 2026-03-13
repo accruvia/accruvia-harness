@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from accruvia_harness.atomicity import atomicity_gate
 from accruvia_harness.agent_worker import _focused_test_command, run_agent_worker, select_worker_llm_command
 from accruvia_harness.adapters import build_adapter_registry
 from accruvia_harness.config import HarnessConfig
@@ -452,8 +453,14 @@ class WorkerTests(unittest.TestCase):
 
     def test_focused_test_command_uses_lightweight_suite_for_repair_mode(self) -> None:
         self.assertEqual(
-            ["python3", "-m", "unittest", "tests.test_workers"],
+            ["python3", "-m", "unittest", "-v", "tests.test_workers"],
             _focused_test_command("lightweight_repair"),
+        )
+
+    def test_focused_test_command_uses_lightweight_suite_for_operator_mode(self) -> None:
+        self.assertEqual(
+            ["python3", "-m", "unittest", "-v", "tests.test_cli", "tests.test_phase1"],
+            _focused_test_command("lightweight_operator"),
         )
 
     def test_focused_test_command_keeps_default_suite_for_default_mode(self) -> None:
@@ -462,6 +469,7 @@ class WorkerTests(unittest.TestCase):
                 "python3",
                 "-m",
                 "unittest",
+                "-v",
                 "tests.test_cli",
                 "tests.test_phase1",
                 "tests.test_supervisor",
@@ -469,6 +477,153 @@ class WorkerTests(unittest.TestCase):
             ],
             _focused_test_command("default_focused"),
         )
+
+    def test_run_agent_worker_fails_fast_when_validation_never_starts(self) -> None:
+        workspace = self.base / "workspace-startup-timeout"
+        workspace.mkdir(parents=True)
+        subprocess.run(["git", "init", "-b", "main"], cwd=workspace, check=True, capture_output=True, text=True)
+        cli_script = self.base / "fake_codex_startup_timeout.sh"
+        cli_script.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf 'worker summary\\n'\n"
+            "printf 'value = 1\\n' > changed_module.py\n",
+            encoding="utf-8",
+        )
+        cli_script.chmod(0o755)
+        run_dir = self.base / "run-startup-timeout"
+
+        with patch(
+            "accruvia_harness.agent_worker._focused_test_command",
+            return_value=["python3", "-c", "import time; time.sleep(2)"],
+        ):
+            result = run_agent_worker(
+                {
+                    "ACCRUVIA_RUN_DIR": str(run_dir),
+                    "ACCRUVIA_PROJECT_WORKSPACE": str(workspace),
+                    "ACCRUVIA_TASK_ID": self.task.id,
+                    "ACCRUVIA_RUN_ID": self.run.id,
+                    "ACCRUVIA_TASK_OBJECTIVE": self.task.objective,
+                    "ACCRUVIA_RUN_SUMMARY": self.run.summary,
+                    "ACCRUVIA_TASK_STRATEGY": "operator_ergonomics",
+                    "ACCRUVIA_TASK_VALIDATION_MODE": "lightweight_operator",
+                    "ACCRUVIA_WORKER_LLM_BACKEND": "codex",
+                    "ACCRUVIA_LLM_CODEX_COMMAND": str(cli_script),
+                    "ACCRUVIA_TASK_VALIDATION_STARTUP_TIMEOUT_SECONDS": "1",
+                    "ACCRUVIA_AGENT_TEST_TIMEOUT_SECONDS": "5",
+                }
+            )
+
+        report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
+        self.assertEqual(1, result)
+        self.assertEqual("validation_startup_timeout", report["failure_category"])
+        self.assertTrue(report["test_check"]["timed_out"])
+        self.assertEqual(1, report["test_check"]["startup_timeout_seconds"])
+        self.assertIn("startup ceiling", (run_dir / "test_output.txt").read_text(encoding="utf-8"))
+
+    def test_atomicity_gate_blocks_self_referential_operator_change_before_validation(self) -> None:
+        workspace = self.base / "workspace-self-ref"
+        target = workspace / "src" / "accruvia_harness"
+        target.mkdir(parents=True)
+        (target / "agent_worker.py").write_text("VALUE = 1\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-b", "main"], cwd=workspace, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
+            cwd=workspace,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        cli_script = self.base / "fake_codex_self_ref.sh"
+        cli_script.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf 'worker summary\\n'\n"
+            "printf 'VALUE = 2\\n' > src/accruvia_harness/agent_worker.py\n",
+            encoding="utf-8",
+        )
+        cli_script.chmod(0o755)
+        run_dir = self.base / "run-self-ref"
+
+        result = run_agent_worker(
+            {
+                "ACCRUVIA_RUN_DIR": str(run_dir),
+                "ACCRUVIA_PROJECT_WORKSPACE": str(workspace),
+                "ACCRUVIA_TASK_ID": self.task.id,
+                "ACCRUVIA_TASK_TITLE": "Operator validation self reference",
+                "ACCRUVIA_RUN_ID": self.run.id,
+                "ACCRUVIA_RUN_ATTEMPT": "1",
+                "ACCRUVIA_TASK_OBJECTIVE": self.task.objective,
+                "ACCRUVIA_RUN_SUMMARY": self.run.summary,
+                "ACCRUVIA_TASK_STRATEGY": "operator_ergonomics",
+                "ACCRUVIA_TASK_VALIDATION_MODE": "lightweight_operator",
+                "ACCRUVIA_WORKER_LLM_BACKEND": "codex",
+                "ACCRUVIA_LLM_CODEX_COMMAND": str(cli_script),
+            }
+        )
+
+        report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
+        self.assertEqual(1, result)
+        self.assertEqual("blocked", report["worker_outcome"])
+        self.assertEqual("policy_self_modification", report["failure_category"])
+        self.assertEqual("block_self_referential", report["atomicity_gate"]["action"])
+        self.assertTrue((run_dir / "atomicity_telemetry.json").exists())
+        self.assertFalse((run_dir / "test_output.txt").exists())
+
+    def test_atomicity_gate_narrows_default_validation_for_operator_surface(self) -> None:
+        workspace = self.base / "workspace-narrow"
+        src = workspace / "src" / "accruvia_harness" / "commands"
+        tests_dir = workspace / "tests"
+        src.mkdir(parents=True)
+        tests_dir.mkdir(parents=True)
+        (src / "core.py").write_text("VALUE = 1\n", encoding="utf-8")
+        (tests_dir / "test_cli.py").write_text(
+            "import unittest\n\nclass Smoke(unittest.TestCase):\n    def test_ok(self):\n        self.assertTrue(True)\n",
+            encoding="utf-8",
+        )
+        (tests_dir / "test_phase1.py").write_text(
+            "import unittest\n\nclass Smoke(unittest.TestCase):\n    def test_ok(self):\n        self.assertTrue(True)\n",
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "init", "-b", "main"], cwd=workspace, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
+            cwd=workspace,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        cli_script = self.base / "fake_codex_narrow.sh"
+        cli_script.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf 'worker summary\\n'\n"
+            "printf 'VALUE = 2\\n' > src/accruvia_harness/commands/core.py\n",
+            encoding="utf-8",
+        )
+        cli_script.chmod(0o755)
+        run_dir = self.base / "run-narrow"
+
+        result = run_agent_worker(
+            {
+                "ACCRUVIA_RUN_DIR": str(run_dir),
+                "ACCRUVIA_PROJECT_WORKSPACE": str(workspace),
+                "ACCRUVIA_TASK_ID": self.task.id,
+                "ACCRUVIA_TASK_TITLE": "Operator startup wording",
+                "ACCRUVIA_RUN_ID": self.run.id,
+                "ACCRUVIA_RUN_ATTEMPT": "2",
+                "ACCRUVIA_TASK_OBJECTIVE": "Adjust supervise startup wording for operators",
+                "ACCRUVIA_RUN_SUMMARY": "Previous validation timed out.",
+                "ACCRUVIA_TASK_STRATEGY": "operator_ergonomics",
+                "ACCRUVIA_TASK_VALIDATION_MODE": "default_focused",
+                "ACCRUVIA_WORKER_LLM_BACKEND": "codex",
+                "ACCRUVIA_LLM_CODEX_COMMAND": str(cli_script),
+            }
+        )
+
+        report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
+        self.assertEqual(0, result)
+        self.assertEqual("validate_narrow", report["atomicity_gate"]["action"])
+        self.assertEqual("lightweight_operator", report["test_check"]["selection"])
 
     def test_build_worker_from_config_defaults_agent_worker_command(self) -> None:
         config = HarnessConfig(

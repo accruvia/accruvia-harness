@@ -156,7 +156,9 @@ class CommandWorker:
         project_workspace = _prepared_project_workspace(run_dir).resolve()
         env = {
             "ACCRUVIA_TASK_ID": task.id,
+            "ACCRUVIA_TASK_TITLE": task.title,
             "ACCRUVIA_RUN_ID": run.id,
+            "ACCRUVIA_RUN_ATTEMPT": str(run.attempt),
             "ACCRUVIA_TASK_OBJECTIVE": task.objective,
             "ACCRUVIA_RUN_SUMMARY": run.summary,
             "ACCRUVIA_RUN_DIR": str(run_dir),
@@ -368,6 +370,12 @@ class CommandWorker:
         plan_path = run_dir / "plan.txt"
         if plan_path.exists():
             plan_artifact.append(("plan", str(plan_path), "Structured plan artifact"))
+        atomicity_artifact = []
+        atomicity_path = run_dir / "atomicity_telemetry.json"
+        if atomicity_path.exists():
+            atomicity_artifact.append(
+                ("atomicity_telemetry", str(atomicity_path), "Atomicity telemetry and gate decision")
+            )
         summary = f"Executed {self.backend_name} worker command and captured output."
         failure_category = str(payload.get("failure_category") or "").strip()
         if failure_category:
@@ -376,6 +384,7 @@ class CommandWorker:
             summary=summary,
             artifacts=[
                 *plan_artifact,
+                *atomicity_artifact,
                 ("worker_stdout", str(stdout_path), "Captured shell worker stdout"),
                 ("worker_stderr", str(stderr_path), "Captured shell worker stderr"),
                 ("report", str(report_path), "Structured run report"),
@@ -657,6 +666,9 @@ def build_worker_from_config(config: HarnessConfig, telemetry=None) -> WorkerBac
                     "ACCRUVIA_TASK_RUN_TIMEOUT_SECONDS": str(config.task_run_timeout_seconds),
                     "ACCRUVIA_TASK_LLM_TIMEOUT_SECONDS": str(config.task_llm_timeout_seconds),
                     "ACCRUVIA_TASK_VALIDATION_TIMEOUT_SECONDS": str(config.task_validation_timeout_seconds),
+                    "ACCRUVIA_TASK_VALIDATION_STARTUP_TIMEOUT_SECONDS": str(
+                        config.task_validation_startup_timeout_seconds
+                    ),
                     "ACCRUVIA_TASK_COMPILE_TIMEOUT_SECONDS": str(config.task_compile_timeout_seconds),
                     "ACCRUVIA_TASK_GIT_TIMEOUT_SECONDS": str(config.task_git_timeout_seconds),
                 }.items()

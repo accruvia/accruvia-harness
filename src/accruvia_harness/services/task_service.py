@@ -7,18 +7,6 @@ from ..store import SQLiteHarnessStore
 from .common import task_created_payload
 
 
-LIGHTWEIGHT_REPAIR_STRATEGIES = frozenset({"executor_repair", "timeout_decomposition", "bounded_unblocker", "deterministic_reliability"})
-
-
-def resolve_validation_mode(validation_mode: str | None, strategy: str) -> str:
-    candidate = str(validation_mode or "").strip()
-    if candidate:
-        return candidate
-    if strategy in LIGHTWEIGHT_REPAIR_STRATEGIES:
-        return "lightweight_repair"
-    return "default_focused"
-
-
 class TaskService:
     def __init__(self, store: SQLiteHarnessStore) -> None:
         self.store = store
@@ -131,7 +119,7 @@ class TaskService:
                 external_ref_id=external_ref_id,
                 external_ref_metadata=external_ref_metadata or {},
                 validation_profile=validation_profile,
-                validation_mode=resolve_validation_mode(validation_mode, strategy),
+                validation_mode=str(validation_mode or "").strip() or "default_focused",
                 scope=scope or {},
                 strategy=strategy,
                 max_attempts=max_attempts,

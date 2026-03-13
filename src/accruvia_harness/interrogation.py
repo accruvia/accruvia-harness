@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -72,6 +73,7 @@ class HarnessQueryService:
             "recent_promotions": [
                 serialize_dataclass(promotion) for task in tasks for promotion in self.store.list_promotions(task.id)
             ][-10:],
+            "loop_status": self._loop_status(project_id),
         }
 
     def task_report(self, task_id: str) -> dict[str, object]:
@@ -150,6 +152,7 @@ class HarnessQueryService:
             "project_id": project_id,
             "metrics": metrics,
             "focus_tasks": focus_tasks,
+            "loop_status": self._loop_status(project_id),
             "leases": [
                 asdict(lease)
                 | {"lease_expires_at": lease.lease_expires_at.isoformat(), "created_at": lease.created_at.isoformat()}
@@ -202,6 +205,7 @@ class HarnessQueryService:
                     "proposed_task_count": int(payload.get("proposed_task_count", 0) or 0),
                     "created_task_count": created,
                     "skipped_task_count": skipped,
+                    "next_heartbeat_seconds": payload.get("next_heartbeat_seconds"),
                 }
             )
         return {
@@ -249,6 +253,7 @@ class HarnessQueryService:
             "project_id": project_id,
             "metrics": metrics,
             "pending_affirmations": pending_affirmations,
+            "loop_status": self._loop_status(project_id),
         }
 
     def dashboard_report(self, project_id: str | None = None) -> dict[str, object]:
@@ -275,7 +280,77 @@ class HarnessQueryService:
                 "llm_cost_usd": telemetry.get("cost_totals", {}).get("cost_usd", 0.0),
                 "llm_total_tokens": telemetry.get("cost_totals", {}).get("total_tokens", 0.0),
                 "slowest_operations_ms": telemetry.get("dashboard", {}).get("slowest_operations_ms", []),
+                "healthy_idle": operations["loop_status"]["healthy_idle"],
             },
+        }
+
+    def _loop_status(self, project_id: str | None) -> dict[str, object]:
+        metrics = self.store.metrics_snapshot(project_id)
+        tasks = self.store.list_tasks(project_id)
+        runs = [run for task in tasks for run in self.store.list_runs(task.id)]
+        now = datetime.now(UTC)
+        queue_depth = int(metrics.get("tasks_by_status", {}).get("pending", 0)) + int(
+            metrics.get("tasks_by_status", {}).get("active", 0)
+        )
+        active_leases = int(metrics.get("active_leases", 0) or 0)
+        latest_completed_task = max(
+            (task for task in tasks if task.status == TaskStatus.COMPLETED),
+            key=lambda item: item.updated_at,
+            default=None,
+        )
+        latest_failure_run = max(
+            (run for run in runs if run.status in {RunStatus.BLOCKED, RunStatus.FAILED}),
+            key=lambda item: item.updated_at,
+            default=None,
+        )
+        latest_project_events = self.store.list_events("project", project_id) if project_id is not None else []
+        latest_heartbeat = next(
+            (event for event in reversed(latest_project_events) if event.event_type == "heartbeat_completed"),
+            None,
+        )
+        latest_schedule = next(
+            (event for event in reversed(latest_project_events) if event.event_type == "heartbeat_scheduled"),
+            None,
+        )
+        heartbeat_interval_seconds = None
+        next_heartbeat_due_at = None
+        next_heartbeat_due_in_seconds = None
+        heartbeat_schedule_source = None
+        if latest_schedule is not None:
+            heartbeat_interval_seconds = int((latest_schedule.payload or {}).get("interval_seconds", 0) or 0) or None
+            heartbeat_schedule_source = str((latest_schedule.payload or {}).get("source") or "")
+            if heartbeat_interval_seconds is not None:
+                next_due = latest_schedule.created_at + timedelta(seconds=heartbeat_interval_seconds)
+                next_heartbeat_due_at = next_due.isoformat()
+                next_heartbeat_due_in_seconds = max(0.0, (next_due - now).total_seconds())
+        healthy_idle = (
+            queue_depth == 0
+            and active_leases == 0
+            and latest_completed_task is not None
+            and (
+                latest_failure_run is None
+                or latest_failure_run.updated_at <= latest_completed_task.updated_at
+            )
+        )
+        status = "active" if queue_depth > 0 or active_leases > 0 else "idle"
+        if healthy_idle:
+            status = "healthy_idle"
+        return {
+            "status": status,
+            "healthy_idle": healthy_idle,
+            "queue_depth": queue_depth,
+            "active_leases": active_leases,
+            "last_completed_task_id": latest_completed_task.id if latest_completed_task else None,
+            "last_completed_task_title": latest_completed_task.title if latest_completed_task else None,
+            "last_completed_at": latest_completed_task.updated_at.isoformat() if latest_completed_task else None,
+            "last_failed_or_blocked_run_id": latest_failure_run.id if latest_failure_run else None,
+            "last_failed_or_blocked_at": latest_failure_run.updated_at.isoformat() if latest_failure_run else None,
+            "last_heartbeat_at": latest_heartbeat.created_at.isoformat() if latest_heartbeat else None,
+            "last_heartbeat_summary": str((latest_heartbeat.payload or {}).get("summary") or "") if latest_heartbeat else "",
+            "heartbeat_interval_seconds": heartbeat_interval_seconds,
+            "heartbeat_schedule_source": heartbeat_schedule_source,
+            "next_heartbeat_due_at": next_heartbeat_due_at,
+            "next_heartbeat_due_in_seconds": next_heartbeat_due_in_seconds,
         }
 
 

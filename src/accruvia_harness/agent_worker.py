@@ -4,25 +4,39 @@ import json
 import os
 import signal
 import subprocess
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
+from .atomicity import atomicity_gate, changed_files, write_atomicity_telemetry
 from .llm import _coerce_subprocess_output, command_uses_file_contract, run_command_process
 
 
-DEFAULT_AGENT_TEST_TIMEOUT_SECONDS = 300
+DEFAULT_AGENT_TEST_TIMEOUT_SECONDS = 120
+DEFAULT_AGENT_TEST_STARTUP_TIMEOUT_SECONDS = 30
 DEFAULT_AGENT_LLM_TIMEOUT_SECONDS = 420
 DEFAULT_AGENT_COMPILE_TIMEOUT_SECONDS = 120
 DEFAULT_AGENT_GIT_TIMEOUT_SECONDS = 30
 
 
+@dataclass(frozen=True, slots=True)
+class ValidationPolicy:
+    command: list[str]
+    startup_timeout_seconds: int
+    execution_timeout_seconds: int
+
+
 def _focused_test_command(validation_mode: str) -> list[str]:
     if validation_mode == "lightweight_repair":
-        return ["python3", "-m", "unittest", "tests.test_workers"]
+        return ["python3", "-m", "unittest", "-v", "tests.test_workers"]
+    if validation_mode == "lightweight_operator":
+        return ["python3", "-m", "unittest", "-v", "tests.test_cli", "tests.test_phase1"]
     return [
         "python3",
         "-m",
         "unittest",
+        "-v",
         "tests.test_cli",
         "tests.test_phase1",
         "tests.test_supervisor",
@@ -43,6 +57,43 @@ def _agent_test_timeout_seconds(environ: Mapping[str, str]) -> int:
     except ValueError:
         return DEFAULT_AGENT_TEST_TIMEOUT_SECONDS
     return parsed if parsed > 0 else DEFAULT_AGENT_TEST_TIMEOUT_SECONDS
+
+
+def _agent_test_startup_timeout_seconds(environ: Mapping[str, str]) -> int:
+    raw_value = str(
+        environ.get("ACCRUVIA_AGENT_TEST_STARTUP_TIMEOUT_SECONDS")
+        or environ.get("ACCRUVIA_TASK_VALIDATION_STARTUP_TIMEOUT_SECONDS")
+        or ""
+    ).strip()
+    if not raw_value:
+        return DEFAULT_AGENT_TEST_STARTUP_TIMEOUT_SECONDS
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        return DEFAULT_AGENT_TEST_STARTUP_TIMEOUT_SECONDS
+    return parsed if parsed > 0 else DEFAULT_AGENT_TEST_STARTUP_TIMEOUT_SECONDS
+
+
+def _validation_policy(validation_mode: str, environ: Mapping[str, str]) -> ValidationPolicy:
+    execution_timeout_seconds = _agent_test_timeout_seconds(environ)
+    startup_timeout_seconds = _agent_test_startup_timeout_seconds(environ)
+    if validation_mode == "lightweight_repair":
+        return ValidationPolicy(
+            command=_focused_test_command(validation_mode),
+            startup_timeout_seconds=min(startup_timeout_seconds, 20),
+            execution_timeout_seconds=min(execution_timeout_seconds, 45),
+        )
+    if validation_mode == "lightweight_operator":
+        return ValidationPolicy(
+            command=_focused_test_command(validation_mode),
+            startup_timeout_seconds=min(startup_timeout_seconds, 20),
+            execution_timeout_seconds=min(execution_timeout_seconds, 60),
+        )
+    return ValidationPolicy(
+        command=_focused_test_command(validation_mode),
+        startup_timeout_seconds=startup_timeout_seconds,
+        execution_timeout_seconds=execution_timeout_seconds,
+    )
 
 
 def _env_timeout_seconds(environ: Mapping[str, str], key: str, default: int) -> int:
@@ -91,6 +142,72 @@ def _run_bounded_process(
     return subprocess.CompletedProcess(args=args, returncode=process.returncode, stdout=stdout, stderr=stderr)
 
 
+def _terminate_process_group(process: subprocess.Popen[str]) -> tuple[str, str]:
+    os.killpg(process.pid, signal.SIGKILL)
+    try:
+        return process.communicate(timeout=1)
+    except subprocess.TimeoutExpired:
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
+        process.kill()
+        process.wait(timeout=1)
+        return "", ""
+
+
+def _run_validation_process(
+    args: list[str],
+    *,
+    cwd: Path,
+    startup_timeout_seconds: int,
+    execution_timeout_seconds: int,
+) -> tuple[subprocess.CompletedProcess[str], str | None]:
+    process = subprocess.Popen(
+        args,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    started_at = time.monotonic()
+    saw_output = False
+    last_stdout = ""
+    last_stderr = ""
+    while True:
+        try:
+            stdout, stderr = process.communicate(timeout=1)
+            return subprocess.CompletedProcess(args=args, returncode=process.returncode, stdout=stdout, stderr=stderr), None
+        except subprocess.TimeoutExpired as exc:
+            last_stdout = _coerce_subprocess_output(exc.stdout)
+            last_stderr = _coerce_subprocess_output(exc.stderr)
+            saw_output = saw_output or bool(last_stdout.strip() or last_stderr.strip())
+            elapsed = time.monotonic() - started_at
+            if not saw_output and elapsed >= startup_timeout_seconds:
+                stdout, stderr = _terminate_process_group(process)
+                return (
+                    subprocess.CompletedProcess(
+                        args=args,
+                        returncode=124,
+                        stdout=stdout or last_stdout,
+                        stderr=stderr or last_stderr,
+                    ),
+                    "validation_startup_timeout",
+                )
+            if elapsed >= execution_timeout_seconds:
+                stdout, stderr = _terminate_process_group(process)
+                return (
+                    subprocess.CompletedProcess(
+                        args=args,
+                        returncode=124,
+                        stdout=stdout or last_stdout,
+                        stderr=stderr or last_stderr,
+                    ),
+                    "validation_timeout",
+                )
+
+
 def select_worker_llm_command(environ: Mapping[str, str]) -> tuple[str, str]:
     preferred = str(environ.get("ACCRUVIA_WORKER_LLM_BACKEND", "")).strip().lower()
     commands = {
@@ -133,9 +250,9 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
     stderr_path = run_dir / "codex_worker.stderr.txt"
     compile_output_path = run_dir / "compile_output.txt"
     test_output_path = run_dir / "test_output.txt"
+    atomicity_path = run_dir / "atomicity_telemetry.json"
     prompt_path = run_dir / "codex_worker_prompt.txt"
     metadata_path = run_dir / "codex_worker.metadata.json"
-    test_timeout_seconds = _agent_test_timeout_seconds(env)
     llm_timeout_seconds = _env_timeout_seconds(env, "ACCRUVIA_TASK_LLM_TIMEOUT_SECONDS", DEFAULT_AGENT_LLM_TIMEOUT_SECONDS)
     compile_timeout_seconds = _env_timeout_seconds(
         env,
@@ -236,18 +353,59 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
     compile_failure_message = ""
     git_failure_message = ""
     try:
-        python_files = _run_bounded_process(
-            ["git", "-C", str(workspace), "diff", "--name-only", "--", "*.py"],
-            cwd=workspace,
-            timeout_seconds=git_timeout_seconds,
-        ).stdout.strip()
-    except subprocess.TimeoutExpired as exc:
+        all_changed = changed_files(workspace)
+        python_files = "\n".join(path for path in all_changed if path.endswith(".py"))
+    except Exception as exc:
         git_timed_out = True
+        all_changed = []
         python_files = ""
-        git_failure_message = (
-            f"Git metadata scan for changed Python files exceeded {git_timeout_seconds} seconds and was terminated."
+        git_failure_message = f"Git metadata scan failed before validation: {exc}"
+        compile_output_path.write_text(git_failure_message + "\n", encoding="utf-8")
+    prior_timeout_count = 1 if "timeout" in summary.lower() else 0
+    gate_result = atomicity_gate(
+        workspace=workspace,
+        title=env.get("ACCRUVIA_TASK_TITLE", task_id),
+        objective=objective,
+        strategy=strategy,
+        validation_mode=validation_mode,
+        attempt=int(env.get("ACCRUVIA_RUN_ATTEMPT", "1") or "1"),
+        prior_timeout_count=prior_timeout_count,
+    )
+    write_atomicity_telemetry(atomicity_path, gate_result)
+    if gate_result.action in {"decompose_first", "block_self_referential"}:
+        failure_category = "policy_self_modification" if gate_result.action == "block_self_referential" else "atomicity_decomposition"
+        worker_outcome = "blocked"
+        report_path.write_text(
+            json.dumps(
+                {
+                    "task_id": task_id,
+                    "run_id": run_id,
+                    "objective": objective,
+                    "strategy": strategy,
+                    "worker_backend": "agent",
+                    "llm_backend": llm_backend,
+                    "validation_profile": validation_profile,
+                    "validation_mode": validation_mode,
+                    "worker_outcome": worker_outcome,
+                    "blocked": True,
+                    "failure_category": failure_category,
+                    "failure_message": gate_result.rationale,
+                    "changed_files": all_changed,
+                    "test_files": [path for path in all_changed if path.startswith("tests/")],
+                    "atomicity_gate": {
+                        "score": gate_result.score,
+                        "flags": gate_result.flags,
+                        "action": gate_result.action,
+                        "rationale": gate_result.rationale,
+                    },
+                    "atomicity_telemetry_path": str(atomicity_path),
+                },
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
         )
-        compile_output_path.write_text(_coerce_subprocess_output(exc.stderr), encoding="utf-8")
+        return 1
     if python_files:
         try:
             compile_completed = _run_bounded_process(
@@ -277,63 +435,32 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
             compile_output_path.write_text("No Python files changed.\n", encoding="utf-8")
         compile_rc = 0
 
-    test_command = _focused_test_command(validation_mode)
-    test_timed_out = False
-    try:
-        test_completed = subprocess.run(
-            test_command,
-            cwd=workspace,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=test_timeout_seconds,
-        )
-        test_output_path.write_text((test_completed.stdout or "") + (test_completed.stderr or ""), encoding="utf-8")
-    except subprocess.TimeoutExpired as exc:
-        test_timed_out = True
-        test_completed = subprocess.CompletedProcess(
-            args=test_command,
-            returncode=124,
-            stdout=_coerce_subprocess_output(exc.stdout),
-            stderr=_coerce_subprocess_output(exc.stderr),
-        )
+    validation_policy = _validation_policy(gate_result.effective_validation_mode, env)
+    test_command = validation_policy.command
+    test_timeout_seconds = validation_policy.execution_timeout_seconds
+    test_startup_timeout_seconds = validation_policy.startup_timeout_seconds
+    test_timeout_category = None
+    test_completed, test_timeout_category = _run_validation_process(
+        test_command,
+        cwd=workspace,
+        startup_timeout_seconds=test_startup_timeout_seconds,
+        execution_timeout_seconds=test_timeout_seconds,
+    )
+    test_timed_out = test_timeout_category is not None
+    timeout_summary = ""
+    if test_timeout_category == "validation_startup_timeout":
         timeout_summary = (
-            f"Focused unit-test validation hit the {test_timeout_seconds}s ceiling and was terminated.\n"
+            f"Focused unit-test validation produced no output within the {test_startup_timeout_seconds}s startup ceiling and was terminated.\n"
         )
-        test_output_path.write_text(
-            timeout_summary + (test_completed.stdout or "") + (test_completed.stderr or ""),
-            encoding="utf-8",
+    elif test_timeout_category == "validation_timeout":
+        timeout_summary = (
+            f"Focused unit-test validation hit the {test_timeout_seconds}s execution ceiling and was terminated.\n"
         )
+    test_output_path.write_text(
+        timeout_summary + (test_completed.stdout or "") + (test_completed.stderr or ""),
+        encoding="utf-8",
+    )
 
-    try:
-        changed_stdout = _run_bounded_process(
-            ["git", "-C", str(workspace), "diff", "--name-only"],
-            cwd=workspace,
-            timeout_seconds=git_timeout_seconds,
-        ).stdout
-    except subprocess.TimeoutExpired:
-        git_timed_out = True
-        changed_stdout = ""
-        if not git_failure_message:
-            git_failure_message = (
-                f"Git metadata scan exceeded {git_timeout_seconds} seconds and was terminated."
-            )
-    changed_files = [line.strip() for line in changed_stdout.splitlines() if line.strip()]
-    try:
-        untracked_stdout = _run_bounded_process(
-            ["git", "-C", str(workspace), "ls-files", "--others", "--exclude-standard"],
-            cwd=workspace,
-            timeout_seconds=git_timeout_seconds,
-        ).stdout
-    except subprocess.TimeoutExpired:
-        git_timed_out = True
-        untracked_stdout = ""
-        if not git_failure_message:
-            git_failure_message = (
-                f"Git metadata scan exceeded {git_timeout_seconds} seconds and was terminated."
-            )
-    untracked_files = [line.strip() for line in untracked_stdout.splitlines() if line.strip()]
-    all_changed = sorted(dict.fromkeys(changed_files + untracked_files))
     test_files = [
         path for path in all_changed if "/test" in path or path.startswith("tests/") or path.endswith("_test.py") or path.endswith(".test.js")
     ]
@@ -371,14 +498,31 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
             "framework": "unittest",
             "command": test_command,
             "output_path": str(test_output_path),
-            "selection": validation_mode,
+            "selection": gate_result.effective_validation_mode,
             "timeout_seconds": test_timeout_seconds,
+            "startup_timeout_seconds": test_startup_timeout_seconds,
             "timed_out": test_timed_out,
         },
         "summary": summary_text,
         "command": llm_command,
+        "atomicity_gate": {
+            "score": gate_result.score,
+            "flags": gate_result.flags,
+            "action": gate_result.action,
+            "rationale": gate_result.rationale,
+        },
+        "atomicity_telemetry_path": str(atomicity_path),
     }
-    if test_timed_out:
+    if test_timeout_category == "validation_startup_timeout":
+        payload.update(
+            {
+                "failure_category": "validation_startup_timeout",
+                "failure_message": (
+                    f"Focused unit-test validation produced no output within {test_startup_timeout_seconds} seconds and was terminated."
+                ),
+            }
+        )
+    elif test_timed_out:
         payload.update(
             {
                 "failure_category": "validation_timeout",

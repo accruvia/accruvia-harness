@@ -55,6 +55,7 @@ Build a harness that can:
    - durable long-running workflow execution
    - timers, retries, backoff, lease management
    - queue selection and parallel coordination
+   - evolve toward `Split-Phase Execution` so candidate generation, deterministic validation, and decisioning can be scheduled independently
 
 3. Worker runtime
    - adapters for code-generation workers
@@ -128,6 +129,10 @@ Exit criteria:
 - workflows survive process restarts
 - retries and timing behavior are engine-controlled
 - control flow is no longer tied to one synchronous CLI process
+- deterministic validation no longer monopolizes editing throughput
+
+Reference:
+- `specs/split-phase-execution.md`
 
 ### Phase 3: Real Worker Abstractions
 

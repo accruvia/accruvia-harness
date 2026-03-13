@@ -44,6 +44,7 @@ class Phase1Tests(unittest.TestCase):
         self.assertEqual(1200, config.task_run_timeout_seconds)
         self.assertEqual(420, config.task_llm_timeout_seconds)
         self.assertEqual(300, config.task_validation_timeout_seconds)
+        self.assertEqual(30, config.task_validation_startup_timeout_seconds)
         self.assertEqual(120, config.task_compile_timeout_seconds)
         self.assertEqual(30, config.task_git_timeout_seconds)
         self.assertEqual(300, config.task_stale_timeout_seconds)
@@ -134,6 +135,10 @@ class Phase1Tests(unittest.TestCase):
         )
         self.assertEqual(config.task_run_timeout_seconds, restored.task_run_timeout_seconds)
         self.assertEqual(config.task_llm_timeout_seconds, restored.task_llm_timeout_seconds)
+        self.assertEqual(
+            config.task_validation_startup_timeout_seconds,
+            restored.task_validation_startup_timeout_seconds,
+        )
         self.assertEqual(config.pr_check_enabled, restored.pr_check_enabled)
         self.assertEqual(config.pr_check_interval_seconds, restored.pr_check_interval_seconds)
 

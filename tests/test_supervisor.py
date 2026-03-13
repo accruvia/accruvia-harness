@@ -127,6 +127,50 @@ class _FakeReviewWatcher:
         )
 
 
+class _RetryingQueue:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str | None, str, int, tuple[str, ...]]] = []
+        self.attempts = 0
+
+    def process_next_task(
+        self,
+        project_id=None,
+        worker_id="supervisor",
+        lease_seconds=300,
+        exclude_task_ids=None,
+        progress_callback=None,
+    ):
+        excluded = tuple(sorted(exclude_task_ids or set()))
+        self.calls.append((project_id, worker_id, lease_seconds, excluded))
+        if "task-retry" in excluded:
+            return None
+        self.attempts += 1
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "type": "task_started",
+                    "task_id": "task-retry",
+                    "task_title": "task-retry",
+                    "project_id": project_id or "project",
+                }
+            )
+            progress_callback(
+                {
+                    "type": "task_finished",
+                    "task_id": "task-retry",
+                    "task_title": "task-retry",
+                    "project_id": project_id or "project",
+                    "status": "pending",
+                    "run_id": f"run-for-task-retry-{self.attempts}",
+                    "run_status": "failed",
+                    "summary": "retry pending",
+                    "backlog_before": {"tasks_by_status": {"pending": 1}, "pending_promotions": 0},
+                    "backlog_after": {"tasks_by_status": {"pending": 1}, "pending_promotions": 0},
+                }
+            )
+        return {"task": _FakeTask("task-retry"), "runs": []}
+
+
 class _FakeClock:
     def __init__(self) -> None:
         self.now = 0.0
@@ -248,6 +292,63 @@ class SupervisorServiceTests(unittest.TestCase):
         self.assertEqual(["project-a"], cognition.calls)
         self.assertEqual(1, result.heartbeat_count)
         self.assertEqual([10.0, 10.0, 10.0], clock.sleeps)
+
+    def test_supervisor_progress_reports_effective_heartbeat_interval_and_healthy_idle(self) -> None:
+        clock = _FakeClock()
+        events: list[dict[str, object]] = []
+        cognition = _FakeCognition(next_heartbeat_seconds=45)
+        service = SupervisorService(
+            _FakeStore(["project-a"]),
+            _FakeQueue([]),
+            cognition,
+            sleeper=clock.sleep,
+            monotonic=clock.monotonic,
+        )
+
+        service.run(
+            project_id="project-a",
+            watch=True,
+            idle_sleep_seconds=10.0,
+            max_idle_cycles=2,
+            max_iterations=3,
+            heartbeat_all_projects=True,
+            heartbeat_interval_seconds=10.0,
+            progress_callback=events.append,
+        )
+
+        heartbeat = next(event for event in events if event["type"] == "heartbeat_succeeded")
+        sleeping = next(event for event in events if event["type"] == "sleeping")
+        self.assertEqual(45.0, heartbeat["heartbeat_interval_seconds"])
+        self.assertEqual("brain_recommended", heartbeat["heartbeat_schedule_source"])
+        self.assertEqual(0, sleeping["queue_depth"])
+        self.assertAlmostEqual(45.0, sleeping["next_heartbeat_seconds"])
+
+    def test_supervisor_resets_retry_exclusion_when_pending_work_remains(self) -> None:
+        clock = _FakeClock()
+        queue = _RetryingQueue()
+        events: list[dict[str, object]] = []
+        service = SupervisorService(
+            _FakeStore(),
+            queue,
+            _FakeCognition(),
+            sleeper=clock.sleep,
+            monotonic=clock.monotonic,
+        )
+
+        result = service.run(
+            project_id="project-a",
+            watch=True,
+            idle_sleep_seconds=10.0,
+            max_idle_cycles=1,
+            max_iterations=4,
+            progress_callback=events.append,
+        )
+
+        self.assertEqual(2, result.processed_count)
+        self.assertIn((), [call[3] for call in queue.calls])
+        self.assertIn(("task-retry",), [call[3] for call in queue.calls])
+        reset = next(event for event in events if event["type"] == "queue_retry_cycle_reset")
+        self.assertEqual(1, reset["queue_depth"])
 
     def test_supervisor_survives_heartbeat_failure_and_records_event(self) -> None:
         class FailingCognition:
