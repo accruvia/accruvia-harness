@@ -1,4 +1,4 @@
-"""Chaos monkey runner -- orchestrates injectors and feeds findings back."""
+"""Chaos runner for control-plane invariants and bounded recovery behavior."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from accruvia_harness.chaos.domain import ChaosProbe, ChaosRound, Severity
-from accruvia_harness.chaos.injectors import ALL_INJECTORS, ChaosInjector
+from accruvia_harness.chaos.injectors import ALL_INJECTORS, DEFAULT_INJECTOR_NAMES, ChaosInjector
 from accruvia_harness.chaos.sandbox import ChaosSandbox, chaos_sandbox
 from accruvia_harness.config import HarnessConfig
 from accruvia_harness.domain import Event, new_id
@@ -19,7 +19,12 @@ logger = logging.getLogger(__name__)
 
 
 class ChaosRunner:
-    """Runs chaos injectors in an isolated sandbox, feeds results to heartbeat."""
+    """Runs focused chaos injectors in an isolated sandbox.
+
+    Default scope is recovery truth and control-plane invariants. Broader
+    synthetic scenario injectors remain available, but should be selected
+    explicitly rather than run by default.
+    """
 
     def __init__(
         self,
@@ -30,7 +35,9 @@ class ChaosRunner:
         feed_to_project_id: str = "",
     ):
         self.config = config
-        self.injectors = injectors or list(ALL_INJECTORS)
+        self.injectors = injectors or [
+            injector for injector in ALL_INJECTORS if injector.name in DEFAULT_INJECTOR_NAMES
+        ]
         self.memory_limit_mb = memory_limit_mb
         self.cpu_limit_seconds = cpu_limit_seconds
         self.feed_to_project_id = feed_to_project_id

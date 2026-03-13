@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -164,81 +165,97 @@ def _supervise_start_text(
     review_checks = "enabled" if review_check_enabled else "disabled"
     return "\n".join(
         [
-            "Supervisor started",
-            f"- Scope: {scope}",
-            f"- Mode: {mode}",
-            f"- Worker: {worker_id}",
-            f"- Heartbeats: {heartbeat_scope}",
-            f"- Review checks: {review_checks}",
-            "Waiting for work...",
+            _timestamped("Supervisor started"),
+            _timestamped(f"- Scope: {scope}"),
+            _timestamped(f"- Mode: {mode}"),
+            _timestamped(f"- Worker: {worker_id}"),
+            _timestamped(f"- Heartbeats: {heartbeat_scope}"),
+            _timestamped(f"- Review checks: {review_checks}"),
+            _timestamped("Waiting for work..."),
         ]
     )
+
+
+def _timestamped(text: str) -> str:
+    return f"{datetime.now().astimezone().strftime('%H:%M:%S')} {text}"
 
 
 def _emit_supervise_progress(event: dict[str, object]) -> None:
     event_type = str(event.get("type"))
     if event_type == "task_started":
-        print(f"Started task {event['task_title']} ({event['task_id']})", flush=True)
+        print(_timestamped(f"Started task {event['task_title']} ({event['task_id']})"), flush=True)
         return
     if event_type == "task_finished":
         print(
-            f"Task {event['task_title']} is now {event['status']} ({event['task_id']})",
+            _timestamped(f"Task {event['task_title']} is now {event['status']} ({event['task_id']})"),
             flush=True,
         )
         summary = str(event.get("summary") or "").strip()
         if summary:
-            print(f"  Summary: {summary}", flush=True)
+            print(_timestamped(f"  Summary: {summary}"), flush=True)
         backlog_delta = _backlog_delta_text(event.get("backlog_before"), event.get("backlog_after"))
         if backlog_delta:
-            print(f"  Backlog delta: {backlog_delta}", flush=True)
+            print(_timestamped(f"  Backlog delta: {backlog_delta}"), flush=True)
         return
     if event_type == "task_processed":
-        print(f"Processed task {event['task_title']} ({event['processed_count']} total)", flush=True)
+        print(_timestamped(f"Processed task {event['task_title']} ({event['processed_count']} total)"), flush=True)
         return
     if event_type == "heartbeat_succeeded":
         print(
-            f"Heartbeat succeeded for {event['project_id']} ({event['heartbeat_count']} total, created {event['created_task_count']} tasks)",
+            _timestamped(
+                f"Heartbeat succeeded for {event['project_id']} ({event['heartbeat_count']} total, created {event['created_task_count']} tasks)"
+            ),
             flush=True,
         )
         summary = str(event.get("summary") or "").strip()
         if summary:
-            print(f"  Summary: {summary}", flush=True)
+            print(_timestamped(f"  Summary: {summary}"), flush=True)
         backlog_delta = _backlog_delta_text(event.get("backlog_before"), event.get("backlog_after"))
         if backlog_delta:
-            print(f"  Backlog delta: {backlog_delta}", flush=True)
+            print(_timestamped(f"  Backlog delta: {backlog_delta}"), flush=True)
         return
     if event_type == "heartbeat_failed":
         print(
-            f"Heartbeat failed for {event['project_id']} (attempt {event['consecutive_failures']}): {event['message']}",
+            _timestamped(
+                f"Heartbeat failed for {event['project_id']} (attempt {event['consecutive_failures']}): {event['message']}"
+            ),
             flush=True,
         )
         return
     if event_type == "heartbeat_escalated":
         print(
-            f"Heartbeat escalated for {event['project_id']} after {event['consecutive_failures']} failures",
+            _timestamped(
+                f"Heartbeat escalated for {event['project_id']} after {event['consecutive_failures']} failures"
+            ),
             flush=True,
         )
         return
     if event_type == "heartbeat_disabled":
         print(
-            f"Heartbeats disabled for {event['project_id']} after {event['consecutive_failures']} failures",
+            _timestamped(
+                f"Heartbeats disabled for {event['project_id']} after {event['consecutive_failures']} failures"
+            ),
             flush=True,
         )
         return
     if event_type == "review_checked":
         print(
-            f"Review check ran: checked {event['checked_count']}, conflicts {event['conflict_count']}, merged {event['merged_count']}",
+            _timestamped(
+                f"Review check ran: checked {event['checked_count']}, conflicts {event['conflict_count']}, merged {event['merged_count']}"
+            ),
             flush=True,
         )
         return
     if event_type == "sleeping":
-        print(f"Idle. Sleeping {event['seconds']}s (idle cycle {event['idle_cycles']})", flush=True)
+        print(_timestamped(f"Idle. Sleeping {event['seconds']}s (idle cycle {event['idle_cycles']})"), flush=True)
         return
     if event_type == "stale_state_recovered":
         recovered = event.get("recovered") or {}
         print(
-            "Recovered stale state before idling: "
-            f"runs={recovered.get('runs', 0)}, tasks={recovered.get('tasks', 0)}, leases={recovered.get('leases', 0)}",
+            _timestamped(
+                "Recovered stale state before idling: "
+                f"runs={recovered.get('runs', 0)}, tasks={recovered.get('tasks', 0)}, leases={recovered.get('leases', 0)}"
+            ),
             flush=True,
         )
         return
@@ -247,13 +264,13 @@ def _emit_supervise_progress(event: dict[str, object]) -> None:
 def _supervise_summary_text(result) -> str:
     return "\n".join(
         [
-            "Supervisor stopped",
-            f"- Exit reason: {result.exit_reason}",
-            f"- Tasks processed: {result.processed_count}",
-            f"- Heartbeats run: {result.heartbeat_count}",
-            f"- Review checks: {result.review_check_count}",
-            f"- Idle cycles: {result.idle_cycles}",
-            f"- Slept seconds: {result.slept_seconds}",
+            _timestamped("Supervisor stopped"),
+            _timestamped(f"- Exit reason: {result.exit_reason}"),
+            _timestamped(f"- Tasks processed: {result.processed_count}"),
+            _timestamped(f"- Heartbeats run: {result.heartbeat_count}"),
+            _timestamped(f"- Review checks: {result.review_check_count}"),
+            _timestamped(f"- Idle cycles: {result.idle_cycles}"),
+            _timestamped(f"- Slept seconds: {result.slept_seconds}"),
         ]
     )
 
@@ -945,11 +962,13 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
     if args.command == "chaos":
         from ..chaos.runner import ChaosRunner, write_chaos_report
         from ..chaos.heartbeat import drain_chaos_findings
-        from ..chaos.injectors import ALL_INJECTORS, ShadowSupervisorInjector
+        from ..chaos.injectors import ALL_INJECTORS, DEFAULT_INJECTOR_NAMES, ShadowSupervisorInjector
 
         # Configure shadow supervisor from CLI args
         injectors = []
         for inj in ALL_INJECTORS:
+            if not args.all_injectors and inj.name not in DEFAULT_INJECTOR_NAMES:
+                continue
             if isinstance(inj, ShadowSupervisorInjector):
                 heartbeat_pids = [args.project_id] if args.project_id and args.shadow_heartbeat_interval else None
                 injectors.append(ShadowSupervisorInjector(

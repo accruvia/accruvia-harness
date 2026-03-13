@@ -1,7 +1,10 @@
-"""Heartbeat integration -- materializes chaos findings as prioritized tasks.
+"""Heartbeat integration -- materializes focused chaos findings as prioritized tasks.
 
 Flow:
     ChaosRunner (sandbox) -> chaos_finding events -> drain_chaos_findings() -> tasks
+
+The intended use is recovery/control-plane verification. Findings should map to
+specific harness invariants, not become a second strategy system.
 """
 
 from __future__ import annotations

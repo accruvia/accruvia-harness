@@ -17,6 +17,7 @@ from accruvia_harness.chaos.domain import (
 from accruvia_harness.chaos.heartbeat import ChaosDrainResult, drain_chaos_findings
 from accruvia_harness.chaos.injectors import (
     ALL_INJECTORS,
+    DEFAULT_INJECTOR_NAMES,
     ConcurrentRunInjector,
     DBCorruptionInjector,
     LeaseContentionInjector,
@@ -577,6 +578,18 @@ class ChaosReportTests(unittest.TestCase):
 # Runner integration tests
 # ---------------------------------------------------------------------------
 class ChaosRunnerTests(unittest.TestCase):
+    def test_runner_defaults_to_focused_injectors(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            config = _make_config(base)
+
+            runner = ChaosRunner(config=config)
+
+            self.assertEqual(
+                [injector.name for injector in runner.injectors],
+                list(DEFAULT_INJECTOR_NAMES),
+            )
+
     def test_runner_dry_run(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
@@ -654,6 +667,7 @@ class ChaosCLITests(unittest.TestCase):
         self.assertEqual(args.cpu_limit_seconds, 300)
         self.assertEqual(args.min_severity, "high")
         self.assertFalse(args.dry_run)
+        self.assertFalse(args.all_injectors)
         self.assertIsNone(args.report_path)
 
     def test_chaos_parser_all_options(self):
@@ -666,6 +680,7 @@ class ChaosCLITests(unittest.TestCase):
             "--cpu-limit-seconds", "120",
             "--report-path", "/tmp/chaos.json",
             "--min-severity", "critical",
+            "--all-injectors",
             "--dry-run",
         ])
         self.assertEqual(args.project_id, "proj_123")
@@ -673,6 +688,7 @@ class ChaosCLITests(unittest.TestCase):
         self.assertEqual(args.cpu_limit_seconds, 120)
         self.assertEqual(args.report_path, "/tmp/chaos.json")
         self.assertEqual(args.min_severity, "critical")
+        self.assertTrue(args.all_injectors)
         self.assertTrue(args.dry_run)
 
 

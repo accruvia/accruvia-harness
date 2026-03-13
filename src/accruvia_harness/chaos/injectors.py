@@ -692,3 +692,12 @@ ALL_INJECTORS: list[ChaosInjector] = [
     ConcurrentRunInjector(),
     ShadowSupervisorInjector(),
 ]
+
+# Default chaos scope: recovery and control-plane invariants, not broad scenario generation.
+DEFAULT_INJECTOR_NAMES: tuple[str, ...] = (
+    "worker_crash",
+    "lease_contention",
+    "timeout_exhaustion",
+    "partial_write",
+    "shadow_supervisor",
+)

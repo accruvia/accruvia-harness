@@ -240,13 +240,14 @@ def build_parser() -> argparse.ArgumentParser:
     nudge_project.add_argument("--no-process-created-tasks", action="store_true")
     nudge_project.add_argument("--no-restart-running-supervisors", action="store_true")
 
-    chaos = subparsers.add_parser("chaos", help="Run chaos monkey stress tests in an isolated sandbox.")
+    chaos = subparsers.add_parser("chaos", help="Run focused chaos checks for recovery and control-plane invariants.")
     chaos.add_argument("--project-id", help="Feed findings back to this project as proposed tasks.")
     chaos.add_argument("--memory-limit-mb", type=int, default=2048, help="Memory limit for sandbox.")
     chaos.add_argument("--cpu-limit-seconds", type=int, default=300, help="CPU time limit for sandbox.")
     chaos.add_argument("--report-path", help="Write JSON report to this path.")
     chaos.add_argument("--min-severity", choices=["critical", "high", "medium", "low"], default="high", help="Minimum severity to feed back as tasks.")
     chaos.add_argument("--dry-run", action="store_true", help="Run chaos but do not create tasks in production.")
+    chaos.add_argument("--all-injectors", action="store_true", help="Include broader synthetic injectors instead of the focused default set.")
     chaos.add_argument("--shadow-iterations", type=int, default=10, help="Max supervisor iterations for shadow supervisor injector.")
     chaos.add_argument("--shadow-heartbeat-interval", type=float, default=None, help="Heartbeat interval for shadow supervisor (enables heartbeat in shadow).")
 
