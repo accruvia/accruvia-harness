@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from accruvia_harness.agent_worker import run_agent_worker, select_worker_llm_command
+from accruvia_harness.agent_worker import _focused_test_command, run_agent_worker, select_worker_llm_command
 from accruvia_harness.adapters import build_adapter_registry
 from accruvia_harness.config import HarnessConfig
 from accruvia_harness.domain import Run, RunStatus, Task, new_id
@@ -449,6 +449,34 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(1, report["test_check"]["timeout_seconds"])
         self.assertIn("terminated", (run_dir / "test_output.txt").read_text(encoding="utf-8"))
         self.assertIn("changed_module.py", report["changed_files"])
+
+    def test_focused_test_command_uses_lightweight_suite_for_repair_strategies(self) -> None:
+        self.assertEqual(
+            ["python3", "-m", "unittest", "tests.test_workers"],
+            _focused_test_command("executor_repair"),
+        )
+        self.assertEqual(
+            ["python3", "-m", "unittest", "tests.test_workers"],
+            _focused_test_command("timeout_decomposition"),
+        )
+        self.assertEqual(
+            ["python3", "-m", "unittest", "tests.test_workers"],
+            _focused_test_command("bounded_unblocker"),
+        )
+
+    def test_focused_test_command_keeps_default_suite_for_normal_work(self) -> None:
+        self.assertEqual(
+            [
+                "python3",
+                "-m",
+                "unittest",
+                "tests.test_cli",
+                "tests.test_phase1",
+                "tests.test_supervisor",
+                "tests.test_observer",
+            ],
+            _focused_test_command("default"),
+        )
 
     def test_build_worker_from_config_defaults_agent_worker_command(self) -> None:
         config = HarnessConfig(

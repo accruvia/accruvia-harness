@@ -14,6 +14,21 @@ DEFAULT_AGENT_TEST_TIMEOUT_SECONDS = 300
 DEFAULT_AGENT_LLM_TIMEOUT_SECONDS = 420
 DEFAULT_AGENT_COMPILE_TIMEOUT_SECONDS = 120
 DEFAULT_AGENT_GIT_TIMEOUT_SECONDS = 30
+LIGHTWEIGHT_REPAIR_STRATEGIES = frozenset({"executor_repair", "timeout_decomposition", "bounded_unblocker"})
+
+
+def _focused_test_command(strategy: str) -> list[str]:
+    if strategy in LIGHTWEIGHT_REPAIR_STRATEGIES:
+        return ["python3", "-m", "unittest", "tests.test_workers"]
+    return [
+        "python3",
+        "-m",
+        "unittest",
+        "tests.test_cli",
+        "tests.test_phase1",
+        "tests.test_supervisor",
+        "tests.test_observer",
+    ]
 
 
 def _agent_test_timeout_seconds(environ: Mapping[str, str]) -> int:
@@ -260,15 +275,8 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
             compile_output_path.write_text("No Python files changed.\n", encoding="utf-8")
         compile_rc = 0
 
-    test_command = [
-        "python3",
-        "-m",
-        "unittest",
-        "tests.test_cli",
-        "tests.test_phase1",
-        "tests.test_supervisor",
-        "tests.test_observer",
-    ]
+    test_command = _focused_test_command(strategy)
+    validation_selection = "lightweight_repair" if strategy in LIGHTWEIGHT_REPAIR_STRATEGIES else "default_focused"
     test_timed_out = False
     try:
         test_completed = subprocess.run(
@@ -359,7 +367,9 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
         "test_check": {
             "passed": test_completed.returncode == 0,
             "framework": "unittest",
+            "command": test_command,
             "output_path": str(test_output_path),
+            "selection": validation_selection,
             "timeout_seconds": test_timeout_seconds,
             "timed_out": test_timed_out,
         },
