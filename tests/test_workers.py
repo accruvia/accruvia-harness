@@ -304,7 +304,7 @@ class WorkerTests(unittest.TestCase):
             command,
             progress_callback=progress_events.append,
             status_interval_seconds=0.05,
-            stale_after_seconds=0.05,
+            stale_after_seconds=1.0,
         )
 
         result = worker.work(self.task, self.run, self.base)
@@ -314,7 +314,29 @@ class WorkerTests(unittest.TestCase):
         status_events = [event for event in progress_events if event["type"] == "worker_status"]
         self.assertTrue(status_events)
         self.assertTrue(any(event["latest_artifact"] == "plan.txt" for event in status_events))
-        self.assertTrue(any(bool(event["stale"]) for event in status_events))
+        self.assertTrue(all(not bool(event["stale"]) for event in status_events))
+
+    def test_shell_worker_kills_stale_progress_before_full_run_timeout(self) -> None:
+        progress_events: list[dict[str, object]] = []
+        run_dir = self.base / "runs" / self.run.id
+        run_dir.mkdir(parents=True)
+        plan_path = run_dir / "plan.txt"
+        plan_path.write_text("plan\n", encoding="utf-8")
+        command = f"{shlex.quote(sys.executable)} -c {shlex.quote('import time; time.sleep(5)')}"
+        worker = ShellCommandWorker(
+            command,
+            progress_callback=progress_events.append,
+            status_interval_seconds=0.05,
+            stale_after_seconds=0.05,
+        )
+
+        result = worker.work(self.task, self.run, self.base)
+
+        self.assertEqual("blocked", result.outcome)
+        self.assertEqual("stale_progress_timeout", result.diagnostics["failure_category"])
+        report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
+        self.assertEqual("stale_progress_timeout", report["failure_category"])
+        self.assertTrue(any(event["type"] == "worker_status" and event["stale"] for event in progress_events))
 
     def test_select_worker_llm_command_prefers_selected_backend(self) -> None:
         backend, command = select_worker_llm_command(

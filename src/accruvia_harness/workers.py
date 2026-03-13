@@ -169,6 +169,8 @@ class CommandWorker:
             timeout_seconds = self.timeout_policy.timeout_seconds(
                 task.validation_profile, self.backend_name
             )
+        timeout_category = "task_run_timeout"
+        timeout_reason = f"Timed out in task_run_timeout after {timeout_seconds}s while executing the {self.backend_name} worker command."
         try:
             process = subprocess.Popen(
                 self.command,
@@ -229,6 +231,19 @@ class CommandWorker:
                             "stale": stale,
                         }
                     )
+                    if stale:
+                        process.kill()
+                        stdout_text, stderr_text = process.communicate()
+                        timeout_category = "stale_progress_timeout"
+                        timeout_reason = (
+                            f"Timed out in stale_progress_timeout after {self.stale_after_seconds:.0f}s without a new durable artifact."
+                        )
+                        raise subprocess.TimeoutExpired(
+                            self.command,
+                            timeout=self.stale_after_seconds,
+                            output=stdout_text,
+                            stderr=stderr_text,
+                        )
                     last_status_at = now
                 self._sleep(0.2)
             stdout_text, stderr_text = process.communicate()
@@ -260,7 +275,8 @@ class CommandWorker:
                         "worker_outcome": "blocked",
                         "blocked": True,
                         "infrastructure_failure": True,
-                        "failure_category": "executor_timeout",
+                        "failure_category": timeout_category,
+                        "failure_message": timeout_reason,
                         "memory_limit_mb": getattr(self.resource_policy, "memory_limit_mb", None),
                         "cpu_time_limit_seconds": getattr(self.resource_policy, "cpu_time_limit_seconds", None),
                     },
@@ -270,7 +286,7 @@ class CommandWorker:
                 encoding="utf-8",
             )
             return WorkResult(
-                summary=f"Timed out in task_run_timeout after {timeout_seconds}s while executing the {self.backend_name} worker command.",
+                summary=timeout_reason,
                 artifacts=[
                     ("worker_stdout", str(stdout_path), "Captured shell worker stdout"),
                     ("worker_stderr", str(stderr_path), "Captured shell worker stderr"),
@@ -283,8 +299,9 @@ class CommandWorker:
                     "timed_out": True,
                     "blocked": True,
                     "infrastructure_failure": True,
-                    "failure_category": "executor_timeout",
+                    "failure_category": timeout_category,
                     "timeout_seconds": timeout_seconds,
+                    "stale_after_seconds": self.stale_after_seconds,
                     "memory_limit_mb": getattr(self.resource_policy, "memory_limit_mb", None),
                     "cpu_time_limit_seconds": getattr(self.resource_policy, "cpu_time_limit_seconds", None),
                     "project_workspace": str(project_workspace),
@@ -616,6 +633,7 @@ def build_worker_from_config(config: HarnessConfig, telemetry=None) -> WorkerBac
             timeout_policy=timeout_policy,
             resource_policy=resource_policy,
             env_passthrough=config.env_passthrough,
+            stale_after_seconds=config.task_stale_timeout_seconds,
         )
     if config.worker_backend == "agent":
         command = config.worker_command or _default_agent_worker_command()
@@ -624,6 +642,7 @@ def build_worker_from_config(config: HarnessConfig, telemetry=None) -> WorkerBac
             timeout_policy=timeout_policy,
             resource_policy=resource_policy,
             env_passthrough=config.env_passthrough,
+            stale_after_seconds=config.task_stale_timeout_seconds,
             extra_env={
                 key: value
                 for key, value in {
