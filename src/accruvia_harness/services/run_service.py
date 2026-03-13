@@ -401,6 +401,7 @@ class RunService:
             self._create_infrastructure_failure_follow_on(task, run, analysis)
         if analysis.verdict == EvaluationVerdict.BLOCKED:
             self._reshape_scope_violation(task, run, analysis)
+        self._create_timeout_decomposition_follow_on(task, run, analysis)
 
         final_status = RunStatus.COMPLETED if decision_result.action == DecisionAction.PROMOTE else RunStatus.FAILED
         if analysis.verdict == EvaluationVerdict.BLOCKED:
@@ -602,6 +603,53 @@ class RunService:
                     payload={"created_paths": created_paths},
                 )
             )
+
+    def _create_timeout_decomposition_follow_on(self, task, run, analysis) -> None:
+        if self.task_service is None:
+            return
+        if task.strategy not in {"executor_repair", "bounded_unblocker"}:
+            return
+        diagnostics = analysis.details.get("diagnostics")
+        if not isinstance(diagnostics, dict):
+            return
+        category = str(diagnostics.get("failure_category") or "").strip()
+        if category not in {"validation_timeout", "stale_progress_timeout"}:
+            return
+        existing = self.store.find_follow_on_task(task.id, run.id)
+        if existing is not None and existing.strategy == "timeout_decomposition":
+            return
+        queued_children = [
+            child
+            for child in self.store.list_child_tasks(task.id)
+            if child.strategy == "timeout_decomposition" and child.status in {TaskStatus.PENDING, TaskStatus.ACTIVE}
+        ]
+        if queued_children:
+            return
+        timeout_seconds = diagnostics.get("timeout_seconds")
+        timeout_detail = f" after {timeout_seconds}s" if timeout_seconds else ""
+        follow_on = self.task_service.create_follow_on_task(
+            parent_task_id=task.id,
+            source_run_id=run.id,
+            title=f"{task.title}: narrow scope after timeout",
+            objective=(
+                "Reduce this remediation task to one smaller executable slice that can complete within the current "
+                f"validation budget. The latest run ended with {category}{timeout_detail}; isolate a narrower doctor, "
+                "preflight, or deterministic reproduction step using the same executor contract."
+            ),
+            priority=max(task.priority + 5, 1),
+            strategy="timeout_decomposition",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+        self.store.create_event(
+            Event(
+                id=new_id("event"),
+                entity_type="task",
+                entity_id=follow_on.id,
+                event_type="timeout_decomposition_follow_on_created",
+                payload={"parent_task_id": task.id, "run_id": run.id, "failure_category": category},
+            )
+        )
 
     def run_until_stable(self, task_id: str) -> list[Run]:
         completed_runs: list[Run] = []

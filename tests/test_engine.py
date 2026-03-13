@@ -78,6 +78,18 @@ class FailedDiagnosisWorker(PromotionBlockedWorker):
         return result
 
 
+class ValidationTimeoutWorker(PromotionBlockedWorker):
+    def work(self, task, run, workspace_root: Path) -> WorkResult:  # type: ignore[override]
+        result = super().work(task, run, workspace_root)
+        result.outcome = "failed"
+        result.diagnostics = {
+            "failure_category": "validation_timeout",
+            "failure_message": "Focused validation exceeded the bounded ceiling.",
+            "timeout_seconds": 300,
+        }
+        return result
+
+
 class InfrastructureBlockedWorker(PromotionBlockedWorker):
     def work(self, task, run, workspace_root: Path) -> WorkResult:  # type: ignore[override]
         result = super().work(task, run, workspace_root)
@@ -1164,6 +1176,36 @@ class HarnessEngineTests(unittest.TestCase):
         children = self.store.list_child_tasks(task.id)
         self.assertEqual("blocked", run.status.value)
         self.assertEqual([], children)
+
+    def test_timeout_bound_repair_task_creates_narrower_follow_on(self) -> None:
+        engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-timeout-decomposition",
+            worker=ValidationTimeoutWorker(),
+        )
+        task = engine.create_task_with_policy(
+            project_id=self.project_id,
+            title="Repair executor runtime",
+            objective="Repair executor/runtime failure",
+            priority=900,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="executor_repair",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+
+        run = engine.run_once(task.id)
+
+        children = self.store.list_child_tasks(task.id)
+        self.assertEqual("failed", run.status.value)
+        self.assertEqual(1, len(children))
+        self.assertEqual("timeout_decomposition", children[0].strategy)
+        self.assertEqual("pending", children[0].status.value)
+        self.assertIn("validation budget", children[0].objective)
+        self.assertEqual("failed", self.store.get_task(task.id).status.value)
 
     def test_review_promotion_dedupes_follow_on_for_same_run(self) -> None:
         engine = HarnessEngine(
