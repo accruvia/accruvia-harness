@@ -2250,9 +2250,16 @@ function renderAtomicUnits() {
     : 'Atomic units will appear here as the harness derives them from the accepted flowchart.';
   if (generation.status === 'running') {
     const dots = '.'.repeat((Math.floor(Date.now() / 500) % 3) + 1);
-    atomicGenerationStatus.textContent = `Generating atomic units from Mermaid v${generation.diagram_version}${dots} ${generation.unit_count || 0} ready so far.`;
+    const roundInfo = generation.refinement_round ? ` · Round ${generation.refinement_round}` : '';
+    const taskCount = linkedTasks.length ? ` · ${linkedTasks.length} task(s)` : '';
+    const critiqueInfo = generation.critique_accepted === true ? ' · Critique: passed' :
+      generation.critique_accepted === false ? ' · Critique: needs work' : '';
+    const coverageInfo = generation.coverage_complete === true ? ' · Coverage: complete' :
+      generation.coverage_complete === false ? ' · Coverage: gaps found' : '';
+    atomicGenerationStatus.textContent = `Generating atomic units from Mermaid v${generation.diagram_version}${dots}${roundInfo}${taskCount}${critiqueInfo}${coverageInfo}`;
   } else if (generation.status === 'completed') {
-    atomicGenerationStatus.textContent = `Atomic generation complete for Mermaid v${generation.diagram_version}. ${generation.unit_count || 0} units ready.`;
+    const roundInfo = generation.refinement_round ? ` after ${generation.refinement_round} round(s)` : '';
+    atomicGenerationStatus.textContent = `Atomic generation complete for Mermaid v${generation.diagram_version}${roundInfo}. ${linkedTasks.length} task(s) ready.`;
   } else if (generation.status === 'failed') {
     atomicGenerationStatus.textContent = generation.error || 'Atomic generation failed.';
   } else {
@@ -2274,11 +2281,24 @@ function renderAtomicUnits() {
   } else if (generation.status) {
     pills.push(`<span class="pill ${statusClass}">Status: ${escapeHtml(generation.status)}</span>`);
   }
+  if (generation.refinement_round) {
+    pills.push(`<span class="pill">Round ${generation.refinement_round}</span>`);
+  }
+  if (linkedTasks.length) {
+    pills.push(`<span class="pill">${linkedTasks.length} task(s)</span>`);
+  }
+  if (generation.critique_accepted === true) {
+    pills.push(`<span class="pill status-complete">Critique: passed</span>`);
+  } else if (generation.critique_accepted === false) {
+    pills.push(`<span class="pill status-running">Critique: needs work</span>`);
+  }
+  if (generation.coverage_complete === true) {
+    pills.push(`<span class="pill status-complete">Coverage: complete</span>`);
+  } else if (generation.coverage_complete === false) {
+    pills.push(`<span class="pill status-running">Coverage: gaps found</span>`);
+  }
   if (lastActivity) {
     pills.push(`<span class="pill">Last activity ${escapeHtml(lastActivity)}</span>`);
-  }
-  if (generation.status === 'running' && generation.unit_count) {
-    pills.push(`<span class="pill">${escapeHtml(String(generation.unit_count))} published</span>`);
   }
   atomicGenerationMeta.innerHTML = pills.join('');
   if (!linkedTasks.length) {
@@ -4408,11 +4428,26 @@ class HarnessUIDataService:
             "- Prefer MORE smaller units over FEWER larger ones. 5-12 tiny units is better than 3 big ones.\n\n"
             f"{context_block}\n"
         )
-        try:
-            raw = self._llm_call(llm_router, task_stub, run_dir, prompt)
-            return self._parse_units_json(raw)
-        except Exception:
-            return []
+        for attempt in range(1, 3):
+            try:
+                raw = self._llm_call(llm_router, task_stub, run_dir, prompt)
+                if not raw:
+                    (run_dir / f"generate_attempt_{attempt}_empty_response.txt").write_text(
+                        "LLM returned empty response", encoding="utf-8",
+                    )
+                    continue
+                (run_dir / f"generate_attempt_{attempt}_raw.txt").write_text(raw, encoding="utf-8")
+                units = self._parse_units_json(raw)
+                if units:
+                    return units
+                (run_dir / f"generate_attempt_{attempt}_parse_failed.txt").write_text(
+                    f"Parsed 0 units from response ({len(raw)} chars):\n{raw[:2000]}", encoding="utf-8",
+                )
+            except Exception as exc:
+                (run_dir / f"generate_attempt_{attempt}_error.txt").write_text(
+                    f"{type(exc).__name__}: {exc}", encoding="utf-8",
+                )
+        return []
 
     def _llm_critique_units(
         self, llm_router, task_stub: Task, run_dir: Path,
@@ -5591,6 +5626,28 @@ class HarnessUIDataService:
         if failed is not None:
             related_times.append(failed.created_at)
         last_activity_at = max(related_times).isoformat() if related_times else ""
+        # Extract refinement round and latest critique/coverage from telemetry
+        telemetry = [
+            record
+            for record in self.store.list_context_records(objective_id=objective_id, record_type="atomic_decomposition_telemetry")
+            if str(record.metadata.get("generation_id") or "") == generation_id
+        ]
+        refinement_round = 0
+        critique_accepted = None
+        coverage_complete = None
+        last_critique_problems = []
+        last_coverage_gaps = []
+        for record in telemetry:
+            evt = record.metadata.get("event_type", "")
+            rnd = record.metadata.get("round")
+            if rnd is not None and int(rnd) > refinement_round:
+                refinement_round = int(rnd)
+            if evt == "critique":
+                critique_accepted = record.metadata.get("accepted")
+                last_critique_problems = list(record.metadata.get("problems") or [])
+            if evt == "coverage":
+                coverage_complete = record.metadata.get("complete")
+                last_coverage_gaps = list(record.metadata.get("gaps") or [])
         return {
             "status": status,
             "diagram_version": diagram_version,
@@ -5602,6 +5659,11 @@ class HarnessUIDataService:
             "phase": phase,
             "last_activity_at": last_activity_at,
             "error": failed.content if failed is not None else "",
+            "refinement_round": refinement_round,
+            "critique_accepted": critique_accepted,
+            "coverage_complete": coverage_complete,
+            "last_critique_problems": last_critique_problems,
+            "last_coverage_gaps": last_coverage_gaps,
         }
 
     def _atomic_units_for_objective(

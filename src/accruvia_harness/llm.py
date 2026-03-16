@@ -217,6 +217,13 @@ class CommandLLMExecutor:
                 f"{self.backend_name} executor failed with return code {completed.returncode}"
             )
 
+        if not response_text.strip():
+            raise LLMExecutionError(
+                f"{self.backend_name} executor returned an empty response (0 useful bytes). "
+                f"This typically means the backend is out of credits, quota, or encountered a silent failure. "
+                f"stderr: {completed.stderr[:500] if completed.stderr else '(empty)'}"
+            )
+
         token_metrics = {
             "llm_cost_usd": _coerce_metric_number(metadata.get("cost_usd", 0.0)),
             "llm_prompt_tokens": _coerce_metric_number(metadata.get("prompt_tokens", 0.0)),
@@ -280,6 +287,7 @@ class LLMRouter:
     def __init__(self, backend: str, executors: dict[str, LLMExecutor]) -> None:
         self.backend = backend
         self.executors = executors
+        self._demoted: set[str] = set()  # backends that failed recently
 
     def resolve(self) -> tuple[LLMExecutor, str]:
         backend = self.backend
@@ -302,14 +310,23 @@ class LLMRouter:
         if not ordered:
             available = ", ".join(sorted(self.executors))
             raise ValueError(f"Unsupported LLM backend '{selected}'. Available: {available}")
+        # Move demoted backends to the end so we try healthy ones first
+        if self._demoted:
+            healthy = [name for name in ordered if name not in self._demoted]
+            demoted = [name for name in ordered if name in self._demoted]
+            ordered = healthy + demoted
         return [(self.executors[name], name) for name in ordered]
 
     def execute(self, invocation: LLMInvocation, telemetry=None) -> tuple[LLMExecutionResult, str]:
         failures: list[dict[str, str]] = []
         for executor, backend in self.resolve_chain():
             try:
-                return executor.execute(invocation), backend
+                result = executor.execute(invocation)
+                # Success: un-demote this backend
+                self._demoted.discard(backend)
+                return result, backend
             except LLMExecutionError as exc:
+                self._demoted.add(backend)
                 failures.append({"backend": backend, "error": str(exc)})
                 if telemetry is not None:
                     category = "executor_timeout" if "timed out" in str(exc).lower() else "llm_executor_failure"
