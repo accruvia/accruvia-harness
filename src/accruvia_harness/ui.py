@@ -74,6 +74,88 @@ class AtomicGenerationCoordinator:
 _ATOMIC_GENERATION = AtomicGenerationCoordinator()
 
 
+class BackgroundSupervisorCoordinator:
+    """Manages background supervisor threads, one per project."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._running: dict[str, threading.Event] = {}  # project_id -> stop event
+        self._status: dict[str, dict[str, object]] = {}  # project_id -> latest status
+
+    def start(self, project_id: str, engine, *, watch: bool = True) -> bool:
+        with self._lock:
+            if project_id in self._running:
+                return False
+            stop_event = threading.Event()
+            self._running[project_id] = stop_event
+            self._status[project_id] = {
+                "state": "starting",
+                "processed_count": 0,
+                "started_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            }
+
+        def worker() -> None:
+            try:
+                self._status[project_id]["state"] = "running"
+                result = engine.supervise(
+                    project_id=project_id,
+                    worker_id=f"ui-supervisor-{project_id[:8]}",
+                    watch=watch,
+                    idle_sleep_seconds=10.0,
+                    max_idle_cycles=3,
+                    stop_requested=stop_event.is_set,
+                    progress_callback=lambda ev: self._on_progress(project_id, ev),
+                )
+                self._status[project_id].update({
+                    "state": "finished",
+                    "processed_count": result.processed_count,
+                    "exit_reason": result.exit_reason,
+                    "finished_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                })
+            except Exception as exc:
+                self._status[project_id].update({
+                    "state": "error",
+                    "error": str(exc),
+                    "finished_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                })
+            finally:
+                with self._lock:
+                    self._running.pop(project_id, None)
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        return True
+
+    def stop(self, project_id: str) -> bool:
+        with self._lock:
+            stop_event = self._running.get(project_id)
+            if stop_event is None:
+                return False
+            stop_event.set()
+            return True
+
+    def is_running(self, project_id: str) -> bool:
+        with self._lock:
+            return project_id in self._running
+
+    def status(self, project_id: str) -> dict[str, object]:
+        return dict(self._status.get(project_id, {"state": "idle"}))
+
+    def _on_progress(self, project_id: str, event: dict[str, object]) -> None:
+        event_type = event.get("type", "")
+        status = self._status.get(project_id, {})
+        if event_type == "task_finished":
+            status["processed_count"] = status.get("processed_count", 0) + 1
+            status["last_task_id"] = event.get("task_id")
+            status["last_task_title"] = event.get("task_title")
+            status["last_task_status"] = event.get("status")
+        status["last_event"] = event_type
+        status["last_event_at"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+
+_BACKGROUND_SUPERVISOR = BackgroundSupervisorCoordinator()
+
+
 _APP_CSS = """
 :root {
   color-scheme: light;
@@ -267,6 +349,23 @@ body[data-view="atomic"] #content-grid {
   margin: 0;
 }
 
+body[data-view="atomic"] #supervisor-panel {
+  display: block !important;
+  width: 100%;
+  max-width: none;
+  border-radius: 0;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  box-shadow: none;
+  margin: 0;
+  padding: 1.25rem;
+  background: #fffdf8;
+}
+
+body:not([data-view="atomic"]) #supervisor-panel {
+  display: none !important;
+}
+
 body[data-view="atomic"] #atomic-panel {
   display: block !important;
   width: 100%;
@@ -332,6 +431,30 @@ body[data-view="atomic"] .conversation-form {
   border-radius: 999px;
   padding: 0.24rem 0.6rem;
   background: #fffdf8;
+}
+
+.atomic-generation-meta .pill.status-running {
+  border-color: #d9b26a;
+  background: #fff5df;
+  color: #8b5a00;
+}
+
+.atomic-generation-meta .pill.status-complete {
+  border-color: #8fc8a5;
+  background: #edf9f0;
+  color: #1f6b35;
+}
+
+.atomic-generation-meta .pill.status-failed {
+  border-color: #d49b9b;
+  background: #fff1f1;
+  color: #9f2f2f;
+}
+
+.atomic-generation-meta .pill.status-idle {
+  border-color: #cfd6df;
+  background: #f6f8fb;
+  color: #536273;
 }
 
 .atomic-generation-meta .pill.live::before {
@@ -1054,13 +1177,26 @@ textarea {
 
 
 _APP_JS = r"""
-import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+let mermaid = null;
+let mermaidLoadPromise = null;
 
-mermaid.initialize({
-  startOnLoad: false,
-  theme: 'default',
-  securityLevel: 'loose',
-});
+async function ensureMermaid() {
+  if (mermaid) return mermaid;
+  if (!mermaidLoadPromise) {
+    mermaidLoadPromise = import('https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs')
+      .then((module) => {
+        const instance = module.default;
+        instance.initialize({
+          startOnLoad: false,
+          theme: 'default',
+          securityLevel: 'loose',
+        });
+        mermaid = instance;
+        return instance;
+      });
+  }
+  return mermaidLoadPromise;
+}
 
 const state = {
   projects: [],
@@ -1084,11 +1220,22 @@ const state = {
   view: document.body.dataset.view || 'default',
 };
 
+function preferredProjectFromList(projects) {
+  if (!Array.isArray(projects) || projects.length === 0) return null;
+  const sorted = [...projects].sort((left, right) => {
+    const queueDelta = Number(right.queue_depth || 0) - Number(left.queue_depth || 0);
+    if (queueDelta !== 0) return queueDelta;
+    return String(left.name || '').localeCompare(String(right.name || ''));
+  });
+  return sorted[0]?.id || null;
+}
+
 const appShell = document.getElementById('app-shell');
 const content = document.querySelector('.content');
 const sidebarToggle = document.getElementById('sidebar-toggle');
 const sidebarToggleLabel = document.getElementById('sidebar-toggle-label');
 const projectSelect = document.getElementById('project-select');
+const bannerProjectSelect = document.getElementById('banner-project-select');
 const objectiveList = document.getElementById('objective-list');
 const objectiveTitle = document.getElementById('objective-title');
 const objectiveSummary = document.getElementById('objective-summary');
@@ -1745,13 +1892,16 @@ function anchorFromElement(element) {
 }
 
 function renderProjects() {
-  projectSelect.innerHTML = '';
-  for (const project of state.projects) {
-    const option = document.createElement('option');
-    option.value = project.id;
-    option.textContent = `${project.name} (${project.id})`;
-    option.selected = project.id === state.projectId;
-    projectSelect.appendChild(option);
+  const selectors = [projectSelect, bannerProjectSelect].filter(Boolean);
+  for (const selector of selectors) {
+    selector.innerHTML = '';
+    for (const project of state.projects) {
+      const option = document.createElement('option');
+      option.value = project.id;
+      option.textContent = `${project.name} (${project.id})`;
+      option.selected = project.id === state.projectId;
+      selector.appendChild(option);
+    }
   }
 }
 
@@ -1884,6 +2034,7 @@ function renderObjectives() {
   frustrationSignals.value = (selected.intent_model?.frustration_signals || []).join('\\n');
   renderExecutionPanel();
   renderAtomicUnits();
+  renderSupervisorStatus();
   applyFocusMode(selected);
 }
 
@@ -1975,7 +2126,7 @@ function expectationForMode(mode) {
       role: 'You are the Reviewer',
       need: 'Decide whether the diagram matches your intended flow.',
       why: 'Execution stays blocked until the process logic is accurate enough to govern work.',
-      done: 'Done when you click Matches my flow or Doesn\\'t match yet.',
+      done: 'Done when you click Matches my flow or Doesn\'t match yet.',
     };
   }
   if (mode === 'run_start') {
@@ -2110,9 +2261,18 @@ function renderAtomicUnits() {
   const lastActivity = generation.last_activity_at ? formatRelativeTime(generation.last_activity_at) : '';
   const phase = generation.phase || '';
   const pills = [];
+  const statusClass = generation.status === 'running'
+    ? 'status-running'
+    : generation.status === 'completed'
+      ? 'status-complete'
+      : generation.status === 'failed'
+        ? 'status-failed'
+        : 'status-idle';
   if (phase) {
-    const klass = generation.status === 'running' ? 'pill live' : 'pill';
-    pills.push(`<span class="${klass}">Phase: ${escapeHtml(phase)}</span>`);
+    const liveClass = generation.status === 'running' ? ' live' : '';
+    pills.push(`<span class="pill ${statusClass}${liveClass}">Phase: ${escapeHtml(phase)}</span>`);
+  } else if (generation.status) {
+    pills.push(`<span class="pill ${statusClass}">Status: ${escapeHtml(generation.status)}</span>`);
   }
   if (lastActivity) {
     pills.push(`<span class="pill">Last activity ${escapeHtml(lastActivity)}</span>`);
@@ -2140,6 +2300,47 @@ function renderAtomicUnits() {
       </div>
     `;
   }).join('');
+}
+
+function renderSupervisorStatus() {
+  const panel = document.getElementById('supervisor-panel');
+  if (!panel) return;
+  const supervisor = state.workspace?.supervisor || {};
+  const isRunning = supervisor.running || supervisor.state === 'running' || supervisor.state === 'starting';
+  const startBtn = document.getElementById('supervisor-start-btn');
+  const stopBtn = document.getElementById('supervisor-stop-btn');
+  const statusEl = document.getElementById('supervisor-status');
+  const metaEl = document.getElementById('supervisor-meta');
+  if (startBtn) startBtn.hidden = isRunning;
+  if (stopBtn) stopBtn.hidden = !isRunning;
+  if (statusEl) {
+    if (supervisor.state === 'running' || supervisor.state === 'starting') {
+      const dots = '.'.repeat((Math.floor(Date.now() / 500) % 3) + 1);
+      statusEl.textContent = `Harness is processing tasks${dots}`;
+    } else if (supervisor.state === 'finished') {
+      statusEl.textContent = `Harness finished. Processed ${supervisor.processed_count || 0} task(s). Exit: ${supervisor.exit_reason || 'unknown'}.`;
+    } else if (supervisor.state === 'error') {
+      statusEl.textContent = `Harness error: ${supervisor.error || 'unknown'}`;
+    } else {
+      statusEl.textContent = 'Harness is idle. Start it to begin processing pending tasks.';
+    }
+  }
+  if (metaEl) {
+    const pills = [];
+    const stateClass = isRunning ? 'status-running' : supervisor.state === 'finished' ? 'status-complete' : supervisor.state === 'error' ? 'status-failed' : 'status-idle';
+    const liveClass = isRunning ? ' live' : '';
+    pills.push(`<span class="pill ${stateClass}${liveClass}">${escapeHtml(supervisor.state || 'idle')}</span>`);
+    if (supervisor.processed_count) {
+      pills.push(`<span class="pill">${supervisor.processed_count} task(s) done</span>`);
+    }
+    if (supervisor.last_task_title && isRunning) {
+      pills.push(`<span class="pill">Working on: ${escapeHtml(supervisor.last_task_title)}</span>`);
+    }
+    if (supervisor.last_event_at) {
+      pills.push(`<span class="pill">Last activity ${escapeHtml(formatRelativeTime(supervisor.last_event_at))}</span>`);
+    }
+    metaEl.innerHTML = pills.join('');
+  }
 }
 
 function renderInterrogationReview(objective) {
@@ -2188,8 +2389,9 @@ async function renderDiagram() {
     return;
   }
   try {
+    const mermaidInstance = await ensureMermaid();
     const id = `diagram-${Math.random().toString(36).slice(2)}`;
-    const rendered = await mermaid.render(id, code);
+    const rendered = await mermaidInstance.render(id, code);
     diagramShell.innerHTML = rendered.svg;
     diagramShell.classList.toggle('updating', state.diagramUpdating);
     diagramShell.classList.toggle('locked', Boolean(objective?.diagram && !objective?.diagram_proposal && objective.diagram.status === 'finished'));
@@ -2276,15 +2478,20 @@ function renderWorkspaceChrome() {
 async function loadProjects() {
   const payload = await api('/api/projects');
   state.projects = payload.projects;
-  const preferredProjectId = new URLSearchParams(window.location.search).get('project_id');
+  const urlParams = new URLSearchParams(window.location.search);
+  const preferredProjectId = urlParams.get('project_id');
+  const preferredObjectiveId = urlParams.get('objective_id');
   if (preferredProjectId && state.projects.some((project) => project.id === preferredProjectId)) {
     setProjectId(preferredProjectId);
   }
+  if (preferredObjectiveId) {
+    setObjectiveId(preferredObjectiveId);
+  }
   if (!state.projectId && state.projects.length > 0) {
-    setProjectId(state.projects[0].id);
+    setProjectId(preferredProjectFromList(state.projects));
   }
   if (state.projectId && !state.projects.some((project) => project.id === state.projectId)) {
-    setProjectId(state.projects[0]?.id || null);
+    setProjectId(preferredProjectFromList(state.projects));
   }
   renderProjects();
 }
@@ -2356,107 +2563,113 @@ async function handleExecutionPrimaryAction() {
   }
 }
 
-createObjectiveForm.addEventListener('submit', async (event) => {
-  event.preventDefault();
-  if (!state.projectId) return;
-  const title = createObjectiveTitle.value.trim();
-  if (!title) return;
-  try {
-    clearError();
-    const payload = await api(`/api/projects/${encodeURIComponent(state.projectId)}/objectives`, {
-      method: 'POST',
-      body: JSON.stringify({
-        title,
-        summary: createObjectiveSummary.value.trim(),
-      }),
-    });
-    createObjectiveTitle.value = '';
-    createObjectiveSummary.value = '';
-    setObjectiveId(payload.objective.id);
-    await loadWorkspace();
-  } catch (error) {
-    showError(error.message || 'Unable to create objective');
-  }
-});
-
-conversationForm.addEventListener('submit', async (event) => {
-  event.preventDefault();
-  if (!state.objectiveId) return;
-  if (state.conversationPending) return;
-  const text = conversationInput.value.trim();
-  if (!text) return;
-  const mode = currentFocusMode(currentObjective());
-  const model = currentIntentModel();
-  let completed = false;
-  const diagramAction = likelyMermaidActionIntent(text);
-  const outboundText = state.diagramAnchor
-    ? `[Mermaid anchor: ${state.diagramAnchor.label}] ${text}`
-    : text;
-  try {
-    clearError();
-    setConversationPending(true);
-    setDiagramUpdating(diagramAction);
-    if (diagramAction) {
-      addLocalNotice('System receipt: updating Mermaid proposal...');
-      renderConversationTranscript(currentObjective());
-    }
-    activeConversationController = new AbortController();
-    if (['desired_outcome', 'success_definition', 'non_negotiables'].includes(mode)) {
-      state.lastSavedStep = mode;
-      state.manualFocusMode = null;
-      await api(`/api/objectives/${encodeURIComponent(state.objectiveId)}/intent`, {
-        method: 'PUT',
-        signal: activeConversationController.signal,
+if (createObjectiveForm) {
+  createObjectiveForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (!state.projectId) return;
+    const title = createObjectiveTitle.value.trim();
+    if (!title) return;
+    try {
+      clearError();
+      const payload = await api(`/api/projects/${encodeURIComponent(state.projectId)}/objectives`, {
+        method: 'POST',
         body: JSON.stringify({
-          intent_summary: mode === 'desired_outcome' ? outboundText : (model?.intent_summary || ''),
-          success_definition: mode === 'success_definition' ? outboundText : (model?.success_definition || ''),
-          non_negotiables: mode === 'non_negotiables' ? outboundText.split('\\n') : (model?.non_negotiables || []),
-          frustration_signals: model?.frustration_signals || [],
+          title,
+          summary: createObjectiveSummary.value.trim(),
         }),
       });
+      createObjectiveTitle.value = '';
+      createObjectiveSummary.value = '';
+      setObjectiveId(payload.objective.id);
+      await loadWorkspace();
+    } catch (error) {
+      showError(error.message || 'Unable to create objective');
+    }
+  });
+}
+
+if (conversationForm) {
+  conversationForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (!state.objectiveId) return;
+    if (state.conversationPending) return;
+    const text = conversationInput.value.trim();
+    if (!text) return;
+    const mode = currentFocusMode(currentObjective());
+    const model = currentIntentModel();
+    let completed = false;
+    const diagramAction = likelyMermaidActionIntent(text);
+    const outboundText = state.diagramAnchor
+      ? `[Mermaid anchor: ${state.diagramAnchor.label}] ${text}`
+      : text;
+    try {
+      clearError();
+      setConversationPending(true);
+      setDiagramUpdating(diagramAction);
+      if (diagramAction) {
+        addLocalNotice('System receipt: updating Mermaid proposal...');
+        renderConversationTranscript(currentObjective());
+      }
+      activeConversationController = new AbortController();
+      if (['desired_outcome', 'success_definition', 'non_negotiables'].includes(mode)) {
+        state.lastSavedStep = mode;
+        state.manualFocusMode = null;
+        await api(`/api/objectives/${encodeURIComponent(state.objectiveId)}/intent`, {
+          method: 'PUT',
+          signal: activeConversationController.signal,
+          body: JSON.stringify({
+            intent_summary: mode === 'desired_outcome' ? outboundText : (model?.intent_summary || ''),
+            success_definition: mode === 'success_definition' ? outboundText : (model?.success_definition || ''),
+            non_negotiables: mode === 'non_negotiables' ? outboundText.split('\\n') : (model?.non_negotiables || []),
+            frustration_signals: model?.frustration_signals || [],
+          }),
+        });
+        await loadWorkspace();
+        completed = true;
+        return;
+      }
+      await api(`/api/projects/${encodeURIComponent(state.projectId)}/comments`, {
+        method: 'POST',
+        signal: activeConversationController.signal,
+        body: JSON.stringify({
+          author: '',
+          text: outboundText,
+          objective_id: state.objectiveId,
+        }),
+      });
+      conversationInput.value = '';
+      clearDiagramAnchor();
+      state.suppressFocusAnimation = true;
+      state.showInlineReview = false;
       await loadWorkspace();
       completed = true;
-      return;
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        addLocalNotice('System receipt: interrupted by operator before the response completed.');
+        renderConversationTranscript(currentObjective());
+        showError('Interrupted. No further response will be applied from that request.');
+      } else {
+        showError(error.message || 'Unable to send message to the harness');
+      }
+    } finally {
+      state.suppressFocusAnimation = false;
+      setConversationPending(false);
+      setDiagramUpdating(false);
+      activeConversationController = null;
+      if (completed) {
+        conversationInput.focus();
+      }
     }
-    await api(`/api/projects/${encodeURIComponent(state.projectId)}/comments`, {
-      method: 'POST',
-      signal: activeConversationController.signal,
-      body: JSON.stringify({
-        author: '',
-        text: outboundText,
-        objective_id: state.objectiveId,
-      }),
-    });
-    conversationInput.value = '';
-    clearDiagramAnchor();
-    state.suppressFocusAnimation = true;
-    state.showInlineReview = false;
-    await loadWorkspace();
-    completed = true;
-  } catch (error) {
-    if (error.name === 'AbortError') {
-      addLocalNotice('System receipt: interrupted by operator before the response completed.');
-      renderConversationTranscript(currentObjective());
-      showError('Interrupted. No further response will be applied from that request.');
-    } else {
-      showError(error.message || 'Unable to send message to the harness');
-    }
-  } finally {
-    state.suppressFocusAnimation = false;
-    setConversationPending(false);
-    setDiagramUpdating(false);
-    activeConversationController = null;
-    if (completed) {
-      conversationInput.focus();
-    }
-  }
-});
+  });
+}
 
-conversationInterrupt.addEventListener('click', () => {
-  if (activeConversationController) {
-    activeConversationController.abort();
-  }
-});
+if (conversationInterrupt) {
+  conversationInterrupt.addEventListener('click', () => {
+    if (activeConversationController) {
+      activeConversationController.abort();
+    }
+  });
+}
 
 if (diagramCommentAnchorClear) {
   diagramCommentAnchorClear.addEventListener('click', () => {
@@ -2465,6 +2678,7 @@ if (diagramCommentAnchorClear) {
   });
 }
 
+if (diagramShell) {
 diagramShell.addEventListener('click', (event) => {
   if (state.diagramPan.isDragging) {
     state.diagramPan.isDragging = false;
@@ -2555,28 +2769,31 @@ function endDiagramPointer(event) {
 
 diagramShell.addEventListener('pointerup', endDiagramPointer);
 diagramShell.addEventListener('pointercancel', endDiagramPointer);
+}
 
-intentForm.addEventListener('submit', async (event) => {
-  event.preventDefault();
-  if (!state.objectiveId) return;
-  try {
-    clearError();
-    state.lastSavedStep = currentFocusMode(currentObjective());
-    state.manualFocusMode = null;
-    await api(`/api/objectives/${encodeURIComponent(state.objectiveId)}/intent`, {
-      method: 'PUT',
-      body: JSON.stringify({
-        intent_summary: intentSummary.value,
-        success_definition: successDefinition.value,
-        non_negotiables: nonNegotiables.value.split('\\n'),
-        frustration_signals: frustrationSignals.value.split('\\n'),
-      }),
-    });
-    await loadWorkspace();
-  } catch (error) {
-    showError(error.message || 'Unable to save intent model');
-  }
-});
+if (intentForm) {
+  intentForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (!state.objectiveId) return;
+    try {
+      clearError();
+      state.lastSavedStep = currentFocusMode(currentObjective());
+      state.manualFocusMode = null;
+      await api(`/api/objectives/${encodeURIComponent(state.objectiveId)}/intent`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          intent_summary: intentSummary.value,
+          success_definition: successDefinition.value,
+          non_negotiables: nonNegotiables.value.split('\\n'),
+          frustration_signals: frustrationSignals.value.split('\\n'),
+        }),
+      });
+      await loadWorkspace();
+    } catch (error) {
+      showError(error.message || 'Unable to save intent model');
+    }
+  });
+}
 
 async function handleMermaidAction(action) {
   if (!action || !state.objectiveId) return;
@@ -2591,7 +2808,10 @@ async function handleMermaidAction(action) {
       state.showInlineReview = false;
       await loadWorkspace();
       if (state.view === 'control-flow') {
-        window.location.assign('/atomic');
+        const params = new URLSearchParams();
+        if (state.projectId) params.set('project_id', state.projectId);
+        if (state.objectiveId) params.set('objective_id', state.objectiveId);
+        window.location.assign(`/atomic?${params.toString()}`);
       }
       return;
     }
@@ -2634,72 +2854,87 @@ async function handleMermaidAction(action) {
     state.showInlineReview = false;
     await loadWorkspace();
     if (action === 'finished' && state.view === 'control-flow') {
-      window.location.assign('/atomic');
+      const params = new URLSearchParams();
+      if (state.projectId) params.set('project_id', state.projectId);
+      if (state.objectiveId) params.set('objective_id', state.objectiveId);
+      window.location.assign(`/atomic?${params.toString()}`);
     }
   } catch (error) {
     showError(error.message || 'Unable to update Mermaid review state');
   }
 }
 
-mermaidControls.addEventListener('click', async (event) => {
-  const action = event.target?.dataset?.mermaidAction;
-  await handleMermaidAction(action);
-});
+if (mermaidControls) {
+  mermaidControls.addEventListener('click', async (event) => {
+    const action = event.target?.dataset?.mermaidAction;
+    await handleMermaidAction(action);
+  });
+}
 
-proposalActions.addEventListener('click', async (event) => {
-  const action = event.target?.dataset?.mermaidAction;
-  if (action === 'review-run' || action === 'start-run') {
+if (proposalActions) {
+  proposalActions.addEventListener('click', async (event) => {
+    const action = event.target?.dataset?.mermaidAction;
+    if (action === 'review-run' || action === 'start-run') {
+      try {
+        await handleExecutionPrimaryAction();
+      } catch (error) {
+        state.suppressFocusAnimation = false;
+        showError(error.message || 'Unable to continue execution from the UI');
+      }
+      return;
+    }
+    await handleMermaidAction(action);
+  });
+}
+
+if (interrogationCompleteButton) {
+  interrogationCompleteButton.addEventListener('click', async () => {
+    if (!state.objectiveId) return;
+    try {
+      clearError();
+      await api(`/api/objectives/${encodeURIComponent(state.objectiveId)}/interrogation`, {
+        method: 'POST',
+      });
+      await loadWorkspace();
+    } catch (error) {
+      showError(error.message || 'Unable to complete interrogation review');
+    }
+  });
+}
+
+if (executionPrimaryButton) {
+  executionPrimaryButton.addEventListener('click', async () => {
     try {
       await handleExecutionPrimaryAction();
     } catch (error) {
       state.suppressFocusAnimation = false;
       showError(error.message || 'Unable to continue execution from the UI');
     }
-    return;
-  }
-  await handleMermaidAction(action);
-});
+  });
+}
 
-interrogationCompleteButton.addEventListener('click', async () => {
-  if (!state.objectiveId) return;
-  try {
-    clearError();
-    await api(`/api/objectives/${encodeURIComponent(state.objectiveId)}/interrogation`, {
-      method: 'POST',
-    });
-    await loadWorkspace();
-  } catch (error) {
-    showError(error.message || 'Unable to complete interrogation review');
-  }
-});
+if (conversationPrimaryButton) {
+  conversationPrimaryButton.addEventListener('click', async () => {
+    try {
+      await handleExecutionPrimaryAction();
+    } catch (error) {
+      state.suppressFocusAnimation = false;
+      showError(error.message || 'Unable to continue execution from the UI');
+    }
+  });
+}
 
-executionPrimaryButton.addEventListener('click', async () => {
-  try {
-    await handleExecutionPrimaryAction();
-  } catch (error) {
-    state.suppressFocusAnimation = false;
-    showError(error.message || 'Unable to continue execution from the UI');
-  }
-});
+if (inlineOutputToggle) {
+  inlineOutputToggle.addEventListener('click', () => {
+    const hidden = inlineOutputBody.hidden;
+    inlineOutputBody.hidden = !hidden;
+    inlineOutputTabs.hidden = !hidden;
+    inlineOutputToggle.textContent = hidden ? 'Hide raw evidence' : 'Show raw evidence';
+  });
+}
 
-conversationPrimaryButton.addEventListener('click', async () => {
-  try {
-    await handleExecutionPrimaryAction();
-  } catch (error) {
-    state.suppressFocusAnimation = false;
-    showError(error.message || 'Unable to continue execution from the UI');
-  }
-});
-
-inlineOutputToggle.addEventListener('click', () => {
-  const hidden = inlineOutputBody.hidden;
-  inlineOutputBody.hidden = !hidden;
-  inlineOutputTabs.hidden = !hidden;
-  inlineOutputToggle.textContent = hidden ? 'Hide raw evidence' : 'Show raw evidence';
-});
-
-projectSelect.addEventListener('change', async () => {
-  setProjectId(projectSelect.value);
+async function handleProjectSelection(projectId) {
+  setProjectId(projectId);
   setObjectiveId(null);
   state.taskId = null;
   state.runId = null;
@@ -2707,7 +2942,19 @@ projectSelect.addEventListener('change', async () => {
   state.showInlineReview = false;
   setSidebarCollapsed(true);
   await loadWorkspace();
-});
+}
+
+if (projectSelect) {
+  projectSelect.addEventListener('change', async () => {
+    await handleProjectSelection(projectSelect.value);
+  });
+}
+
+if (bannerProjectSelect) {
+  bannerProjectSelect.addEventListener('change', async () => {
+    await handleProjectSelection(bannerProjectSelect.value);
+  });
+}
 
 if (atomicObjectiveSelect) {
   atomicObjectiveSelect.addEventListener('change', async () => {
@@ -2770,6 +3017,35 @@ if (atomicList) {
   });
 }
 
+const supervisorStartBtn = document.getElementById('supervisor-start-btn');
+const supervisorStopBtn = document.getElementById('supervisor-stop-btn');
+
+if (supervisorStartBtn) {
+  supervisorStartBtn.addEventListener('click', async () => {
+    if (!state.projectId) return;
+    try {
+      clearError();
+      await api(`/api/projects/${encodeURIComponent(state.projectId)}/supervise`, { method: 'POST' });
+      await loadWorkspace();
+    } catch (error) {
+      showError(error.message || 'Unable to start harness');
+    }
+  });
+}
+
+if (supervisorStopBtn) {
+  supervisorStopBtn.addEventListener('click', async () => {
+    if (!state.projectId) return;
+    try {
+      clearError();
+      await api(`/api/projects/${encodeURIComponent(state.projectId)}/supervise/stop`, { method: 'POST' });
+      await loadWorkspace();
+    } catch (error) {
+      showError(error.message || 'Unable to stop harness');
+    }
+  });
+}
+
 function escapeHtml(value) {
   return value
     .replaceAll('&', '&amp;')
@@ -2788,12 +3064,14 @@ async function main() {
       renderMermaidMeta(currentObjective());
       if (state.view === 'atomic') {
         renderAtomicUnits();
+        renderSupervisorStatus();
       }
     }, 1000);
     window.setInterval(async () => {
       try {
         const objective = currentObjective();
-        if (state.view === 'atomic' && objective?.atomic_generation?.status === 'running') {
+        const supervisorActive = state.workspace?.supervisor?.running || state.workspace?.supervisor?.state === 'running';
+        if (state.view === 'atomic' && (objective?.atomic_generation?.status === 'running' || supervisorActive)) {
           await loadWorkspace();
         }
       } catch (_error) {
@@ -2875,6 +3153,10 @@ _FULL_UI_HTML = """
             <div>
               <div class="label">Mode</div>
               <div id="objective-banner-meta" class="body"></div>
+            </div>
+            <div class="atomic-objective-picker">
+              <div class="label">Project</div>
+              <select id="banner-project-select"></select>
             </div>
             <div class="atomic-objective-picker">
               <div class="label">Select objective</div>
@@ -3023,6 +3305,15 @@ _FULL_UI_HTML = """
               <button id="execution-primary-button" type="button">Start first slice now</button>
             </div>
           </section>
+          <section id="supervisor-panel" class="panel">
+            <h3>Harness Execution</h3>
+            <p id="supervisor-status" class="hint">Harness is idle.</p>
+            <div id="supervisor-meta" class="atomic-generation-meta"></div>
+            <div class="actions" style="margin-top:0.5rem">
+              <button id="supervisor-start-btn" type="button">Start harness</button>
+              <button id="supervisor-stop-btn" type="button" hidden>Stop harness</button>
+            </div>
+          </section>
           <section id="atomic-panel" class="panel" hidden>
             <h3 id="atomic-title">Atomic units of work</h3>
             <p id="atomic-summary" class="hint"></p>
@@ -3146,6 +3437,10 @@ class HarnessUIDataService:
             "diagram": {
                 "label": "Project control flow",
                 "mermaid": self._project_mermaid(project.id, tasks, latest_runs_by_task),
+            },
+            "supervisor": {
+                "running": _BACKGROUND_SUPERVISOR.is_running(project.id),
+                **_BACKGROUND_SUPERVISOR.status(project.id),
             },
         }
 
@@ -3702,6 +3997,8 @@ class HarnessUIDataService:
                 )
             )
             self.store.update_objective_status(objective.id, ObjectiveStatus.EXECUTING)
+            if self.auto_resume_atomic_generation:
+                _BACKGROUND_SUPERVISOR.start(objective.project_id, self.ctx.engine, watch=True)
         except Exception as exc:
             self.store.create_context_record(
                 ContextRecord(
@@ -3779,61 +4076,536 @@ class HarnessUIDataService:
         interrogation_service = getattr(self.ctx, "interrogation_service", None)
         llm_router = getattr(interrogation_service, "llm_router", None)
         if llm_router is not None and getattr(llm_router, "executors", {}):
-            run_dir = self.workspace_root / "ui_atomic" / objective_id / new_id("generation")
-            run_dir.mkdir(parents=True, exist_ok=True)
-            prompt = (
-                "You are deriving atomic units of work from an accepted Mermaid flowchart.\n"
-                "Return JSON only with one key: units.\n"
-                "units must be an array of 3 to 7 objects with keys: title, objective, rationale, strategy.\n"
-                "Each unit must be atomic, reviewable, and directly map to the accepted control flow.\n"
-                "Do not restate the whole objective. Do not include duplicate or overlapping units.\n\n"
-                f"Objective title: {objective.title}\n"
-                f"Objective summary: {objective.summary}\n"
-                f"Intent summary: {intent_model.intent_summary if intent_model else ''}\n"
-                f"Success definition: {intent_model.success_definition if intent_model else ''}\n"
-                f"Non-negotiables: {json.dumps(intent_model.non_negotiables if intent_model else [])}\n"
-                f"Accepted Mermaid:\n{mermaid.content if mermaid else ''}\n"
-                f"Recent operator comments: {json.dumps([record.content for record in comments], indent=2)}\n"
+            repo_context = self._gather_repo_context(objective.project_id)
+            units = self._iterative_atomic_decomposition(
+                objective, intent_model, mermaid, comments, llm_router, repo_context,
             )
-            task = Task(
-                id=new_id("ui_atomic_task"),
+            if units:
+                return units
+
+        return self._fallback_regex_units(objective, mermaid)
+
+    def _gather_repo_context(self, project_id: str) -> str:
+        """Gather repo file tree and key file snippets for grounding atomic decomposition."""
+        project = self.store.get_project(project_id)
+        source_root = None
+        if project and project.adapter_name == "current_repo_git_worktree":
+            configured = os.environ.get("ACCRUVIA_SOURCE_REPO_ROOT")
+            if configured:
+                source_root = Path(configured).resolve()
+            else:
+                try:
+                    result = subprocess.run(
+                        ["git", "rev-parse", "--show-toplevel"],
+                        check=True, capture_output=True, text=True,
+                    )
+                    source_root = Path(result.stdout.strip())
+                except Exception:
+                    pass
+        if source_root is None:
+            source_root = Path(__file__).resolve().parents[2]
+        if not source_root.is_dir():
+            return ""
+        parts: list[str] = []
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(source_root), "ls-files", "--cached", "--others", "--exclude-standard"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                files = result.stdout.strip().splitlines()[:200]
+                parts.append("Repository file tree (first 200 files):\n" + "\n".join(files))
+        except Exception:
+            pass
+        for key_file in ["README.md", "CLAUDE.md", "pyproject.toml", "package.json"]:
+            path = source_root / key_file
+            if path.is_file():
+                try:
+                    content = path.read_text(encoding="utf-8", errors="replace")[:3000]
+                    parts.append(f"\n--- {key_file} (first 3000 chars) ---\n{content}")
+                except Exception:
+                    pass
+        return "\n".join(parts)
+
+    def _iterative_atomic_decomposition(
+        self,
+        objective: Objective,
+        intent_model,
+        mermaid,
+        comments: list[ContextRecord],
+        llm_router,
+        repo_context: str,
+        hard_ceiling: int = 50,
+    ) -> list[dict[str, str]]:
+        """Multi-pass atomic decomposition: generate, critique, refine until the critique accepts."""
+        generation_id = new_id("atomic_gen")
+        run_dir = self.workspace_root / "ui_atomic" / objective.id / generation_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        diagram_version = int(getattr(mermaid, "version", 0))
+        task_stub = Task(
+            id=new_id("ui_atomic_task"),
+            project_id=objective.project_id,
+            objective_id=objective.id,
+            title=f"Generate atomic units for {objective.title}",
+            objective="Derive atomic units from accepted Mermaid.",
+            strategy="ui_atomic_generation",
+            status=TaskStatus.COMPLETED,
+        )
+
+        context_block = (
+            f"Objective title: {objective.title}\n"
+            f"Objective summary: {objective.summary}\n"
+            f"Intent summary: {intent_model.intent_summary if intent_model else ''}\n"
+            f"Success definition: {intent_model.success_definition if intent_model else ''}\n"
+            f"Non-negotiables: {json.dumps(intent_model.non_negotiables if intent_model else [])}\n"
+            f"Accepted Mermaid:\n{mermaid.content if mermaid else ''}\n"
+            f"Recent operator comments:\n{json.dumps([r.content for r in comments], indent=2)}\n"
+        )
+        if repo_context:
+            context_block += f"\n{repo_context}\n"
+
+        # Telemetry: log the full decomposition session start
+        self._log_decomposition_telemetry(objective, generation_id, diagram_version, "session_start", {
+            "hard_ceiling": hard_ceiling,
+            "context_block_length": len(context_block),
+            "repo_context_length": len(repo_context),
+            "comment_count": len(comments),
+            "has_intent_model": intent_model is not None,
+            "has_mermaid": mermaid is not None,
+        })
+
+        current_units: list[dict[str, str]] = []
+        round_num = 0
+        critique_accepted = False
+        coverage_accepted = False
+        consecutive_stalls = 0
+
+        while round_num < hard_ceiling:
+            round_num += 1
+            round_start = time.monotonic()
+
+            self._record_atomic_generation_progress(
+                objective, generation_id, diagram_version,
+                phase=f"round {round_num}: {'generate' if round_num == 1 else 'critique + coverage + refine'}",
+                content=f"Atomic decomposition round {round_num}.",
+            )
+
+            # ── Round 1: initial generation ──
+            if round_num == 1:
+                current_units = self._llm_generate_units(
+                    llm_router, task_stub, run_dir, context_block,
+                )
+                round_elapsed = time.monotonic() - round_start
+                self._log_decomposition_telemetry(objective, generation_id, diagram_version, "generate", {
+                    "round": round_num,
+                    "unit_count": len(current_units),
+                    "unit_titles": [u.get("title", "") for u in current_units],
+                    "elapsed_seconds": round(round_elapsed, 2),
+                })
+                self._write_round_artifact(run_dir, round_num, "generate", current_units)
+                if not current_units:
+                    self._log_decomposition_telemetry(objective, generation_id, diagram_version, "generate_empty", {
+                        "round": round_num,
+                        "note": "LLM returned zero units, falling back to regex",
+                    })
+                    break
+                continue
+
+            previous_titles = [u.get("title") for u in current_units]
+
+            # ── Step A: atomicity critique ──
+            critique_start = time.monotonic()
+            critique = self._llm_critique_units(
+                llm_router, task_stub, run_dir, context_block, current_units,
+            )
+            critique_elapsed = time.monotonic() - critique_start
+            critique_accepted = bool(critique.get("accepted", False))
+
+            self._log_decomposition_telemetry(objective, generation_id, diagram_version, "critique", {
+                "round": round_num,
+                "accepted": critique_accepted,
+                "problem_count": len(critique.get("problems", [])),
+                "problems": critique.get("problems", []),
+                "suggestion_count": len(critique.get("suggestions", [])),
+                "suggestions": critique.get("suggestions", []),
+                "units_needing_split": critique.get("units_needing_split", []),
+                "unit_count": len(current_units),
+                "elapsed_seconds": round(critique_elapsed, 2),
+            })
+            self._write_round_artifact(run_dir, round_num, "critique", critique)
+
+            # ── Step B: coverage / gap analysis ──
+            coverage_start = time.monotonic()
+            coverage = self._llm_coverage_analysis(
+                llm_router, task_stub, run_dir, context_block, current_units,
+            )
+            coverage_elapsed = time.monotonic() - coverage_start
+            coverage_accepted = bool(coverage.get("complete", False))
+
+            self._log_decomposition_telemetry(objective, generation_id, diagram_version, "coverage", {
+                "round": round_num,
+                "complete": coverage_accepted,
+                "gap_count": len(coverage.get("gaps", [])),
+                "gaps": coverage.get("gaps", []),
+                "uncovered_nodes": coverage.get("uncovered_mermaid_nodes", []),
+                "uncovered_intents": coverage.get("uncovered_intent_concerns", []),
+                "redundant_units": coverage.get("redundant_units", []),
+                "unit_count": len(current_units),
+                "elapsed_seconds": round(coverage_elapsed, 2),
+            })
+            self._write_round_artifact(run_dir, round_num, "coverage", coverage)
+
+            # ── Check: both pass → done ──
+            if critique_accepted and coverage_accepted:
+                self._record_atomic_generation_progress(
+                    objective, generation_id, diagram_version,
+                    phase=f"accepted at round {round_num}",
+                    content=f"Both critique and coverage passed after {round_num} rounds.",
+                )
+                self._log_decomposition_telemetry(objective, generation_id, diagram_version, "both_accepted", {
+                    "round": round_num,
+                    "unit_count": len(current_units),
+                })
+                break
+
+            # ── Step C: refine (fix critique issues + fill gaps) ──
+            refine_start = time.monotonic()
+            current_units = self._llm_refine_units(
+                llm_router, task_stub, run_dir, context_block, current_units,
+                critique, coverage,
+            )
+            refine_elapsed = time.monotonic() - refine_start
+
+            new_titles = [u.get("title") for u in current_units]
+            units_changed = new_titles != previous_titles
+            self._log_decomposition_telemetry(objective, generation_id, diagram_version, "refine", {
+                "round": round_num,
+                "unit_count_before": len(previous_titles),
+                "unit_count_after": len(current_units),
+                "units_changed": units_changed,
+                "unit_titles": new_titles,
+                "elapsed_seconds": round(refine_elapsed, 2),
+            })
+            self._write_round_artifact(run_dir, round_num, "refine", current_units)
+
+            round_elapsed = time.monotonic() - round_start
+            self._log_decomposition_telemetry(objective, generation_id, diagram_version, "round_complete", {
+                "round": round_num,
+                "total_round_seconds": round(round_elapsed, 2),
+                "unit_count": len(current_units),
+                "critique_accepted": critique_accepted,
+                "coverage_accepted": coverage_accepted,
+            })
+
+            # Stall detection: consecutive rounds with no change
+            if not units_changed:
+                consecutive_stalls += 1
+                self._log_decomposition_telemetry(objective, generation_id, diagram_version, "stall_detected", {
+                    "round": round_num,
+                    "consecutive_stalls": consecutive_stalls,
+                    "note": "Refinement produced identical unit titles.",
+                })
+                if consecutive_stalls >= 3:
+                    self._log_decomposition_telemetry(objective, generation_id, diagram_version, "stall_exit", {
+                        "round": round_num,
+                        "consecutive_stalls": consecutive_stalls,
+                        "note": "Three consecutive stalls. Accepting current state.",
+                    })
+                    break
+            else:
+                consecutive_stalls = 0
+
+        # Session summary telemetry
+        self._log_decomposition_telemetry(objective, generation_id, diagram_version, "session_end", {
+            "total_rounds": round_num,
+            "critique_accepted": critique_accepted,
+            "coverage_accepted": coverage_accepted,
+            "hit_ceiling": round_num >= hard_ceiling,
+            "stall_exit": consecutive_stalls >= 3,
+            "final_unit_count": len(current_units),
+            "final_unit_titles": [u.get("title", "") for u in current_units],
+        })
+
+        return current_units
+
+    def _log_decomposition_telemetry(
+        self, objective: Objective, generation_id: str, diagram_version: int,
+        event_type: str, payload: dict[str, object],
+    ) -> None:
+        """Write a context record for every decomposition event — verbose by design."""
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="atomic_decomposition_telemetry",
                 project_id=objective.project_id,
                 objective_id=objective.id,
-                title=f"Generate atomic units for {objective.title}",
-                objective="Derive atomic units from accepted Mermaid.",
-                strategy="ui_atomic_generation",
-                status=TaskStatus.COMPLETED,
+                visibility="operator_visible",
+                author_type="system",
+                content=f"Decomposition [{event_type}]: {json.dumps(payload, default=str)[:500]}",
+                metadata={
+                    "generation_id": generation_id,
+                    "diagram_version": diagram_version,
+                    "event_type": event_type,
+                    **{k: v for k, v in payload.items()},
+                },
             )
-            run = Run(
-                id=new_id("ui_atomic_run"),
-                task_id=task.id,
-                status=RunStatus.COMPLETED,
-                attempt=1,
-                summary=f"Atomic generation for {objective.id}",
-            )
-            try:
-                result, _backend = llm_router.execute(LLMInvocation(task=task, run=run, prompt=prompt, run_dir=run_dir))
-                parsed = json.loads(result.response_text.strip())
-                units_raw = list(parsed.get("units") or [])
-                units: list[dict[str, str]] = []
-                for item in units_raw:
-                    title = str(item.get("title") or "").strip()
-                    objective_text = str(item.get("objective") or "").strip()
-                    if not title or not objective_text:
-                        continue
-                    units.append(
-                        {
-                            "title": title,
-                            "objective": objective_text,
-                            "rationale": str(item.get("rationale") or "").strip(),
-                            "strategy": str(item.get("strategy") or "atomic_from_mermaid").strip() or "atomic_from_mermaid",
-                        }
-                    )
-                if units:
-                    return units
-            except Exception:
-                pass
+        )
 
+    def _write_round_artifact(
+        self, run_dir: Path, round_num: int, step: str, data: object,
+    ) -> None:
+        """Persist each round's output to disk for post-mortem forensics."""
+        artifact_path = run_dir / f"round_{round_num:03d}_{step}.json"
+        try:
+            artifact_path.write_text(
+                json.dumps(data, indent=2, default=str),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    def _llm_call(self, llm_router, task_stub: Task, run_dir: Path, prompt: str) -> str:
+        run = Run(
+            id=new_id("ui_atomic_run"),
+            task_id=task_stub.id,
+            status=RunStatus.COMPLETED,
+            attempt=1,
+            summary="Atomic generation LLM call",
+        )
+        result, _backend = llm_router.execute(
+            LLMInvocation(task=task_stub, run=run, prompt=prompt, run_dir=run_dir),
+        )
+        return result.response_text.strip()
+
+    def _llm_generate_units(
+        self, llm_router, task_stub: Task, run_dir: Path, context_block: str,
+    ) -> list[dict[str, str]]:
+        prompt = (
+            "You are decomposing a software objective into ATOMIC implementation units.\n\n"
+            "DEFINITION OF ATOMIC:\n"
+            "An atomic unit is the smallest possible unit of work. Ideally it touches a single\n"
+            "function. At most it touches one file or one tightly-coupled page of code. If a unit\n"
+            "requires changes to multiple unrelated functions or files, it is NOT atomic — split it.\n"
+            "Think: one function, one test, one reviewable diff.\n\n"
+            "Each unit must be specific enough that a developer can start coding immediately without\n"
+            "asking clarifying questions. Units must reference specific files, modules, or components\n"
+            "from the repository.\n\n"
+            "Rules:\n"
+            "- Return JSON only: {\"units\": [...]}\n"
+            "- Generate as many units as the objective requires. Do NOT cap or limit the count.\n"
+            "  A complex objective may need 20, 30, or 50+ units. That is correct.\n"
+            "- Each unit has keys: title, objective, rationale, strategy, files_involved\n"
+            "- title: short imperative phrase naming the exact function or class\n"
+            "  (e.g. 'Add retry counter to RunService.run_once' not 'Implement retry logic')\n"
+            "- objective: 2-4 sentences. Name the exact file, class, and function to modify or create.\n"
+            "  Describe the input/output contract and the acceptance test.\n"
+            "- rationale: why this is a separate unit (what breaks if merged with another)\n"
+            "- strategy: 'atomic_from_mermaid'\n"
+            "- files_involved: list of specific file paths this unit will touch (1-2 files max)\n"
+            "- Each unit must map to a node or edge in the accepted Mermaid flowchart\n"
+            "- Units must not overlap. Each file/function change belongs to exactly one unit.\n"
+            "- Order units by dependency: earlier units should not depend on later ones.\n"
+            "- Prefer MORE smaller units over FEWER larger ones. 5-12 tiny units is better than 3 big ones.\n\n"
+            f"{context_block}\n"
+        )
+        try:
+            raw = self._llm_call(llm_router, task_stub, run_dir, prompt)
+            return self._parse_units_json(raw)
+        except Exception:
+            return []
+
+    def _llm_critique_units(
+        self, llm_router, task_stub: Task, run_dir: Path,
+        context_block: str, units: list[dict[str, str]],
+    ) -> dict[str, object]:
+        units_json = json.dumps(units, indent=2)
+        prompt = (
+            "You are reviewing atomic implementation units for quality, specificity, and atomicity.\n\n"
+            "DEFINITION OF ATOMIC:\n"
+            "An atomic unit is the smallest possible unit of work — ideally a single function,\n"
+            "at most one file or one page of tightly-coupled code. If a unit touches multiple\n"
+            "unrelated functions or files, it is NOT atomic and must be split.\n\n"
+            "A unit is GOOD if:\n"
+            "- It names specific files, classes, and functions from the repository\n"
+            "- A developer can start coding from it without asking clarifying questions\n"
+            "- It touches at most 1-2 files and ideally one function\n"
+            "- Its acceptance criteria are concrete and testable\n\n"
+            "A unit is BAD if:\n"
+            "- It is vague or generic (e.g. 'implement the handler' without naming which file/function)\n"
+            "- It bundles multiple independent changes that could be separate units\n"
+            "- It overlaps with another unit\n"
+            "- It doesn't reference specific files/functions/classes from the repository\n\n"
+            "Return JSON only:\n"
+            "{\n"
+            "  \"accepted\": bool,\n"
+            "  \"problems\": [str],\n"
+            "  \"suggestions\": [str],\n"
+            "  \"units_needing_split\": [\n"
+            "    {\"unit_title\": str, \"reason\": str, \"suggested_splits\": [str]}\n"
+            "  ]\n"
+            "}\n"
+            "- accepted: true only if ALL units are specific, atomic, and actionable\n"
+            "- problems: list of specific issues with unit numbers\n"
+            "- suggestions: concrete improvements referencing actual repo files\n"
+            "- units_needing_split: units that bundle too much work and should become 2+ separate units.\n"
+            "  For each, give the title, why it needs splitting, and suggested split titles.\n\n"
+            f"Units to review:\n{units_json}\n\n"
+            f"Context:\n{context_block}\n"
+        )
+        try:
+            raw = self._llm_call(llm_router, task_stub, run_dir, prompt)
+            parsed = self._extract_json(raw)
+            return {
+                "accepted": bool(parsed.get("accepted", False)),
+                "problems": list(parsed.get("problems", [])),
+                "suggestions": list(parsed.get("suggestions", [])),
+                "units_needing_split": list(parsed.get("units_needing_split", [])),
+            }
+        except Exception:
+            return {"accepted": False, "problems": ["Failed to parse critique"], "suggestions": [], "units_needing_split": []}
+
+    def _llm_coverage_analysis(
+        self, llm_router, task_stub: Task, run_dir: Path,
+        context_block: str, units: list[dict[str, str]],
+    ) -> dict[str, object]:
+        """Check whether the task set fully covers the Mermaid diagram and intent model."""
+        units_json = json.dumps(units, indent=2)
+        prompt = (
+            "You are a red-team reviewer checking whether a set of implementation tasks\n"
+            "COMPLETELY covers the intent behind an objective.\n\n"
+            "Your job is adversarial: look for GAPS. Assume the developer will implement\n"
+            "exactly what the tasks say and nothing more. If the intent cannot be fully\n"
+            "accomplished because no task addresses a concern, that is a gap.\n\n"
+            "Specifically check:\n"
+            "1. MERMAID NODE COVERAGE: Every node and decision branch in the accepted Mermaid\n"
+            "   flowchart must be addressed by at least one task. List any uncovered nodes.\n"
+            "2. INTENT COVERAGE: The intent summary, success definition, and non-negotiables\n"
+            "   describe what the operator actually wants. If a concern from the intent is not\n"
+            "   addressed by any task, that is a gap.\n"
+            "3. EDGE CASES: Are there error paths, rollback scenarios, or boundary conditions\n"
+            "   in the Mermaid that no task handles?\n"
+            "4. INTEGRATION: Do the tasks collectively produce a working whole? Are there\n"
+            "   missing glue tasks (e.g. wiring a new function into an existing call site)?\n"
+            "5. REDUNDANCY: Are any tasks doing the same thing? Flag duplicates.\n\n"
+            "Return JSON only:\n"
+            "{\n"
+            "  \"complete\": bool,\n"
+            "  \"gaps\": [\n"
+            "    {\"description\": str, \"source\": str, \"suggested_task\": str}\n"
+            "  ],\n"
+            "  \"uncovered_mermaid_nodes\": [str],\n"
+            "  \"uncovered_intent_concerns\": [str],\n"
+            "  \"redundant_units\": [\n"
+            "    {\"units\": [str], \"reason\": str}\n"
+            "  ]\n"
+            "}\n"
+            "- complete: true only if there are ZERO gaps and ZERO uncovered nodes/concerns\n"
+            "- gaps: specific missing pieces. For each, describe what's missing, where in the\n"
+            "  Mermaid or intent it comes from (source), and suggest a task title to fill it.\n"
+            "- uncovered_mermaid_nodes: Mermaid node labels that no task addresses\n"
+            "- uncovered_intent_concerns: intent/success/non-negotiable items no task addresses\n"
+            "- redundant_units: groups of task titles that overlap\n\n"
+            f"Tasks to review:\n{units_json}\n\n"
+            f"Context:\n{context_block}\n"
+        )
+        try:
+            raw = self._llm_call(llm_router, task_stub, run_dir, prompt)
+            parsed = self._extract_json(raw)
+            return {
+                "complete": bool(parsed.get("complete", False)),
+                "gaps": list(parsed.get("gaps", [])),
+                "uncovered_mermaid_nodes": list(parsed.get("uncovered_mermaid_nodes", [])),
+                "uncovered_intent_concerns": list(parsed.get("uncovered_intent_concerns", [])),
+                "redundant_units": list(parsed.get("redundant_units", [])),
+            }
+        except Exception:
+            return {"complete": False, "gaps": [{"description": "Failed to parse coverage analysis", "source": "system", "suggested_task": ""}],
+                    "uncovered_mermaid_nodes": [], "uncovered_intent_concerns": [], "redundant_units": []}
+
+    def _llm_refine_units(
+        self, llm_router, task_stub: Task, run_dir: Path,
+        context_block: str, units: list[dict[str, str]],
+        critique: dict[str, object], coverage: dict[str, object],
+    ) -> list[dict[str, str]]:
+        units_json = json.dumps(units, indent=2)
+        problems = json.dumps(critique.get("problems", []), indent=2)
+        suggestions = json.dumps(critique.get("suggestions", []), indent=2)
+        splits = json.dumps(critique.get("units_needing_split", []), indent=2)
+        gaps = json.dumps(coverage.get("gaps", []), indent=2)
+        uncovered_nodes = json.dumps(coverage.get("uncovered_mermaid_nodes", []), indent=2)
+        uncovered_intents = json.dumps(coverage.get("uncovered_intent_concerns", []), indent=2)
+        redundant = json.dumps(coverage.get("redundant_units", []), indent=2)
+        prompt = (
+            "You are refining atomic implementation units based on TWO review passes:\n"
+            "an atomicity critique and a coverage/gap analysis.\n\n"
+            "DEFINITION OF ATOMIC:\n"
+            "The smallest possible unit of work — one function, one page of code, one reviewable diff.\n"
+            "If a unit is too broad, SPLIT it into multiple smaller units rather than making one unit do more.\n\n"
+            "You MUST do ALL of the following:\n"
+            "1. Fix every PROBLEM from the critique. Apply every SUGGESTION.\n"
+            "2. SPLIT every unit listed in units_needing_split into the suggested sub-units.\n"
+            "3. ADD new tasks to fill every GAP identified by coverage analysis.\n"
+            "4. ADD tasks for every uncovered Mermaid node and uncovered intent concern.\n"
+            "5. REMOVE or MERGE redundant units flagged by coverage.\n"
+            "6. Each unit must name the exact file, class, and function to modify or create.\n"
+            "7. Prefer more smaller units over fewer larger ones.\n\n"
+            "Return JSON only: {\"units\": [...]}\n"
+            "Same schema: title, objective, rationale, strategy, files_involved\n\n"
+            f"Current units:\n{units_json}\n\n"
+            "── ATOMICITY CRITIQUE ──\n"
+            f"Problems:\n{problems}\n\n"
+            f"Suggestions:\n{suggestions}\n\n"
+            f"Units needing split:\n{splits}\n\n"
+            "── COVERAGE / GAP ANALYSIS ──\n"
+            f"Gaps (missing tasks):\n{gaps}\n\n"
+            f"Uncovered Mermaid nodes:\n{uncovered_nodes}\n\n"
+            f"Uncovered intent concerns:\n{uncovered_intents}\n\n"
+            f"Redundant units:\n{redundant}\n\n"
+            f"Context:\n{context_block}\n"
+        )
+        try:
+            raw = self._llm_call(llm_router, task_stub, run_dir, prompt)
+            refined = self._parse_units_json(raw)
+            return refined if refined else units
+        except Exception:
+            return units
+
+    def _extract_json(self, raw: str) -> dict[str, object]:
+        """Extract a JSON object from LLM output, handling markdown fences."""
+        text = raw
+        if "```" in text:
+            text = text.split("```json")[-1].split("```")[0] if "```json" in text else text.split("```")[1].split("```")[0]
+        return json.loads(text.strip())
+
+    def _parse_units_json(self, raw: str) -> list[dict[str, str]]:
+        parsed = self._extract_json(raw)
+        units_raw = list(parsed.get("units") or [])
+        units: list[dict[str, str]] = []
+        for item in units_raw:
+            title = str(item.get("title") or "").strip()
+            objective_text = str(item.get("objective") or "").strip()
+            if not title or not objective_text:
+                continue
+            files_involved = item.get("files_involved") or []
+            if isinstance(files_involved, list):
+                files_str = ", ".join(str(f) for f in files_involved)
+            else:
+                files_str = str(files_involved)
+            full_objective = objective_text
+            if files_str:
+                full_objective += f"\n\nFiles involved: {files_str}"
+            units.append(
+                {
+                    "title": title,
+                    "objective": full_objective,
+                    "rationale": str(item.get("rationale") or "").strip(),
+                    "strategy": str(item.get("strategy") or "atomic_from_mermaid").strip() or "atomic_from_mermaid",
+                }
+            )
+        return units
+
+    def _fallback_regex_units(self, objective: Objective, mermaid) -> list[dict[str, str]]:
+        """Regex fallback when no LLM is available."""
         labels = re.findall(r"\[(.*?)\]", mermaid.content if mermaid else "")
         units: list[dict[str, str]] = []
         seen: set[str] = set()
@@ -3860,8 +4632,6 @@ class HarnessUIDataService:
                     "strategy": "atomic_from_mermaid",
                 }
             )
-            if len(units) >= 6:
-                break
         if not units:
             units.append(
                 {
@@ -3879,6 +4649,29 @@ class HarnessUIDataService:
             raise ValueError(f"Unknown task: {task_id}")
         run = self.ctx.engine.run_once(task.id)
         return {"run": serialize_dataclass(run)}
+
+    def start_supervisor(self, project_id: str) -> dict[str, object]:
+        project = self.store.get_project(project_id)
+        if project is None:
+            raise ValueError(f"Unknown project: {project_id}")
+        started = _BACKGROUND_SUPERVISOR.start(project_id, self.ctx.engine, watch=True)
+        return {
+            "started": started,
+            "supervisor": _BACKGROUND_SUPERVISOR.status(project_id),
+        }
+
+    def stop_supervisor(self, project_id: str) -> dict[str, object]:
+        stopped = _BACKGROUND_SUPERVISOR.stop(project_id)
+        return {
+            "stopped": stopped,
+            "supervisor": _BACKGROUND_SUPERVISOR.status(project_id),
+        }
+
+    def supervisor_status(self, project_id: str) -> dict[str, object]:
+        return {
+            "running": _BACKGROUND_SUPERVISOR.is_running(project_id),
+            "supervisor": _BACKGROUND_SUPERVISOR.status(project_id),
+        }
 
     def run_cli_command(self, command: str) -> dict[str, object]:
         cleaned = command.strip()
@@ -5353,6 +6146,10 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
             run_id = parsed.path[len("/api/runs/") : -len("/cli-output")].strip("/")
             self._dispatch_json(lambda: self.data_service.run_cli_output(run_id))
             return
+        if parsed.path.startswith("/api/projects/") and parsed.path.endswith("/supervisor"):
+            project_id = parsed.path[len("/api/projects/") : -len("/supervisor")].strip("/")
+            self._send_json(self.data_service.supervisor_status(project_id))
+            return
         self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:  # noqa: N802
@@ -5421,6 +6218,19 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
             self._dispatch_json(
                 lambda: self.data_service.run_task(task_id),
                 status=HTTPStatus.CREATED,
+            )
+            return
+        if parsed.path.startswith("/api/projects/") and parsed.path.endswith("/supervise"):
+            project_id = parsed.path[len("/api/projects/") : -len("/supervise")].strip("/")
+            self._dispatch_json(
+                lambda: self.data_service.start_supervisor(project_id),
+                status=HTTPStatus.CREATED,
+            )
+            return
+        if parsed.path.startswith("/api/projects/") and parsed.path.endswith("/supervise/stop"):
+            project_id = parsed.path[len("/api/projects/") : -len("/supervise/stop")].strip("/")
+            self._dispatch_json(
+                lambda: self.data_service.stop_supervisor(project_id),
             )
             return
         if parsed.path == "/api/cli/command":
@@ -5543,12 +6353,27 @@ def start_ui_server(ctx, *, host: str, port: int, open_browser: bool, project_re
     print("Press Ctrl+C to stop.", flush=True)
     if open_browser:
         print(f"Refresh your existing browser tab at {url}", flush=True)
+    _auto_start_supervisors(data_service, ctx)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        for project in data_service.store.list_projects():
+            _BACKGROUND_SUPERVISOR.stop(project.id)
         server.server_close()
+
+
+def _auto_start_supervisors(data_service: HarnessUIDataService, ctx) -> None:
+    """Start background supervisors for any project with pending/active tasks."""
+    for project in data_service.store.list_projects():
+        metrics = data_service.store.metrics_snapshot(project.id)
+        pending = int(metrics.get("tasks_by_status", {}).get("pending", 0))
+        active = int(metrics.get("tasks_by_status", {}).get("active", 0))
+        if pending + active > 0:
+            started = _BACKGROUND_SUPERVISOR.start(project.id, ctx.engine, watch=True)
+            if started:
+                print(f"  Auto-started harness for {project.name} ({pending} pending, {active} active)", flush=True)
 
 
 def _resolve_ui_port(host: str, preferred_port: int) -> int:
