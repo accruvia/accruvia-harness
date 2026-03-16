@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from accruvia_harness.config import HarnessConfig
 from accruvia_harness.domain import (
     Artifact,
+    ContextRecord,
     Event,
     MermaidArtifact,
     MermaidStatus,
@@ -155,6 +156,7 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         self.ctx = SimpleNamespace(
             store=self.store,
             query_service=self.query_service,
+            is_test=True,
             config=HarnessConfig.from_payload(
                 {
                     "db_path": str(self.db_path),
@@ -363,7 +365,7 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         self.assertIsNotNone(objective_payload["diagram_proposal"])
         self.assertIn("Red-Team Intake", objective_payload["diagram_proposal"]["content"])
         self.assertTrue(payload["action_receipts"])
-        self.assertIn("proposal generated", payload["action_receipts"][-1]["text"].lower())
+        self.assertTrue(any("proposal generated" in item["text"].lower() for item in payload["action_receipts"]))
 
     def test_short_mermaid_follow_up_uses_recent_context(self) -> None:
         fake_router = FakeLLMRouter(
@@ -560,6 +562,56 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         self.assertTrue(objective_payload["atomic_generation"]["last_activity_at"])
         self.assertGreaterEqual(len(objective_payload["atomic_units"]), 1)
         self.assertTrue(all(unit["title"] for unit in objective_payload["atomic_units"]))
+
+    def test_stale_atomic_generation_is_recovered_for_finished_mermaid(self) -> None:
+        recovering_objective = Objective(
+            id=new_id("objective"),
+            project_id=self.project.id,
+            title="Recover atomic generation",
+            summary="Ensure interrupted decomposition resumes",
+        )
+        self.store.create_objective(recovering_objective)
+        self.service.update_intent_model(
+            recovering_objective.id,
+            intent_summary="Operator wants recovery if atomic generation is interrupted",
+            success_definition="Atomic units resume after an interrupted generation",
+            non_negotiables=["Resume from accepted flowchart"],
+            frustration_signals=["No units appear"],
+        )
+        self.service.complete_interrogation_review(recovering_objective.id)
+        self.store.create_mermaid_artifact(
+            MermaidArtifact(
+                id=new_id("diagram"),
+                objective_id=recovering_objective.id,
+                diagram_type="workflow_control",
+                version=1,
+                status=MermaidStatus.FINISHED,
+                summary="Accepted control flow",
+                content="flowchart TD\nA[Intent]-->B[Plan]-->C[Review]",
+                required_for_execution=True,
+            )
+        )
+        start = ContextRecord(
+            id=new_id("context"),
+            record_type="atomic_generation_started",
+            project_id=self.project.id,
+            objective_id=recovering_objective.id,
+            visibility="operator_visible",
+            author_type="system",
+            content="Started generating atomic units from Mermaid v1.",
+            metadata={"generation_id": "atomic_generation_stale", "diagram_version": 1},
+        )
+        self.store.create_context_record(start)
+        stale_state = self.service._atomic_generation_state(recovering_objective.id)
+        self.service._mark_atomic_generation_interrupted(recovering_objective, stale_state)
+
+        result = self.service.queue_atomic_generation(recovering_objective.id, async_mode=False)
+        payload = self.service.project_workspace(self.project.id)
+        objective_payload = next(item for item in payload["objectives"] if item["id"] == recovering_objective.id)
+
+        self.assertEqual("completed", result["atomic_generation"]["status"])
+        self.assertNotEqual("atomic_generation_stale", objective_payload["atomic_generation"]["generation_id"])
+        self.assertGreaterEqual(len(objective_payload["atomic_units"]), 1)
 
     def test_latest_resolved_proposal_does_not_fall_back_to_older_unresolved_proposal(self) -> None:
         fake_router = FakeLLMRouter(

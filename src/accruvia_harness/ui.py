@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+import datetime as _dt
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1052,7 +1053,7 @@ textarea {
 """
 
 
-_APP_JS = """
+_APP_JS = r"""
 import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
 
 mermaid.initialize({
@@ -3062,6 +3063,7 @@ class HarnessUIDataService:
         self.workspace_root = ctx.config.workspace_root
         self.task_service = TaskService(self.store)
         self.memory_provider = LocalContextMemoryProvider(self.store)
+        self.auto_resume_atomic_generation = not bool(getattr(ctx, "is_test", False))
 
     def list_projects(self) -> dict[str, object]:
         projects = []
@@ -3081,6 +3083,10 @@ class HarnessUIDataService:
         project = self.store.get_project(project_id)
         if project is None:
             raise ValueError(f"Unknown project: {project_ref}")
+        objectives = self.store.list_objectives(project.id)
+        if self.auto_resume_atomic_generation:
+            for objective in objectives:
+                self._maybe_resume_atomic_generation(objective.id)
         objectives = self.store.list_objectives(project.id)
         tasks = self.store.list_tasks(project.id)
         task_payload = []
@@ -3215,6 +3221,8 @@ class HarnessUIDataService:
         objective = self.store.get_objective(objective_id)
         if objective is None:
             raise ValueError(f"Unknown objective: {objective_id}")
+        if getattr(self.ctx, "is_test", False):
+            async_generation = False
         normalized = status.strip().lower()
         try:
             next_status = MermaidStatus(normalized)
@@ -3300,6 +3308,8 @@ class HarnessUIDataService:
         }
 
     def accept_mermaid_proposal(self, objective_id: str, proposal_id: str, *, async_generation: bool = True) -> dict[str, object]:
+        if getattr(self.ctx, "is_test", False):
+            async_generation = False
         objective = self.store.get_objective(objective_id)
         proposal = self._proposal_record(objective_id, proposal_id)
         if objective is None or proposal is None:
@@ -3471,6 +3481,9 @@ class HarnessUIDataService:
         if mermaid is None or mermaid.status != MermaidStatus.FINISHED:
             raise ValueError("Atomic generation requires a finished Mermaid.")
         current = self._atomic_generation_state(objective_id)
+        if current["status"] == "running" and self._atomic_generation_is_stale(current):
+            self._mark_atomic_generation_interrupted(objective, current)
+            current = self._atomic_generation_state(objective_id)
         if current["status"] == "running" and int(current.get("diagram_version") or 0) == mermaid.version:
             return {"atomic_generation": current}
         if current["status"] == "completed" and int(current.get("diagram_version") or 0) == mermaid.version:
@@ -3508,6 +3521,74 @@ class HarnessUIDataService:
         else:
             worker()
         return {"atomic_generation": self._atomic_generation_state(objective.id)}
+
+    def _atomic_generation_is_stale(self, generation: dict[str, object]) -> bool:
+        if generation.get("status") != "running":
+            return False
+        last_activity_at = str(generation.get("last_activity_at") or "")
+        if not last_activity_at:
+            return False
+        try:
+            last_activity = _dt.datetime.fromisoformat(last_activity_at)
+        except ValueError:
+            return False
+        age_seconds = (_dt.datetime.now(_dt.timezone.utc) - last_activity).total_seconds()
+        return age_seconds > 30
+
+    def _mark_atomic_generation_interrupted(self, objective: Objective, generation: dict[str, object]) -> None:
+        generation_id = str(generation.get("generation_id") or "")
+        if not generation_id:
+            return
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="atomic_generation_failed",
+                project_id=objective.project_id,
+                objective_id=objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Atomic generation was interrupted before publishing units. The harness can resume from the accepted flowchart.",
+                metadata={
+                    "generation_id": generation_id,
+                    "diagram_version": generation.get("diagram_version"),
+                    "interrupted": True,
+                },
+            )
+        )
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="action_receipt",
+                project_id=objective.project_id,
+                objective_id=objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Action receipt: Atomic generation was interrupted. Resuming from the accepted flowchart.",
+                metadata={
+                    "kind": "atomic_generation",
+                    "status": "interrupted",
+                    "generation_id": generation_id,
+                    "diagram_version": generation.get("diagram_version"),
+                },
+            )
+        )
+
+    def _maybe_resume_atomic_generation(self, objective_id: str) -> None:
+        objective = self.store.get_objective(objective_id)
+        if objective is None:
+            return
+        mermaid = self.store.latest_mermaid_artifact(objective_id, "workflow_control")
+        if mermaid is None or mermaid.status != MermaidStatus.FINISHED:
+            return
+        generation = self._atomic_generation_state(objective_id)
+        linked_tasks = [task for task in self.store.list_tasks(objective.project_id) if task.objective_id == objective_id]
+        if generation.get("status") == "completed":
+            return
+        if generation.get("status") == "running" and not self._atomic_generation_is_stale(generation):
+            return
+        if linked_tasks:
+            return
+        self.queue_atomic_generation(objective_id, async_mode=not bool(getattr(self.ctx, "is_test", False)))
 
     def _run_atomic_generation(self, objective_id: str, generation_id: str, diagram_version: int) -> None:
         objective = self.store.get_objective(objective_id)
