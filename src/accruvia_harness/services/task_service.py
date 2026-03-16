@@ -97,6 +97,7 @@ class TaskService:
         source_run_id: str | None,
         external_ref_type: str | None,
         external_ref_id: str | None,
+        objective_id: str | None = None,
         external_ref_metadata: dict[str, object] | None = None,
         validation_profile: str = "generic",
         validation_mode: str | None = None,
@@ -106,10 +107,17 @@ class TaskService:
         max_branches: int = 1,
         required_artifacts: list[str] | None = None,
     ) -> Task:
+        if objective_id is not None:
+            linked_objective = self.store.get_objective(objective_id)
+            if linked_objective is None:
+                raise ValueError(f"Unknown objective: {objective_id}")
+            if linked_objective.project_id != project_id:
+                raise ValueError(f"Objective {objective_id} does not belong to project {project_id}")
         return self.create_task(
             Task(
                 id=new_id("task"),
                 project_id=project_id,
+                objective_id=objective_id,
                 title=title,
                 objective=objective,
                 priority=priority,
@@ -145,6 +153,7 @@ class TaskService:
             raise ValueError(f"Unknown parent task: {parent_task_id}")
         task = self.create_task_with_policy(
             project_id=parent.project_id,
+            objective_id=parent.objective_id,
             title=title,
             objective=objective,
             priority=priority if priority is not None else parent.priority,

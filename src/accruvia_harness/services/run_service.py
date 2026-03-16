@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from ..context_control import objective_execution_gate
 from ..domain import (
     Artifact,
     Decision,
@@ -53,6 +54,12 @@ class RunService:
         task = self.store.get_task(task_id)
         if task is None:
             raise ValueError(f"Unknown task: {task_id}")
+        if task.objective_id:
+            gate = objective_execution_gate(self.store, task.objective_id)
+            if not gate.ready:
+                blocking = next((item for item in gate.gate_checks if not item["ok"]), None)
+                detail = str(blocking["detail"]) if blocking is not None else "Objective execution gate is not satisfied."
+                raise ValueError(detail)
         if task.status in (TaskStatus.COMPLETED, TaskStatus.FAILED):
             raise ValueError(f"Task {task_id} is already {task.status.value} — cannot run again")
         project = self.store.get_project(task.project_id)

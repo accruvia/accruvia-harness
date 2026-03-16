@@ -8,7 +8,20 @@ import unittest
 from pathlib import Path
 
 from accruvia_harness.config import HarnessConfig
-from accruvia_harness.domain import DecisionAction, Project, PromotionMode, RepoProvider, TaskStatus, WorkspacePolicy, new_id
+from accruvia_harness.domain import (
+    ContextRecord,
+    DecisionAction,
+    IntentModel,
+    MermaidArtifact,
+    MermaidStatus,
+    Objective,
+    Project,
+    PromotionMode,
+    RepoProvider,
+    TaskStatus,
+    WorkspacePolicy,
+    new_id,
+)
 from accruvia_harness.engine import HarnessEngine
 from accruvia_harness.llm import build_llm_router
 from accruvia_harness.policy import DecideResult, WorkResult
@@ -353,6 +366,64 @@ class HarnessEngineTests(unittest.TestCase):
         self.assertIn("workspace_metadata", artifact_paths)
         self.assertTrue(Path(artifact_paths["workspace_metadata"]).exists())
         self.assertIn("project_workspace_prepared", [event.event_type for event in events])
+
+    def test_run_once_blocks_objective_linked_task_when_execution_gate_is_not_ready(self) -> None:
+        objective = Objective(
+            id=new_id("objective"),
+            project_id=self.project_id,
+            title="Clarify workflow",
+            summary="Need process control first",
+        )
+        self.store.create_objective(objective)
+        task = self.engine.create_task_with_policy(
+            project_id=self.project_id,
+            objective_id=objective.id,
+            title="Blocked task",
+            objective="Should not execute yet",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+        )
+
+        with self.assertRaisesRegex(ValueError, "Intent model is required before execution"):
+            self.engine.run_once(task.id)
+
+        self.store.create_intent_model(
+            IntentModel(
+                id=new_id("intent"),
+                objective_id=objective.id,
+                version=1,
+                intent_summary="Map the desired operator flow",
+            )
+        )
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="interrogation_completed",
+                project_id=self.project_id,
+                objective_id=objective.id,
+                content="Interrogation complete",
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "A required Mermaid artifact must exist before execution"):
+            self.engine.run_once(task.id)
+
+        self.store.create_mermaid_artifact(
+            MermaidArtifact(
+                id=new_id("diagram"),
+                objective_id=objective.id,
+                diagram_type="workflow_control",
+                version=1,
+                status=MermaidStatus.PAUSED,
+                summary="Paused flow",
+                content="flowchart TD\nA-->B",
+                required_for_execution=True,
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "Execution is blocked until the current Mermaid is finished"):
+            self.engine.run_once(task.id)
 
     def test_project_adapter_can_supply_real_worker_override(self) -> None:
         registry = ProjectAdapterRegistry()

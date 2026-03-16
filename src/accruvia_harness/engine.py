@@ -179,6 +179,7 @@ class HarnessEngine:
     def create_task(self, project_id: str, title: str, objective: str):
         return self.tasks.create_task_with_policy(
             project_id=project_id,
+            objective_id=None,
             title=title,
             objective=objective,
             priority=100,
@@ -203,6 +204,7 @@ class HarnessEngine:
         source_run_id: str | None,
         external_ref_type: str | None,
         external_ref_id: str | None,
+        objective_id: str | None = None,
         validation_profile: str = "generic",
         validation_mode: str | None = None,
         scope: dict[str, object] | None = None,
@@ -213,6 +215,7 @@ class HarnessEngine:
     ):
         return self.tasks.create_task_with_policy(
             project_id=project_id,
+            objective_id=objective_id,
             title=title,
             objective=objective,
             priority=priority,

@@ -4,7 +4,23 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from accruvia_harness.domain import Event, Evaluation, EvaluationVerdict, Project, Run, RunStatus, Task, TaskStatus, new_id
+from accruvia_harness.domain import (
+    ContextRecord,
+    Event,
+    Evaluation,
+    EvaluationVerdict,
+    IntentModel,
+    MermaidArtifact,
+    MermaidStatus,
+    Objective,
+    ObjectiveStatus,
+    Project,
+    Run,
+    RunStatus,
+    Task,
+    TaskStatus,
+    new_id,
+)
 from accruvia_harness.store import SQLiteHarnessStore
 
 
@@ -24,10 +40,19 @@ class SQLiteHarnessStoreTests(unittest.TestCase):
             adapter_name="generic",
         )
         self.store.create_project(project)
+        linked_objective = Objective(
+            id=new_id("objective"),
+            project_id=project.id,
+            title="Linked objective",
+            summary="Persist task linkage",
+            status=ObjectiveStatus.OPEN,
+        )
+        self.store.create_objective(linked_objective)
 
         task = Task(
             id=new_id("task"),
             project_id=project.id,
+            objective_id=linked_objective.id,
             title="Runner task",
             objective="Exercise policy persistence",
             priority=250,
@@ -49,6 +74,7 @@ class SQLiteHarnessStoreTests(unittest.TestCase):
         self.assertIsNotNone(loaded)
         assert loaded is not None
         self.assertEqual(250, loaded.priority)
+        self.assertEqual(linked_objective.id, loaded.objective_id)
         self.assertEqual("task_parent", loaded.parent_task_id)
         self.assertEqual("run_source", loaded.source_run_id)
         self.assertEqual("gitlab_issue", loaded.external_ref_type)
@@ -89,6 +115,57 @@ class SQLiteHarnessStoreTests(unittest.TestCase):
         self.assertEqual(1, len(loaded))
         self.assertEqual("task_created", loaded[0].event_type)
         self.assertEqual(["plan", "report"], loaded[0].payload["required_artifacts"])
+
+    def test_objective_context_round_trip(self) -> None:
+        project = Project(id=new_id("project"), name="context-project", description="Context")
+        self.store.create_project(project)
+        objective = Objective(
+            id=new_id("objective"),
+            project_id=project.id,
+            title="Clarify workflow",
+            summary="Need better intent capture",
+        )
+        self.store.create_objective(objective)
+        intent = IntentModel(
+            id=new_id("intent"),
+            objective_id=objective.id,
+            version=1,
+            intent_summary="Capture operator intent before execution",
+            non_negotiables=["No silent drift"],
+            frustration_signals=["Repeated restarts"],
+        )
+        self.store.create_intent_model(intent)
+        mermaid = MermaidArtifact(
+            id=new_id("diagram"),
+            objective_id=objective.id,
+            diagram_type="workflow_control",
+            version=1,
+            status=MermaidStatus.FINISHED,
+            summary="Accepted flow",
+            content="flowchart TD\nA-->B",
+            required_for_execution=True,
+        )
+        self.store.create_mermaid_artifact(mermaid)
+        record = ContextRecord(
+            id=new_id("context"),
+            record_type="operator_comment",
+            project_id=project.id,
+            objective_id=objective.id,
+            author_type="operator",
+            author_id="shaun",
+            content="This still feels wrong",
+        )
+        self.store.create_context_record(record)
+
+        loaded_objective = self.store.get_objective(objective.id)
+        loaded_intent = self.store.latest_intent_model(objective.id)
+        loaded_mermaid = self.store.latest_mermaid_artifact(objective.id)
+        loaded_records = self.store.list_context_records(objective_id=objective.id)
+
+        self.assertEqual("Clarify workflow", loaded_objective.title if loaded_objective else None)
+        self.assertEqual("Capture operator intent before execution", loaded_intent.intent_summary if loaded_intent else None)
+        self.assertEqual(MermaidStatus.FINISHED, loaded_mermaid.status if loaded_mermaid else None)
+        self.assertEqual("This still feels wrong", loaded_records[0].content)
 
     def test_task_leases_are_acquired_and_released(self) -> None:
         project = Project(id=new_id("project"), name="accruvia", description="Harness work")

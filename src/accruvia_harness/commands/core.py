@@ -14,6 +14,7 @@ import time
 from ..config import HarnessConfig, default_config_path, write_persisted_config
 from ..domain import Event, PromotionMode, RepoProvider, WorkspacePolicy, new_id, serialize_dataclass
 from ..onboarding import detect_llm_command_candidates, doctor_report, probe_llm_command, prompt_text
+from ..ui import start_ui_server
 from .common import CLIContext, emit, ensure_llm_ready
 
 
@@ -708,6 +709,15 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
         else:
             print(_doctor_text(payload))
         return True
+    if args.command == "ui":
+        start_ui_server(
+            ctx,
+            host=args.host,
+            port=args.port,
+            open_browser=not args.no_open_browser,
+            project_ref=args.project_id,
+        )
+        return True
     if args.command == "setup":
         _emit_setup_result(_run_setup(args, config))
         return True
@@ -799,6 +809,7 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
         scope = _task_scope_from_args(args)
         task = engine.create_task_with_policy(
             project_id=args.project_id,
+            objective_id=args.objective_id,
             title=args.title,
             objective=args.objective,
             priority=args.priority,

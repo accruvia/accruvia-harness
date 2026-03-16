@@ -84,16 +84,17 @@ class ProjectTaskStoreMixin:
             connection.execute(
                 """
                 INSERT INTO tasks (
-                    id, project_id, title, objective, priority, parent_task_id, source_run_id,
+                    id, project_id, objective_id, title, objective, priority, parent_task_id, source_run_id,
                     external_ref_type, external_ref_id, external_ref_metadata_json,
                     validation_profile, validation_mode, scope_json, strategy, max_attempts, max_branches,
                     required_artifacts_json, status, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task.id,
                     task.project_id,
+                    task.objective_id,
                     task.title,
                     task.objective,
                     task.priority,
@@ -118,6 +119,7 @@ class ProjectTaskStoreMixin:
     def list_tasks(self, project_id: str | None = None) -> list[Task]:
         query = """
             SELECT id, project_id, title, objective, priority, parent_task_id, source_run_id,
+                   objective_id,
                    external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile, validation_mode, scope_json,
                    strategy, max_attempts, max_branches, required_artifacts_json, status, created_at, updated_at
             FROM tasks
@@ -135,7 +137,7 @@ class ProjectTaskStoreMixin:
         with self.connect() as connection:
             row = connection.execute(
                 """
-                SELECT id, project_id, title, objective, priority, parent_task_id, source_run_id,
+                SELECT id, project_id, objective_id, title, objective, priority, parent_task_id, source_run_id,
                        external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile, validation_mode, scope_json,
                        strategy, max_attempts, max_branches, required_artifacts_json, status, created_at, updated_at
                 FROM tasks WHERE id = ?
@@ -148,7 +150,7 @@ class ProjectTaskStoreMixin:
         with self.connect() as connection:
             row = connection.execute(
                 """
-                SELECT id, project_id, title, objective, priority, parent_task_id, source_run_id,
+                SELECT id, project_id, objective_id, title, objective, priority, parent_task_id, source_run_id,
                        external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile, validation_mode, scope_json,
                        strategy, max_attempts, max_branches, required_artifacts_json, status, created_at, updated_at
                 FROM tasks
@@ -280,10 +282,10 @@ class ProjectTaskStoreMixin:
         with self.connect() as connection:
             row = connection.execute(
                 """
-                SELECT id, project_id, title, objective, priority, parent_task_id, source_run_id,
-                       external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile, validation_mode, scope_json,
-                       strategy, max_attempts, max_branches, required_artifacts_json, status, created_at, updated_at
-                FROM tasks
+            SELECT id, project_id, objective_id, title, objective, priority, parent_task_id, source_run_id,
+                   external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile, validation_mode, scope_json,
+                   strategy, max_attempts, max_branches, required_artifacts_json, status, created_at, updated_at
+            FROM tasks
                 WHERE parent_task_id = ? AND source_run_id = ?
                 ORDER BY created_at
                 LIMIT 1

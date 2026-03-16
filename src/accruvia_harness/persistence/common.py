@@ -6,11 +6,17 @@ import sqlite3
 from datetime import UTC, datetime
 
 from ..domain import (
+    ContextRecord,
     Decision,
     DecisionAction,
     EvaluationVerdict,
     Event,
     Evaluation,
+    IntentModel,
+    MermaidArtifact,
+    MermaidStatus,
+    Objective,
+    ObjectiveStatus,
     PromotionRecord,
     PromotionStatus,
     Project,
@@ -49,6 +55,7 @@ def task_from_row(row: sqlite3.Row) -> Task:
     return Task(
         id=row["id"],
         project_id=row["project_id"],
+        objective_id=row["objective_id"] if "objective_id" in row.keys() else None,
         title=row["title"],
         objective=row["objective"],
         priority=int(row["priority"]),
@@ -112,6 +119,64 @@ def task_lease_from_row(row: sqlite3.Row) -> TaskLease:
     )
 
 
+def objective_from_row(row: sqlite3.Row) -> Objective:
+    return Objective(
+        id=row["id"],
+        project_id=row["project_id"],
+        title=row["title"],
+        summary=row["summary"],
+        priority=int(row["priority"]),
+        status=ObjectiveStatus(row["status"]),
+        created_at=parse_dt(row["created_at"]),
+        updated_at=parse_dt(row["updated_at"]),
+    )
+
+
+def intent_model_from_row(row: sqlite3.Row) -> IntentModel:
+    return IntentModel(
+        id=row["id"],
+        objective_id=row["objective_id"],
+        version=int(row["version"]),
+        intent_summary=row["intent_summary"],
+        success_definition=row["success_definition"],
+        non_negotiables=_safe_json_loads(row["non_negotiables_json"], [], column="intent_models.non_negotiables_json"),
+        preferred_tradeoffs=_safe_json_loads(
+            row["preferred_tradeoffs_json"], [], column="intent_models.preferred_tradeoffs_json"
+        ),
+        unacceptable_outcomes=_safe_json_loads(
+            row["unacceptable_outcomes_json"], [], column="intent_models.unacceptable_outcomes_json"
+        ),
+        known_unknowns=_safe_json_loads(row["known_unknowns_json"], [], column="intent_models.known_unknowns_json"),
+        operator_examples=_safe_json_loads(
+            row["operator_examples_json"], [], column="intent_models.operator_examples_json"
+        ),
+        frustration_signals=_safe_json_loads(
+            row["frustration_signals_json"], [], column="intent_models.frustration_signals_json"
+        ),
+        sop_constraints=_safe_json_loads(row["sop_constraints_json"], [], column="intent_models.sop_constraints_json"),
+        current_confidence=float(row["current_confidence"]),
+        author_type=row["author_type"],
+        created_at=parse_dt(row["created_at"]),
+    )
+
+
+def mermaid_artifact_from_row(row: sqlite3.Row) -> MermaidArtifact:
+    return MermaidArtifact(
+        id=row["id"],
+        objective_id=row["objective_id"],
+        diagram_type=row["diagram_type"],
+        version=int(row["version"]),
+        status=MermaidStatus(row["status"]),
+        summary=row["summary"],
+        content=row["content"],
+        required_for_execution=bool(int(row["required_for_execution"])),
+        blocking_reason=row["blocking_reason"],
+        author_type=row["author_type"],
+        created_at=parse_dt(row["created_at"]),
+        updated_at=parse_dt(row["updated_at"]),
+    )
+
+
 def evaluation_from_row(row: sqlite3.Row) -> Evaluation:
     return Evaluation(
         id=row["id"],
@@ -153,5 +218,22 @@ def promotion_from_row(row: sqlite3.Row) -> PromotionRecord:
         status=PromotionStatus(row["status"]),
         summary=row["summary"],
         details=_safe_json_loads(row["details_json"], {}, column="promotions.details_json"),
+        created_at=parse_dt(row["created_at"]),
+    )
+
+
+def context_record_from_row(row: sqlite3.Row) -> ContextRecord:
+    return ContextRecord(
+        id=row["id"],
+        record_type=row["record_type"],
+        project_id=row["project_id"],
+        objective_id=row["objective_id"],
+        task_id=row["task_id"],
+        run_id=row["run_id"],
+        visibility=row["visibility"],
+        author_type=row["author_type"],
+        author_id=row["author_id"],
+        content=row["content"],
+        metadata=_safe_json_loads(row["metadata_json"], {}, column="context_records.metadata_json"),
         created_at=parse_dt(row["created_at"]),
     )

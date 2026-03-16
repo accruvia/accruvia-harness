@@ -56,6 +56,7 @@ Build a harness that can:
    - timers, retries, backoff, lease management
    - queue selection and parallel coordination
    - evolve toward `Split-Phase Execution` so candidate generation, deterministic validation, and decisioning can be scheduled independently
+   - introduce first-class `objective -> plan -> task -> run` lineage so atomic planning can be validated before execution
 
 3. Worker runtime
    - adapters for code-generation workers
@@ -78,6 +79,12 @@ Build a harness that can:
    - productivity metrics
    - throughput, latency, retry, and failure-pattern analysis
    - optional OpenClaw observer surface
+
+Reference:
+- `specs/product-architecture.md`
+- `specs/context-control-model.md`
+- `specs/objective-ui-redesign.md`
+- `specs/ui-responder-context.md`
 
 ## Build Phases
 
@@ -133,6 +140,10 @@ Exit criteria:
 
 Reference:
 - `specs/split-phase-execution.md`
+- `specs/atomic-plan-schema.md`
+- `specs/atomic-plan-validator.md`
+- `specs/plan-refinement-loop.md`
+- `specs/plan-to-task-mapping.md`
 
 ### Phase 3: Real Worker Abstractions
 

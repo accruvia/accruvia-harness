@@ -10,12 +10,18 @@ from .domain import Run, RunStatus, TaskStatus
 
 logger = logging.getLogger(__name__)
 from .migrations import MIGRATIONS, apply_migrations
+from .persistence.context_records import ContextRecordsStoreMixin
 from .persistence.events_metrics import EventsMetricsStoreMixin
 from .persistence.project_task import ProjectTaskStoreMixin
 from .persistence.run_records import RunRecordsStoreMixin
 
 
-class SQLiteHarnessStore(ProjectTaskStoreMixin, RunRecordsStoreMixin, EventsMetricsStoreMixin):
+class SQLiteHarnessStore(
+    ProjectTaskStoreMixin,
+    RunRecordsStoreMixin,
+    EventsMetricsStoreMixin,
+    ContextRecordsStoreMixin,
+):
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)

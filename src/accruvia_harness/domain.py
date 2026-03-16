@@ -86,6 +86,23 @@ class RepoProvider(StrEnum):
     GITLAB = "gitlab"
 
 
+class ObjectiveStatus(StrEnum):
+    OPEN = "open"
+    INVESTIGATING = "investigating"
+    PLANNING = "planning"
+    EXECUTING = "executing"
+    PAUSED = "paused"
+    RESOLVED = "resolved"
+
+
+class MermaidStatus(StrEnum):
+    DRAFT = "draft"
+    IN_REVIEW = "in_review"
+    PAUSED = "paused"
+    FINISHED = "finished"
+    SUPERSEDED = "superseded"
+
+
 @dataclass(slots=True)
 class Project:
     id: str
@@ -107,6 +124,7 @@ class Task:
     project_id: str
     title: str
     objective: str
+    objective_id: str | None = None
     priority: int = 100
     parent_task_id: str | None = None
     source_run_id: str | None = None
@@ -121,6 +139,53 @@ class Task:
     max_branches: int = 1
     required_artifacts: list[str] = field(default_factory=lambda: ["plan", "report"])
     status: TaskStatus = TaskStatus.PENDING
+    created_at: datetime = field(default_factory=utc_now)
+    updated_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
+class Objective:
+    id: str
+    project_id: str
+    title: str
+    summary: str
+    priority: int = 100
+    status: ObjectiveStatus = ObjectiveStatus.OPEN
+    created_at: datetime = field(default_factory=utc_now)
+    updated_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
+class IntentModel:
+    id: str
+    objective_id: str
+    version: int
+    intent_summary: str
+    success_definition: str = ""
+    non_negotiables: list[str] = field(default_factory=list)
+    preferred_tradeoffs: list[str] = field(default_factory=list)
+    unacceptable_outcomes: list[str] = field(default_factory=list)
+    known_unknowns: list[str] = field(default_factory=list)
+    operator_examples: list[str] = field(default_factory=list)
+    frustration_signals: list[str] = field(default_factory=list)
+    sop_constraints: list[str] = field(default_factory=list)
+    current_confidence: float = 0.0
+    author_type: str = "operator"
+    created_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
+class MermaidArtifact:
+    id: str
+    objective_id: str
+    diagram_type: str
+    version: int
+    status: MermaidStatus
+    summary: str
+    content: str
+    required_for_execution: bool = False
+    blocking_reason: str = ""
+    author_type: str = "operator"
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)
 
@@ -193,6 +258,22 @@ class PromotionRecord:
     status: PromotionStatus
     summary: str
     details: dict[str, Any]
+    created_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
+class ContextRecord:
+    id: str
+    record_type: str
+    project_id: str
+    objective_id: str | None = None
+    task_id: str | None = None
+    run_id: str | None = None
+    visibility: str = "model_visible"
+    author_type: str = "system"
+    author_id: str = ""
+    content: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=utc_now)
 
 

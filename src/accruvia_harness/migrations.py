@@ -189,6 +189,93 @@ MIGRATIONS: list[Migration] = [
           AND strategy IN ('executor_repair', 'timeout_decomposition', 'bounded_unblocker', 'deterministic_reliability');
         """,
     ),
+    Migration(
+        version=11,
+        name="context_manager",
+        sql="""
+        CREATE TABLE IF NOT EXISTS objectives (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            priority INTEGER NOT NULL DEFAULT 100,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS intent_models (
+            id TEXT PRIMARY KEY,
+            objective_id TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            intent_summary TEXT NOT NULL,
+            success_definition TEXT NOT NULL DEFAULT '',
+            non_negotiables_json TEXT NOT NULL DEFAULT '[]',
+            preferred_tradeoffs_json TEXT NOT NULL DEFAULT '[]',
+            unacceptable_outcomes_json TEXT NOT NULL DEFAULT '[]',
+            known_unknowns_json TEXT NOT NULL DEFAULT '[]',
+            operator_examples_json TEXT NOT NULL DEFAULT '[]',
+            frustration_signals_json TEXT NOT NULL DEFAULT '[]',
+            sop_constraints_json TEXT NOT NULL DEFAULT '[]',
+            current_confidence REAL NOT NULL DEFAULT 0.0,
+            author_type TEXT NOT NULL DEFAULT 'operator',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(objective_id) REFERENCES objectives(id)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_intent_models_objective_version
+        ON intent_models(objective_id, version);
+
+        CREATE TABLE IF NOT EXISTS mermaid_artifacts (
+            id TEXT PRIMARY KEY,
+            objective_id TEXT NOT NULL,
+            diagram_type TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            content TEXT NOT NULL,
+            required_for_execution INTEGER NOT NULL DEFAULT 0,
+            blocking_reason TEXT NOT NULL DEFAULT '',
+            author_type TEXT NOT NULL DEFAULT 'operator',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(objective_id) REFERENCES objectives(id)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_mermaid_artifacts_objective_type_version
+        ON mermaid_artifacts(objective_id, diagram_type, version);
+
+        CREATE TABLE IF NOT EXISTS context_records (
+            id TEXT PRIMARY KEY,
+            record_type TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            objective_id TEXT,
+            task_id TEXT,
+            run_id TEXT,
+            visibility TEXT NOT NULL DEFAULT 'model_visible',
+            author_type TEXT NOT NULL DEFAULT 'system',
+            author_id TEXT NOT NULL DEFAULT '',
+            content TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id),
+            FOREIGN KEY(objective_id) REFERENCES objectives(id),
+            FOREIGN KEY(task_id) REFERENCES tasks(id),
+            FOREIGN KEY(run_id) REFERENCES runs(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_context_records_project_created
+        ON context_records(project_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_context_records_objective_created
+        ON context_records(objective_id, created_at);
+        """,
+    ),
+    Migration(
+        version=12,
+        name="task_objective_linkage",
+        sql="""
+        ALTER TABLE tasks ADD COLUMN objective_id TEXT REFERENCES objectives(id);
+        CREATE INDEX IF NOT EXISTS idx_tasks_objective_id ON tasks(objective_id);
+        """,
+    ),
 ]
 
 
