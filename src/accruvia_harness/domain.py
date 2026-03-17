@@ -115,7 +115,7 @@ class Project:
     repo_provider: RepoProvider | None = None
     repo_name: str | None = None
     base_branch: str = "main"
-    max_concurrent_tasks: int = 0
+    max_concurrent_tasks: int = 1
     created_at: datetime = field(default_factory=utc_now)
 
 
