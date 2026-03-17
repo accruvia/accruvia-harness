@@ -199,7 +199,7 @@ class CommandLLMExecutor:
         stdout_path.write_text(completed.stdout, encoding="utf-8")
         stderr_path.write_text(completed.stderr, encoding="utf-8")
 
-        if response_path.exists():
+        if response_path.exists() and response_path.stat().st_size > 0:
             response_text = response_path.read_text(encoding="utf-8")
         else:
             response_text = completed.stdout
