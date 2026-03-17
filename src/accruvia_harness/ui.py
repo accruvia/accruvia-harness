@@ -7226,6 +7226,9 @@ def start_ui_server(ctx, *, host: str, port: int, open_browser: bool, project_re
 
 def _auto_start_supervisors(data_service: HarnessUIDataService, ctx) -> None:
     """Start background supervisors for projects with pending tasks, and resume stalled atomic generation."""
+    recovered = data_service.store.recover_stale_state()
+    if any(int(count or 0) > 0 for count in recovered.values()):
+        print(f"  Recovered stale state: {recovered}", flush=True)
     for project in data_service.store.list_projects():
         # Resume any stalled atomic generation
         for objective in data_service.store.list_objectives(project.id):
