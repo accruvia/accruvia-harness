@@ -377,13 +377,17 @@ body[data-view="harness"] #execution-panel { display: none !important; }
 body[data-view="harness"] #supervisor-panel { display: none !important; }
 body[data-view="harness"] #atomic-panel { display: none !important; }
 body[data-view="harness"] #cli-panel { display: none !important; }
-body[data-view="harness"] .content { max-width: none; margin: 0; padding: 0; }
-body[data-view="harness"] .grid { display: block; padding: 0; gap: 0; }
+body[data-view="harness"] .content { max-width: 100%; width: 100%; margin: 0; padding: 0; }
+body[data-view="harness"] .grid { display: block; padding: 0; gap: 0; max-width: 100%; width: 100%; }
+body[data-view="harness"] .app-shell { display: block; }
 
 body[data-view="harness"] #harness-dashboard {
-  display: block !important;
+  display: grid !important;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: auto auto 1fr;
+  gap: 1.25rem;
   width: 100%;
-  max-width: none;
+  max-width: 100%;
   border: none;
   border-radius: 0;
   box-shadow: none;
@@ -391,6 +395,24 @@ body[data-view="harness"] #harness-dashboard {
   padding: 1.5rem 2rem;
   background: var(--bg);
   min-height: 100vh;
+}
+
+body[data-view="harness"] #harness-dashboard .harness-global-status {
+  grid-column: 1 / -1;
+}
+
+body[data-view="harness"] #harness-dashboard .harness-llm-health {
+  grid-column: 1 / -1;
+}
+
+body[data-view="harness"] #harness-dashboard .harness-project-cards {
+  grid-column: 1;
+  grid-row: 3;
+}
+
+body[data-view="harness"] #harness-dashboard .harness-event-feed {
+  grid-column: 2;
+  grid-row: 3;
 }
 
 .harness-global-status {
@@ -463,9 +485,8 @@ body[data-view="harness"] #harness-dashboard {
 
 .harness-project-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
-  gap: 1rem;
-  margin-bottom: 1.5rem;
+  grid-template-columns: 1fr;
+  gap: 0.75rem;
 }
 
 .harness-project-card {
@@ -4865,7 +4886,7 @@ class HarnessUIDataService:
         result, _backend = llm_router.execute(
             LLMInvocation(
                 task=task_stub, run=run, prompt=prompt, run_dir=run_dir,
-                timeout_seconds_override=1200,  # 20 min — atomic decomposition prompts are large
+                timeout_seconds_override=None,  # Use the global timeout policy
             ),
         )
         return result.response_text.strip()

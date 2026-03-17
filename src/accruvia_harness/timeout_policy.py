@@ -42,34 +42,9 @@ class ExecutionTimeoutPolicy:
         return self.multiplier
 
     def timeout_seconds(self, validation_profile: str, worker_backend: str) -> int:
-        if self.telemetry is None:
-            return self.min_seconds
-        spans = self.telemetry.load_spans()
-        durations = [
-            float(item["duration_ms"]) / 1000.0
-            for item in spans
-            if item.get("name") == "work"
-            and item.get("attributes", {}).get("validation_profile") == validation_profile
-            and "duration_ms" in item
-            and not item.get("attributes", {}).get("error")
-        ]
-        if not durations:
-            durations = [
-                float(item["duration_ms"]) / 1000.0
-                for item in spans
-                if item.get("name") == "work"
-                and item.get("attributes", {}).get("worker_backend") == worker_backend
-                and "duration_ms" in item
-                and not item.get("attributes", {}).get("error")
-            ]
-        if not durations:
-            return self.min_seconds
-        ema = durations[0]
-        for sample in durations[1:]:
-            ema = self.alpha * sample + (1.0 - self.alpha) * ema
-        multiplier = self._aggressive_multiplier(validation_profile, worker_backend)
-        timeout = int(max(self.min_seconds, min(self.max_seconds, ema * multiplier)))
-        return timeout
+        # Use max_seconds directly. The adaptive EMA was training on fast failures
+        # and ratcheting timeouts down to values too low for real LLM work.
+        return self.max_seconds
 
     def describe(self, validation_profile: str, worker_backend: str) -> dict[str, Any]:
         timeout_seconds = self.timeout_seconds(validation_profile, worker_backend)

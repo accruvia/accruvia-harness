@@ -159,8 +159,8 @@ class HarnessConfig:
     timeout_multiplier: float = 2.5
     heartbeat_timeout_seconds: int = 1800
     heartbeat_failure_escalation_threshold: int = 3
-    task_run_timeout_seconds: int = 1200
-    task_llm_timeout_seconds: int = 420
+    task_run_timeout_seconds: int = 1800
+    task_llm_timeout_seconds: int = 1800
     task_validation_timeout_seconds: int = 300
     task_validation_startup_timeout_seconds: int = 30
     task_compile_timeout_seconds: int = 120
