@@ -244,9 +244,22 @@ class RunService:
                 "detail": "Executing worker command and waiting for durable artifacts.",
             }
         )
+        _validating_announced = False
+
+        def _phase_aware_progress(event):
+            nonlocal _validating_announced
+            if (
+                not _validating_announced
+                and isinstance(event, dict)
+                and event.get("worker_phase") == "validating"
+            ):
+                _validating_announced = True
+                self.store.mark_run(run, RunStatus.VALIDATING, "Compiling and running focused tests.")
+            progress(event)
+
         set_progress_callback = getattr(worker, "set_progress_callback", None)
         if callable(set_progress_callback):
-            set_progress_callback(progress)
+            set_progress_callback(_phase_aware_progress)
         try:
             if self.telemetry is not None:
                 with self.telemetry.timed(

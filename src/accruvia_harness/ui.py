@@ -2747,7 +2747,7 @@ function renderAtomicUnits() {
             <div class="card-content">
               <div class="card-header">
                 <div class="title">${escapeHtml(task.title)}</div>
-                <span class="status-pill ${status}">${escapeHtml(status)}</span>
+                <span class="status-pill ${status}">${status === 'active' && latestRun ? escapeHtml(latestRun.status) : escapeHtml(status)}</span>
                 ${attemptText ? `<span class="attempt-count">${attemptText}</span>` : ''}
                 ${isActiveTimer ? `<span class="runtime active-timer" data-started="${latestRun.started_at}"></span>` : ''}
                 ${runtimeText ? `<span class="runtime">${runtimeText}</span>` : ''}

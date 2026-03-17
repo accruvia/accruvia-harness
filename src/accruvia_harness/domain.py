@@ -41,6 +41,7 @@ def validate_task_transition(current: TaskStatus, target: TaskStatus) -> None:
 class RunStatus(StrEnum):
     PLANNING = "planning"
     WORKING = "working"
+    VALIDATING = "validating"
     ANALYZING = "analyzing"
     DECIDING = "deciding"
     COMPLETED = "completed"

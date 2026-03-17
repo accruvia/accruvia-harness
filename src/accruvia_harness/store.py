@@ -67,6 +67,7 @@ class SQLiteHarnessStore(
             in_progress_statuses = [
                 RunStatus.PLANNING.value,
                 RunStatus.WORKING.value,
+                RunStatus.VALIDATING.value,
                 RunStatus.ANALYZING.value,
                 RunStatus.DECIDING.value,
             ]

@@ -226,6 +226,13 @@ class SupervisorService:
                 idle_cycles = 0
                 continue
 
+            # Periodically recover stale leases even when busy, so active
+            # tasks with expired leases don't accumulate behind the queue.
+            if len(processed_task_ids) % 5 == 0 and processed_task_ids:
+                recovered = self.store.recover_stale_state()
+                if any(int(count or 0) > 0 for count in recovered.values()):
+                    progress({"type": "stale_state_recovered", "recovered": recovered})
+
             result = self.queue.process_next_task(
                 project_id=project_id,
                 worker_id=worker_id,

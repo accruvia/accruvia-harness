@@ -426,6 +426,9 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
             encoding="utf-8",
         )
         return 1
+    # Write phase marker so the supervisor can report VALIDATING status.
+    (run_dir / "phase.txt").write_text("validating", encoding="utf-8")
+
     if python_files:
         try:
             compile_completed = _run_bounded_process(

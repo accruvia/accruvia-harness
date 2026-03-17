@@ -222,6 +222,8 @@ class CommandWorker:
                         latest_artifact_age_seconds is not None
                         and latest_artifact_age_seconds >= self.stale_after_seconds
                     )
+                    phase_file = run_dir / "phase.txt"
+                    worker_phase = phase_file.read_text(encoding="utf-8").strip() if phase_file.exists() else "working"
                     self._emit_progress(
                         {
                             "type": "worker_status",
@@ -234,6 +236,7 @@ class CommandWorker:
                             "latest_artifact": latest_artifact,
                             "latest_artifact_age_seconds": latest_artifact_age_seconds,
                             "stale": stale,
+                            "worker_phase": worker_phase,
                         }
                     )
                     if stale:
