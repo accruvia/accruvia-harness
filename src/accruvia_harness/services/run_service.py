@@ -80,6 +80,17 @@ class RunService:
         progress = progress_callback or (lambda _event: None)
 
         self.store.update_task_status(task.id, TaskStatus.ACTIVE)
+        try:
+            return self._run_once_inner(task, project, progress)
+        except Exception:
+            # Guarantee: if _run_once_inner fails for any reason, the task
+            # goes back to PENDING so it doesn't stay ACTIVE forever.
+            current = self.store.get_task(task.id)
+            if current is not None and current.status == TaskStatus.ACTIVE:
+                self.store.update_task_status(task.id, TaskStatus.PENDING)
+            raise
+
+    def _run_once_inner(self, task, project, progress) -> Run:
         self.store.create_event(
             Event(id=new_id("event"), entity_type="task", entity_id=task.id, event_type="task_activated", payload={})
         )
