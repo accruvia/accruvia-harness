@@ -676,7 +676,7 @@ class WorkerTests(unittest.TestCase):
         router = build_llm_router(config)
         executor, _ = router.resolve()
 
-        self.assertEqual(4096, executor.resource_policy.memory_limit_mb)
+        self.assertIsNone(executor.resource_policy.memory_limit_mb)
 
     def test_agent_worker_uses_same_higher_memory_floor_for_llm_clis(self) -> None:
         config = HarnessConfig(
@@ -703,7 +703,7 @@ class WorkerTests(unittest.TestCase):
         worker = build_worker_from_config(config)
 
         self.assertIsInstance(worker, AgentCommandWorker)
-        self.assertEqual(4096, worker.resource_policy.memory_limit_mb)
+        self.assertIsNone(worker.resource_policy.memory_limit_mb)
 
     def test_resolve_memory_limit_disables_cap_when_large_heap_floor_exceeds_machine_budget(self) -> None:
         with patch("accruvia_harness.resource_limits._total_memory_mb", return_value=3072):
