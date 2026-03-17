@@ -5338,16 +5338,25 @@ class HarnessUIDataService:
         if task.status.value != "failed":
             raise ValueError(f"Task is {task.status.value}, not failed")
         self.store.update_task_status(task_id, TaskStatus.PENDING)
+        _BACKGROUND_SUPERVISOR.start(task.project_id, self.ctx.engine, watch=True)
         return {"task_id": task_id, "status": "pending"}
 
     def retry_all_failed(self, project_id: str) -> dict[str, object]:
+        # Check LLM availability via the central gate before requeuing.
+        gate = self.ctx.engine.llm_gate
+        gate.reset()  # Force a fresh probe.
+        if not gate.is_available():
+            raise ValueError(f"No LLM backends available. Probes: {gate.last_probe_results}")
+
         tasks = self.store.list_tasks(project_id=project_id)
         reset_count = 0
         for task in tasks:
             if task.status == TaskStatus.FAILED:
                 self.store.update_task_status(task.id, TaskStatus.PENDING)
                 reset_count += 1
-        return {"reset_count": reset_count}
+        if reset_count > 0:
+            _BACKGROUND_SUPERVISOR.start(project_id, self.ctx.engine, watch=True)
+        return {"reset_count": reset_count, "probe_results": gate.last_probe_results}
 
     def start_supervisor(self, project_id: str) -> dict[str, object]:
         project = self.store.get_project(project_id)
@@ -7262,6 +7271,19 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
 
 
 def start_ui_server(ctx, *, host: str, port: int, open_browser: bool, project_ref: str | None = None) -> None:
+    # Wire the LLM availability gate into the engine if config is available.
+    if hasattr(ctx, "config") and ctx.config is not None:
+        from .llm_availability import LLMAvailabilityGate
+        from .onboarding import probe_llm_command
+        gate = LLMAvailabilityGate(
+            probe_fn=probe_llm_command,
+            commands=[
+                ("codex", ctx.config.llm_codex_command or ""),
+                ("claude", ctx.config.llm_claude_command or ""),
+                ("command", ctx.config.llm_command or ""),
+            ],
+        )
+        ctx.engine.set_llm_gate(gate)
     data_service = HarnessUIDataService(ctx)
     resolved_port = _resolve_ui_port(host, port)
     event_bus = _EventBus()

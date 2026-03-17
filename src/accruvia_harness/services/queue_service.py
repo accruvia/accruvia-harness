@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+from ..llm_availability import LLMAvailabilityGate
 from ..store import SQLiteHarnessStore
 from .run_service import RunService
 
 
 class QueueService:
-    def __init__(self, store: SQLiteHarnessStore, runner: RunService) -> None:
+    def __init__(
+        self,
+        store: SQLiteHarnessStore,
+        runner: RunService,
+        llm_gate: LLMAvailabilityGate | None = None,
+    ) -> None:
         self.store = store
         self.runner = runner
+        self.llm_gate = llm_gate
 
     def process_next_task(
         self,
@@ -17,6 +24,15 @@ class QueueService:
         exclude_task_ids: set[str] | None = None,
         progress_callback=None,
     ) -> dict[str, object] | None:
+        progress = progress_callback or (lambda _event: None)
+        # Gate: refuse to start work if no LLM backend is reachable.
+        if self.llm_gate is not None and not self.llm_gate.is_available():
+            progress({
+                "type": "backends_unavailable",
+                "message": f"No LLM backends reachable. Retry in {self.llm_gate.seconds_until_retry:.0f}s.",
+                "probe_results": self.llm_gate.last_probe_results,
+            })
+            return None
         task = self.store.acquire_task_lease(
             worker_id,
             lease_seconds,

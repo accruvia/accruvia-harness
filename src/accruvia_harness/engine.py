@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .cognition import CognitionAdapterRegistry, build_cognition_registry
+from .llm_availability import LLMAvailabilityGate
 from .interrogation import HarnessQueryService
 from .github import GitHubCLI
 from .gitlab import GitLabCLI
@@ -89,6 +90,7 @@ class HarnessEngine:
             project_adapter_registry=self.project_adapter_registry,
             telemetry=self.telemetry,
         )
+        self.llm_gate: LLMAvailabilityGate | None = None
         self.queue = QueueService(self.store, self.runs)
         self.github_tasks = GitHubTaskService(self.tasks, self.store, state_policy=self.issue_state_policy)
         self.gitlab_tasks = GitLabTaskService(self.tasks, self.store, state_policy=self.issue_state_policy)
@@ -126,6 +128,10 @@ class HarnessEngine:
     def set_llm_router(self, llm_router: LLMRouter | None) -> None:
         self.llm_router = llm_router
         self._build_services()
+
+    def set_llm_gate(self, gate: LLMAvailabilityGate) -> None:
+        self.llm_gate = gate
+        self.queue.llm_gate = gate
 
     def create_project(
         self,

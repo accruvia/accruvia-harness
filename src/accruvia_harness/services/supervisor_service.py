@@ -88,16 +88,7 @@ class SupervisorService:
         iterations = 0
         attempted_task_ids: set[str] = set()
         should_stop = stop_requested or (lambda: False)
-        _user_progress = progress_callback or (lambda _event: None)
-        _credits_frozen_until: float = 0.0
-        _credits_backoff_seconds: float = 30.0
-
-        def progress(event):
-            nonlocal _credits_frozen_until, _credits_backoff_seconds
-            if isinstance(event, dict) and event.get("type") == "backends_unavailable":
-                _credits_frozen_until = self._monotonic() + _credits_backoff_seconds
-                _credits_backoff_seconds = min(_credits_backoff_seconds * 2, 3600)
-            _user_progress(event)
+        progress = progress_callback or (lambda _event: None)
 
         while True:
             if should_stop():
@@ -235,19 +226,6 @@ class SupervisorService:
                 idle_cycles = 0
                 continue
 
-            # If all LLM backends are out of credits, freeze with exponential backoff.
-            if self._monotonic() < _credits_frozen_until:
-                remaining = _credits_frozen_until - self._monotonic()
-                progress({
-                    "type": "credits_backoff",
-                    "remaining_seconds": round(remaining),
-                    "backoff_seconds": round(_credits_backoff_seconds),
-                })
-                self._sleep(min(remaining, 30))
-                slept_seconds += min(remaining, 30)
-                sleep_count += 1
-                continue
-
             # Periodically recover stale leases even when busy, so active
             # tasks with expired leases don't accumulate behind the queue.
             if len(processed_task_ids) % 5 == 0 and processed_task_ids:
@@ -265,10 +243,6 @@ class SupervisorService:
             if result is not None:
                 processed_task_ids.append(result["task"].id)
                 attempted_task_ids.add(result["task"].id)
-                # Reset credit backoff when a task completes (credits are available again).
-                if result["task"].status.value == "completed":
-                    _credits_backoff_seconds = 30.0
-                    _credits_frozen_until = 0.0
                 progress(
                     {
                         "type": "task_processed",
