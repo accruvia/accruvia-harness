@@ -841,6 +841,30 @@ body[data-view="atomic"] .conversation-form {
   font-variant-numeric: tabular-nums;
 }
 
+.atomic-card .retry-btn {
+  font-size: 0.75rem;
+  padding: 0.2rem 0.6rem;
+  margin-top: 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--fg);
+  cursor: pointer;
+}
+.atomic-card .retry-btn:hover { background: var(--hover); }
+
+.retry-all-btn {
+  font-size: 0.75rem;
+  padding: 0.2rem 0.6rem;
+  margin-left: auto;
+  border: 1px solid #c0504d;
+  border-radius: 4px;
+  background: transparent;
+  color: #c0504d;
+  cursor: pointer;
+}
+.retry-all-btn:hover { background: #fff1f1; }
+
 .atomic-card .meta {
   color: var(--muted);
   font-size: 0.82rem;
@@ -2711,6 +2735,7 @@ function renderAtomicUnits() {
   const tabsHtml = `
     <div class="atomic-status-tabs" id="atomic-tabs">
       ${tabs.map((tab) => `<button class="${tab === state.atomicTab ? 'active' : ''}" data-tab="${tab}">${tabLabels[tab]}<span class="tab-count">${counts[tab] || 0}</span></button>`).join('')}
+      ${counts.failed > 0 ? `<button class="retry-all-btn" id="retry-all-failed">Retry all failed</button>` : ''}
     </div>
   `;
   const progressBar = `
@@ -2754,6 +2779,7 @@ function renderAtomicUnits() {
               </div>
               <div class="meta">${escapeHtml(task.objective || '').split('\\n')[0]}</div>
               <div class="body">${escapeHtml(task.objective || 'No task objective recorded.')}${task.rationale ? `\n\nWhy this unit exists: ${escapeHtml(task.rationale)}` : ''}</div>
+              ${status === 'failed' ? `<button class="retry-btn" data-retry-task="${task.id}">Retry</button>` : ''}
             </div>
           </div>
         `;
@@ -3504,7 +3530,29 @@ if (nextActionSaved) {
 }
 
 if (atomicList) {
-  atomicList.addEventListener('click', (event) => {
+  atomicList.addEventListener('click', async (event) => {
+    // Retry single failed task
+    const retryBtn = event.target.closest('[data-retry-task]');
+    if (retryBtn) {
+      event.stopPropagation();
+      const taskId = retryBtn.dataset.retryTask;
+      try {
+        await api(`/api/tasks/${encodeURIComponent(taskId)}/retry`, { method: 'POST' });
+        await loadWorkspace();
+      } catch (e) { showError(e.message || 'Retry failed'); }
+      return;
+    }
+    // Retry all failed tasks
+    const retryAllBtn = event.target.closest('#retry-all-failed');
+    if (retryAllBtn) {
+      event.stopPropagation();
+      try {
+        await api(`/api/projects/${encodeURIComponent(state.projectId)}/retry-failed`, { method: 'POST' });
+        await loadWorkspace();
+      } catch (e) { showError(e.message || 'Retry all failed'); }
+      return;
+    }
+    // Card selection
     const card = event.target.closest('[data-atomic-task]');
     if (!card) return;
     state.taskId = card.dataset.atomicTask || null;
@@ -5282,6 +5330,24 @@ class HarnessUIDataService:
             raise ValueError(f"Unknown task: {task_id}")
         run = self.ctx.engine.run_once(task.id)
         return {"run": serialize_dataclass(run)}
+
+    def retry_task(self, task_id: str) -> dict[str, object]:
+        task = self.store.get_task(task_id)
+        if task is None:
+            raise ValueError(f"Unknown task: {task_id}")
+        if task.status.value != "failed":
+            raise ValueError(f"Task is {task.status.value}, not failed")
+        self.store.update_task_status(task_id, TaskStatus.PENDING)
+        return {"task_id": task_id, "status": "pending"}
+
+    def retry_all_failed(self, project_id: str) -> dict[str, object]:
+        tasks = self.store.list_tasks(project_id=project_id)
+        reset_count = 0
+        for task in tasks:
+            if task.status == TaskStatus.FAILED:
+                self.store.update_task_status(task.id, TaskStatus.PENDING)
+                reset_count += 1
+        return {"reset_count": reset_count}
 
     def start_supervisor(self, project_id: str) -> dict[str, object]:
         project = self.store.get_project(project_id)
@@ -7063,6 +7129,20 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
                     str(payload.get("objective_id") or "").strip() or None,
                 ),
                 status=HTTPStatus.CREATED,
+                notify=True,
+            )
+            return
+        if parsed.path.startswith("/api/tasks/") and parsed.path.endswith("/retry"):
+            task_id = parsed.path[len("/api/tasks/") : -len("/retry")].strip("/")
+            self._dispatch_json(
+                lambda: self.data_service.retry_task(task_id),
+                notify=True,
+            )
+            return
+        if parsed.path.startswith("/api/projects/") and parsed.path.endswith("/retry-failed"):
+            project_id = parsed.path[len("/api/projects/") : -len("/retry-failed")].strip("/")
+            self._dispatch_json(
+                lambda: self.data_service.retry_all_failed(project_id),
                 notify=True,
             )
             return
