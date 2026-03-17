@@ -84,9 +84,10 @@ def _surface_classes(paths: list[str]) -> set[str]:
             classes.add("control_plane")
         elif path.startswith("src/accruvia_harness/persistence/"):
             classes.add("persistence_layer")
-            # Only flag as control_plane if touching task/run orchestration,
-            # not data-mapping utilities like common.py.
-            if not path.endswith("/common.py"):
+            # Only task/run orchestration files (project_task.py) are control plane.
+            # Schema utilities (common.py, migrations) and new table files are data layer.
+            basename = path.rsplit("/", 1)[-1] if "/" in path else path
+            if basename in {"project_task.py"}:
                 classes.add("control_plane")
         elif path.startswith("src/accruvia_harness/cognition/"):
             classes.add("control_plane")
@@ -109,6 +110,9 @@ def _surface_classes(paths: list[str]) -> set[str]:
 def _subsystem_count(paths: list[str]) -> int:
     subsystems: set[str] = set()
     for path in paths:
+        # Tests and docs accompany source changes — they aren't separate subsystems.
+        if path.startswith("tests/") or path.startswith("specs/") or path.endswith(".md"):
+            continue
         if path.startswith("src/accruvia_harness/"):
             parts = path.split("/")
             subsystems.add(parts[2] if len(parts) > 2 else parts[-1])
@@ -159,7 +163,8 @@ def atomicity_gate(
     } and any(path in VALIDATION_POLICY_FILES for path in paths)
     operator_task = validation_mode == "lightweight_operator" or strategy.startswith("operator_")
     operator_task_touches_non_operator_surface = operator_task and any(
-        path.startswith("src/accruvia_harness/services/") or path.startswith("src/accruvia_harness/persistence/")
+        path.startswith("src/accruvia_harness/services/")
+        or (path.startswith("src/accruvia_harness/persistence/") and path.endswith("/project_task.py"))
         for path in paths
     )
     intent_surface_mismatch_detected = operator_task and not any(
@@ -227,20 +232,6 @@ def atomicity_gate(
     effective_validation_mode = validation_mode
     action = "validate_normal"
     rationale = "Diff shape is compatible with normal validation."
-    # Tasks generated from Mermaid decomposition or prior atomicity splits are
-    # already atomic by design — bypass further decomposition to prevent loops.
-    if strategy in {"atomicity_split", "atomic_from_mermaid"}:
-        action = "validate_narrow"
-        rationale = "Atomicity-split task bypasses further decomposition to prevent infinite loops."
-        telemetry["atomicity_split_bypass"] = True
-        return AtomicityGateResult(
-            telemetry=telemetry,
-            score=score,
-            flags=flags,
-            action=action,
-            rationale=rationale,
-            effective_validation_mode=effective_validation_mode,
-        )
     if self_referential_change_detected:
         action = "block_self_referential"
         rationale = "Attempt modifies validation/task-selection machinery that evaluates tasks of its own class."

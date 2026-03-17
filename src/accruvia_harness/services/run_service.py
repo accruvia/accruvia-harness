@@ -686,7 +686,7 @@ class RunService:
         existing = self.store.find_follow_on_task(task.id, run.id)
         if existing is not None and existing.strategy == "atomicity_split":
             return None
-        # Prevent infinite decomposition: limit depth to 2 levels.
+        # Prevent infinite decomposition: limit depth to 10 levels.
         depth = 0
         ancestor = task
         while ancestor.parent_task_id:
@@ -695,7 +695,7 @@ class RunService:
                 break
             depth += 1
             ancestor = parent
-        if depth >= 2:
+        if depth >= 10:
             return None
         queued_children = [
             child
