@@ -428,6 +428,7 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
         return 1
     # Write phase marker so the supervisor can report VALIDATING status.
     (run_dir / "phase.txt").write_text("validating", encoding="utf-8")
+    _validation_start = time.monotonic()
 
     if python_files:
         try:
@@ -484,6 +485,8 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
         encoding="utf-8",
     )
 
+    _validation_elapsed = time.monotonic() - _validation_start
+
     test_files = [
         path for path in all_changed if "/test" in path or path.startswith("tests/") or path.endswith("_test.py") or path.endswith(".test.js")
     ]
@@ -526,6 +529,7 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
             "startup_timeout_seconds": test_startup_timeout_seconds,
             "timed_out": test_timed_out,
         },
+        "validation_elapsed_seconds": round(_validation_elapsed, 2),
         "summary": summary_text,
         "command": llm_command,
         "atomicity_gate": {

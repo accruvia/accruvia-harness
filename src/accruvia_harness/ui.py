@@ -2680,9 +2680,9 @@ function renderAtomicUnits() {
   } else if (generation.coverage_complete === false) {
     pills.push(`<span class="pill status-running">Coverage: gaps found</span>`);
   }
-  if (lastActivity) {
+  if (generation.last_activity_at) {
     const roundTag = generation.refinement_round ? ` (round ${generation.refinement_round})` : '';
-    pills.push(`<span class="pill">Last activity ${escapeHtml(lastActivity)}${roundTag}</span>`);
+    pills.push(`<span class="pill last-activity-pill" data-timestamp="${generation.last_activity_at}">Last activity ${escapeHtml(lastActivity)}${roundTag}</span>`);
   }
   atomicGenerationMeta.innerHTML = pills.join('');
   if (!linkedTasks.length) {
@@ -3680,6 +3680,12 @@ async function main() {
         if (secs < 60) text = secs + 's';
         else { const m = Math.floor(secs/60), r = secs%60; text = m < 60 ? m+'m '+r+'s' : Math.floor(m/60)+'h '+(m%60)+'m'; }
         el.textContent = text;
+      });
+      document.querySelectorAll('.last-activity-pill[data-timestamp]').forEach((el) => {
+        const ts = el.dataset.timestamp;
+        if (!ts) return;
+        const roundTag = el.textContent.includes('(round') ? el.textContent.slice(el.textContent.indexOf('(round')) : '';
+        el.textContent = 'Last activity ' + formatRelativeTime(ts) + (roundTag ? ' ' + roundTag : '');
       });
       renderMermaidMeta(currentObjective());
     }, 1000);
