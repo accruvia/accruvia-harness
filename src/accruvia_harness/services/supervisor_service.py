@@ -94,9 +94,9 @@ class SupervisorService:
 
         def progress(event):
             nonlocal _credits_frozen_until, _credits_backoff_seconds
-            if isinstance(event, dict) and event.get("type") == "credits_exhausted":
+            if isinstance(event, dict) and event.get("type") == "backends_unavailable":
                 _credits_frozen_until = self._monotonic() + _credits_backoff_seconds
-                _credits_backoff_seconds = min(_credits_backoff_seconds * 2, 600)
+                _credits_backoff_seconds = min(_credits_backoff_seconds * 2, 3600)
             _user_progress(event)
 
         while True:
