@@ -84,7 +84,10 @@ def _surface_classes(paths: list[str]) -> set[str]:
             classes.add("control_plane")
         elif path.startswith("src/accruvia_harness/persistence/"):
             classes.add("persistence_layer")
-            classes.add("control_plane")
+            # Only flag as control_plane if touching task/run orchestration,
+            # not data-mapping utilities like common.py.
+            if not path.endswith("/common.py"):
+                classes.add("control_plane")
         elif path.startswith("src/accruvia_harness/cognition/"):
             classes.add("control_plane")
             classes.add("cognition")
@@ -224,6 +227,20 @@ def atomicity_gate(
     effective_validation_mode = validation_mode
     action = "validate_normal"
     rationale = "Diff shape is compatible with normal validation."
+    # Tasks generated from Mermaid decomposition or prior atomicity splits are
+    # already atomic by design — bypass further decomposition to prevent loops.
+    if strategy in {"atomicity_split", "atomic_from_mermaid"}:
+        action = "validate_narrow"
+        rationale = "Atomicity-split task bypasses further decomposition to prevent infinite loops."
+        telemetry["atomicity_split_bypass"] = True
+        return AtomicityGateResult(
+            telemetry=telemetry,
+            score=score,
+            flags=flags,
+            action=action,
+            rationale=rationale,
+            effective_validation_mode=effective_validation_mode,
+        )
     if self_referential_change_detected:
         action = "block_self_referential"
         rationale = "Attempt modifies validation/task-selection machinery that evaluates tasks of its own class."
