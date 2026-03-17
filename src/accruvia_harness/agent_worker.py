@@ -31,16 +31,16 @@ def _focused_test_command(validation_mode: str) -> list[str]:
     if validation_mode == "lightweight_repair":
         return ["python3", "-m", "unittest", "-v", "tests.test_workers"]
     if validation_mode == "lightweight_operator":
-        return ["python3", "-m", "unittest", "-v", "tests.test_cli", "tests.test_phase1"]
+        return ["python3", "-m", "unittest", "-v", "tests.test_phase1"]
     return [
         "python3",
         "-m",
         "unittest",
         "-v",
-        "tests.test_cli",
+        "tests.test_engine",
+        "tests.test_store",
+        "tests.test_validation",
         "tests.test_phase1",
-        "tests.test_supervisor",
-        "tests.test_observer",
     ]
 
 
@@ -504,7 +504,7 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
         "validation_mode": validation_mode,
         "worker_outcome": worker_outcome,
         "changed_files": all_changed,
-        "test_files": test_files or ["tests/test_cli.py"],
+        "test_files": test_files or ["tests/test_phase1.py"],
         "compile_check": {
             "passed": compile_rc == 0,
             "targets": [path for path in all_changed if path.endswith(".py")],

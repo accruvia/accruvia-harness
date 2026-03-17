@@ -355,7 +355,7 @@ class WorkerTests(unittest.TestCase):
         workspace = self.base / "workspace"
         tests_dir = workspace / "tests"
         tests_dir.mkdir(parents=True)
-        for name in ("test_cli.py", "test_phase1.py", "test_supervisor.py", "test_observer.py"):
+        for name in ("test_engine.py", "test_store.py", "test_validation.py", "test_phase1.py"):
             (tests_dir / name).write_text(
                 "import unittest\n\n"
                 "class Smoke(unittest.TestCase):\n"
@@ -400,7 +400,7 @@ class WorkerTests(unittest.TestCase):
         workspace = self.base / "workspace"
         tests_dir = workspace / "tests"
         tests_dir.mkdir(parents=True)
-        for name in ("test_phase1.py", "test_supervisor.py", "test_observer.py"):
+        for name in ("test_store.py", "test_validation.py", "test_phase1.py"):
             (tests_dir / name).write_text(
                 "import unittest\n\n"
                 "class Smoke(unittest.TestCase):\n"
@@ -408,7 +408,7 @@ class WorkerTests(unittest.TestCase):
                 "        self.assertTrue(True)\n",
                 encoding="utf-8",
             )
-        (tests_dir / "test_cli.py").write_text(
+        (tests_dir / "test_engine.py").write_text(
             "import time\n"
             "import unittest\n\n"
             "class Slow(unittest.TestCase):\n"
@@ -459,7 +459,7 @@ class WorkerTests(unittest.TestCase):
 
     def test_focused_test_command_uses_lightweight_suite_for_operator_mode(self) -> None:
         self.assertEqual(
-            ["python3", "-m", "unittest", "-v", "tests.test_cli", "tests.test_phase1"],
+            ["python3", "-m", "unittest", "-v", "tests.test_phase1"],
             _focused_test_command("lightweight_operator"),
         )
 
@@ -470,10 +470,10 @@ class WorkerTests(unittest.TestCase):
                 "-m",
                 "unittest",
                 "-v",
-                "tests.test_cli",
+                "tests.test_engine",
+                "tests.test_store",
+                "tests.test_validation",
                 "tests.test_phase1",
-                "tests.test_supervisor",
-                "tests.test_observer",
             ],
             _focused_test_command("default_focused"),
         )
