@@ -697,6 +697,42 @@ body[data-view="atomic"] .conversation-form {
   50% { opacity: 1; transform: scale(1.05); }
 }
 
+.atomic-status-tabs {
+  display: flex;
+  gap: 0;
+  margin-bottom: 0.5rem;
+  border-bottom: 2px solid var(--line);
+}
+
+.atomic-status-tabs button {
+  padding: 0.4rem 0.85rem;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--muted);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.atomic-status-tabs button:hover {
+  color: var(--ink);
+}
+
+.atomic-status-tabs button.active {
+  color: var(--ink);
+  border-bottom-color: var(--accent);
+}
+
+.atomic-status-tabs button .tab-count {
+  font-weight: 400;
+  font-size: 0.78rem;
+  color: var(--muted);
+  margin-left: 0.25rem;
+}
+
 .atomic-progress-bar {
   display: flex;
   height: 0.5rem;
@@ -1535,6 +1571,7 @@ const state = {
   diagramPan: { scale: 1, x: 0, y: 0, isPointerDown: false, isDragging: false, startX: 0, startY: 0, dragOriginX: 0, dragOriginY: 0 },
   localNotices: [],
   view: document.body.dataset.view || 'default',
+  atomicTab: 'all',
 };
 
 function preferredProjectFromList(projects) {
@@ -2643,8 +2680,8 @@ function renderAtomicUnits() {
     atomicList.innerHTML = '<div class="empty">No atomic units yet.</div>';
     return;
   }
-  // Progress bar
-  const counts = { completed: 0, active: 0, failed: 0, pending: 0 };
+  // Counts
+  const counts = { all: linkedTasks.length, completed: 0, active: 0, failed: 0, pending: 0 };
   for (const task of linkedTasks) {
     const s = task.status || 'pending';
     if (s in counts) counts[s]++;
@@ -2652,6 +2689,21 @@ function renderAtomicUnits() {
   }
   const total = linkedTasks.length;
   const pct = (n) => total > 0 ? ((n / total) * 100).toFixed(1) + '%' : '0%';
+  // Auto-select a tab that has content if current tab is empty
+  if (state.atomicTab !== 'all' && counts[state.atomicTab] === 0) {
+    state.atomicTab = 'all';
+  }
+  const filteredTasks = state.atomicTab === 'all'
+    ? linkedTasks
+    : linkedTasks.filter((t) => (t.status || 'pending') === state.atomicTab);
+  // Tabs + progress bar
+  const tabs = ['all', 'active', 'pending', 'completed', 'failed'];
+  const tabLabels = { all: 'All', active: 'Active', pending: 'Pending', completed: 'Done', failed: 'Failed' };
+  const tabsHtml = `
+    <div class="atomic-status-tabs" id="atomic-tabs">
+      ${tabs.map((tab) => `<button class="${tab === state.atomicTab ? 'active' : ''}" data-tab="${tab}">${tabLabels[tab]}<span class="tab-count">${counts[tab] || 0}</span></button>`).join('')}
+    </div>
+  `;
   const progressBar = `
     <div class="atomic-progress-bar">
       <div class="segment completed" style="width:${pct(counts.completed)}"></div>
@@ -2659,30 +2711,40 @@ function renderAtomicUnits() {
       <div class="segment failed" style="width:${pct(counts.failed)}"></div>
       <div class="segment pending" style="width:${pct(counts.pending)}"></div>
     </div>
-    <div class="atomic-progress-summary">
-      ${counts.completed} done · ${counts.active} active · ${counts.failed} failed · ${counts.pending} pending — ${total} total
-    </div>
   `;
-  atomicList.innerHTML = progressBar + linkedTasks.map((task) => {
-    const latestRun = task.latest_run || null;
-    const status = task.status || 'pending';
-    const attemptText = latestRun ? `#${latestRun.attempt}` : '';
-    const isExpanded = task.id === state.taskId;
-    return `
-      <div class="atomic-card ${isExpanded ? 'active expanded' : ''}" data-atomic-task="${task.id}">
-        <div class="status-bar ${status}"></div>
-        <div class="card-content">
-          <div class="card-header">
-            <div class="title">${escapeHtml(task.title)}</div>
-            <span class="status-pill ${status}">${escapeHtml(status)}</span>
-            ${attemptText ? `<span class="attempt-count">${attemptText}</span>` : ''}
+  const cardsHtml = filteredTasks.length
+    ? filteredTasks.map((task) => {
+        const latestRun = task.latest_run || null;
+        const status = task.status || 'pending';
+        const attemptText = latestRun ? `#${latestRun.attempt}` : '';
+        const isExpanded = task.id === state.taskId;
+        return `
+          <div class="atomic-card ${isExpanded ? 'active expanded' : ''}" data-atomic-task="${task.id}">
+            <div class="status-bar ${status}"></div>
+            <div class="card-content">
+              <div class="card-header">
+                <div class="title">${escapeHtml(task.title)}</div>
+                <span class="status-pill ${status}">${escapeHtml(status)}</span>
+                ${attemptText ? `<span class="attempt-count">${attemptText}</span>` : ''}
+              </div>
+              <div class="meta">${escapeHtml(task.objective || '').split('\\n')[0]}</div>
+              <div class="body">${escapeHtml(task.objective || 'No task objective recorded.')}${task.rationale ? `\n\nWhy this unit exists: ${escapeHtml(task.rationale)}` : ''}</div>
+            </div>
           </div>
-          <div class="meta">${escapeHtml(task.objective || '').split('\\n')[0]}</div>
-          <div class="body">${escapeHtml(task.objective || 'No task objective recorded.')}${task.rationale ? `\n\nWhy this unit exists: ${escapeHtml(task.rationale)}` : ''}</div>
-        </div>
-      </div>
-    `;
-  }).join('');
+        `;
+      }).join('')
+    : `<div class="empty">No ${state.atomicTab} tasks.</div>`;
+  atomicList.innerHTML = tabsHtml + progressBar + cardsHtml;
+  // Wire tab clicks
+  const tabContainer = document.getElementById('atomic-tabs');
+  if (tabContainer) {
+    tabContainer.addEventListener('click', (event) => {
+      const tab = event.target.closest('[data-tab]');
+      if (!tab) return;
+      state.atomicTab = tab.dataset.tab;
+      renderAtomicUnits();
+    });
+  }
 }
 
 function renderSupervisorStatus() {
