@@ -241,8 +241,8 @@ class HarnessConfig:
             heartbeat_failure_escalation_threshold=int(
                 payload.get("heartbeat_failure_escalation_threshold", 3)
             ),
-            task_run_timeout_seconds=int(payload.get("task_run_timeout_seconds", 1200)),
-            task_llm_timeout_seconds=int(payload.get("task_llm_timeout_seconds", 420)),
+            task_run_timeout_seconds=int(payload.get("task_run_timeout_seconds", 1800)),
+            task_llm_timeout_seconds=int(payload.get("task_llm_timeout_seconds", 1800)),
             task_validation_timeout_seconds=int(payload.get("task_validation_timeout_seconds", 300)),
             task_validation_startup_timeout_seconds=int(payload.get("task_validation_startup_timeout_seconds", 30)),
             task_compile_timeout_seconds=int(payload.get("task_compile_timeout_seconds", 120)),
@@ -423,11 +423,11 @@ class HarnessConfig:
                 ),
                 "task_run_timeout_seconds": _env_int(
                     "ACCRUVIA_TASK_RUN_TIMEOUT_SECONDS",
-                    int(payload.get("task_run_timeout_seconds", 1200)),
+                    int(payload.get("task_run_timeout_seconds", 1800)),
                 ),
                 "task_llm_timeout_seconds": _env_int(
                     "ACCRUVIA_TASK_LLM_TIMEOUT_SECONDS",
-                    int(payload.get("task_llm_timeout_seconds", 420)),
+                    int(payload.get("task_llm_timeout_seconds", 1800)),
                 ),
                 "task_validation_timeout_seconds": _env_int(
                     "ACCRUVIA_TASK_VALIDATION_TIMEOUT_SECONDS",

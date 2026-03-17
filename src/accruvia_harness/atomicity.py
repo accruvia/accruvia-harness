@@ -118,8 +118,8 @@ def _selected_validation_targets(validation_mode: str) -> list[str]:
     if validation_mode == "lightweight_repair":
         return ["tests/test_workers.py"]
     if validation_mode == "lightweight_operator":
-        return ["tests/test_cli.py", "tests/test_phase1.py"]
-    return ["tests/test_cli.py", "tests/test_phase1.py", "tests/test_supervisor.py", "tests/test_observer.py"]
+        return ["tests/test_phase1.py"]
+    return ["tests/test_engine.py", "tests/test_store.py", "tests/test_validation.py", "tests/test_phase1.py"]
 
 
 def _objective_tokens(text: str) -> set[str]:
@@ -162,8 +162,8 @@ def atomicity_gate(
     intent_surface_mismatch_detected = operator_task and not any(
         path.startswith("src/accruvia_harness/commands/")
         or path.startswith("src/accruvia_harness/observer/")
-        or path.startswith("tests/test_cli.py")
         or path.startswith("tests/test_phase1.py")
+        or path.startswith("tests/test_engine.py")
         for path in paths
     )
     subsystem_count = _subsystem_count(paths)
