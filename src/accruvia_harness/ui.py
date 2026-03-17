@@ -1824,7 +1824,7 @@ function renderConversationTranscript(objective) {
     if (transcript.length > 0) {
       for (const item of transcript.slice(-6)) {
         bubbles.push(
-          `<div class="transcript-bubble ${item.role === 'operator' ? 'operator' : item.role === 'system' ? 'system' : 'harness'}"><div class="meta">${escapeHtml(item.label)}</div><div>${escapeHtml(item.text)}</div></div>`
+          `<div class="transcript-bubble ${item.role === 'operator' ? 'operator' : item.role === 'system' ? 'system' : 'harness'}"><div class="meta">${escapeHtml(item.label)}${item.created_at ? ` · ${formatRelativeTime(item.created_at)}` : ''}</div><div>${escapeHtml(item.text)}</div></div>`
         );
       }
     }
@@ -1836,7 +1836,7 @@ function renderConversationTranscript(objective) {
   } else {
     for (const item of transcript) {
       bubbles.push(
-        `<div class="transcript-bubble ${item.role === 'operator' ? 'operator' : item.role === 'system' ? 'system' : 'harness'}"><div class="meta">${escapeHtml(item.label)}</div><div>${escapeHtml(item.text)}</div></div>`
+        `<div class="transcript-bubble ${item.role === 'operator' ? 'operator' : item.role === 'system' ? 'system' : 'harness'}"><div class="meta">${escapeHtml(item.label)}${item.created_at ? ` · ${formatRelativeTime(item.created_at)}` : ''}</div><div>${escapeHtml(item.text)}</div></div>`
       );
     }
   }
@@ -2298,7 +2298,8 @@ function renderAtomicUnits() {
     pills.push(`<span class="pill status-running">Coverage: gaps found</span>`);
   }
   if (lastActivity) {
-    pills.push(`<span class="pill">Last activity ${escapeHtml(lastActivity)}</span>`);
+    const roundTag = generation.refinement_round ? ` (round ${generation.refinement_round})` : '';
+    pills.push(`<span class="pill">Last activity ${escapeHtml(lastActivity)}${roundTag}</span>`);
   }
   atomicGenerationMeta.innerHTML = pills.join('');
   if (!linkedTasks.length) {
@@ -2327,22 +2328,30 @@ function renderSupervisorStatus() {
   if (!panel) return;
   const supervisor = state.workspace?.supervisor || {};
   const isRunning = supervisor.running || supervisor.state === 'running' || supervisor.state === 'starting';
+  const hasHistory = supervisor.state === 'finished' || supervisor.state === 'error';
   const startBtn = document.getElementById('supervisor-start-btn');
   const stopBtn = document.getElementById('supervisor-stop-btn');
   const statusEl = document.getElementById('supervisor-status');
   const metaEl = document.getElementById('supervisor-meta');
-  if (startBtn) startBtn.hidden = isRunning;
+  // Only show the panel when harness is active or has something to report
+  panel.hidden = !isRunning && !hasHistory;
+  // Start button only when stopped after having run (restart), never on initial idle
+  if (startBtn) startBtn.hidden = isRunning || !hasHistory;
   if (stopBtn) stopBtn.hidden = !isRunning;
   if (statusEl) {
     if (supervisor.state === 'running' || supervisor.state === 'starting') {
       const dots = '.'.repeat((Math.floor(Date.now() / 500) % 3) + 1);
-      statusEl.textContent = `Harness is processing tasks${dots}`;
+      statusEl.textContent = `The harness is working through your tasks${dots}`;
     } else if (supervisor.state === 'finished') {
-      statusEl.textContent = `Harness finished. Processed ${supervisor.processed_count || 0} task(s). Exit: ${supervisor.exit_reason || 'unknown'}.`;
+      const reason = supervisor.exit_reason === 'idle' ? 'No more tasks to process.'
+        : supervisor.exit_reason === 'graceful_stop_requested' ? 'Stopped by operator.'
+        : supervisor.exit_reason === 'max_iterations_reached' ? 'Reached iteration limit.'
+        : 'Finished.';
+      statusEl.textContent = `${reason} Completed ${supervisor.processed_count || 0} task(s).`;
     } else if (supervisor.state === 'error') {
-      statusEl.textContent = `Harness error: ${supervisor.error || 'unknown'}`;
+      statusEl.textContent = `Something went wrong while processing tasks. You can restart to retry.`;
     } else {
-      statusEl.textContent = 'Harness is idle. Start it to begin processing pending tasks.';
+      statusEl.textContent = '';
     }
   }
   if (metaEl) {
@@ -2354,7 +2363,8 @@ function renderSupervisorStatus() {
       pills.push(`<span class="pill">${supervisor.processed_count} task(s) done</span>`);
     }
     if (supervisor.last_task_title && isRunning) {
-      pills.push(`<span class="pill">Working on: ${escapeHtml(supervisor.last_task_title)}</span>`);
+      const friendlyTitle = supervisor.last_task_title.replace(/: repair executor\/runtime failure$/i, '').replace(/: repair .*$/i, '');
+      pills.push(`<span class="pill">Working on: ${escapeHtml(friendlyTitle)}</span>`);
     }
     if (supervisor.last_event_at) {
       pills.push(`<span class="pill">Last activity ${escapeHtml(formatRelativeTime(supervisor.last_event_at))}</span>`);
@@ -3796,7 +3806,7 @@ class HarnessUIDataService:
         if mermaid is None or mermaid.status != MermaidStatus.FINISHED:
             raise ValueError("Atomic generation requires a finished Mermaid.")
         current = self._atomic_generation_state(objective_id)
-        if current["status"] == "running" and self._atomic_generation_is_stale(current):
+        if current["status"] == "running" and self._atomic_generation_is_stale(current, objective_id):
             self._mark_atomic_generation_interrupted(objective, current)
             current = self._atomic_generation_state(objective_id)
         if current["status"] == "running" and int(current.get("diagram_version") or 0) == mermaid.version:
@@ -3837,8 +3847,11 @@ class HarnessUIDataService:
             worker()
         return {"atomic_generation": self._atomic_generation_state(objective.id)}
 
-    def _atomic_generation_is_stale(self, generation: dict[str, object]) -> bool:
+    def _atomic_generation_is_stale(self, generation: dict[str, object], objective_id: str = "") -> bool:
         if generation.get("status") != "running":
+            return False
+        # If the in-memory coordinator thread is still alive, it's not stale
+        if objective_id and objective_id in _ATOMIC_GENERATION._running:
             return False
         last_activity_at = str(generation.get("last_activity_at") or "")
         if not last_activity_at:
@@ -3848,7 +3861,8 @@ class HarnessUIDataService:
         except ValueError:
             return False
         age_seconds = (_dt.datetime.now(_dt.timezone.utc) - last_activity).total_seconds()
-        return age_seconds > 30
+        # LLM calls can take several minutes; 5 minutes is a reasonable staleness threshold
+        return age_seconds > 300
 
     def _mark_atomic_generation_interrupted(self, objective: Objective, generation: dict[str, object]) -> None:
         generation_id = str(generation.get("generation_id") or "")
@@ -3899,7 +3913,7 @@ class HarnessUIDataService:
         linked_tasks = [task for task in self.store.list_tasks(objective.project_id) if task.objective_id == objective_id]
         if generation.get("status") == "completed":
             return
-        if generation.get("status") == "running" and not self._atomic_generation_is_stale(generation):
+        if generation.get("status") == "running" and not self._atomic_generation_is_stale(generation, objective_id):
             return
         if linked_tasks:
             return
@@ -3924,7 +3938,7 @@ class HarnessUIDataService:
                 phase="deriving candidate units",
                 content="Deriving candidate atomic units from the accepted flowchart.",
             )
-            units = self._derive_atomic_units(objective_id)
+            units = self._derive_atomic_units(objective_id, generation_id=generation_id, diagram_version=diagram_version)
             self._record_atomic_generation_progress(
                 objective,
                 generation_id,
@@ -4086,7 +4100,7 @@ class HarnessUIDataService:
             )
         )
 
-    def _derive_atomic_units(self, objective_id: str) -> list[dict[str, str]]:
+    def _derive_atomic_units(self, objective_id: str, *, generation_id: str = "", diagram_version: int = 0) -> list[dict[str, str]]:
         objective = self.store.get_objective(objective_id)
         if objective is None:
             return []
@@ -4099,11 +4113,12 @@ class HarnessUIDataService:
             repo_context = self._gather_repo_context(objective.project_id)
             units = self._iterative_atomic_decomposition(
                 objective, intent_model, mermaid, comments, llm_router, repo_context,
+                generation_id=generation_id or new_id("atomic_gen"),
             )
             if units:
                 return units
 
-        return self._fallback_regex_units(objective, mermaid)
+        return []
 
     def _gather_repo_context(self, project_id: str) -> str:
         """Gather repo file tree and key file snippets for grounding atomic decomposition."""
@@ -4156,9 +4171,11 @@ class HarnessUIDataService:
         llm_router,
         repo_context: str,
         hard_ceiling: int = 50,
+        generation_id: str = "",
     ) -> list[dict[str, str]]:
         """Multi-pass atomic decomposition: generate, critique, refine until the critique accepts."""
-        generation_id = new_id("atomic_gen")
+        if not generation_id:
+            generation_id = new_id("atomic_gen")
         run_dir = self.workspace_root / "ui_atomic" / objective.id / generation_id
         run_dir.mkdir(parents=True, exist_ok=True)
         diagram_version = int(getattr(mermaid, "version", 0))
@@ -4393,7 +4410,10 @@ class HarnessUIDataService:
             summary="Atomic generation LLM call",
         )
         result, _backend = llm_router.execute(
-            LLMInvocation(task=task_stub, run=run, prompt=prompt, run_dir=run_dir),
+            LLMInvocation(
+                task=task_stub, run=run, prompt=prompt, run_dir=run_dir,
+                timeout_seconds_override=300,  # 5 min — atomic decomposition prompts are large
+            ),
         )
         return result.response_text.strip()
 
@@ -4639,44 +4659,6 @@ class HarnessUIDataService:
             )
         return units
 
-    def _fallback_regex_units(self, objective: Objective, mermaid) -> list[dict[str, str]]:
-        """Regex fallback when no LLM is available."""
-        labels = re.findall(r"\[(.*?)\]", mermaid.content if mermaid else "")
-        units: list[dict[str, str]] = []
-        seen: set[str] = set()
-        for label in labels:
-            cleaned = " ".join(label.split()).strip()
-            if not cleaned:
-                continue
-            lowered = cleaned.lower()
-            if lowered in seen:
-                continue
-            seen.add(lowered)
-            if lowered in {
-                "objective intake",
-                "state aligned with intent",
-                "operator approval",
-                "review diagram in ui",
-            }:
-                continue
-            units.append(
-                {
-                    "title": f"{cleaned}",
-                    "objective": f"Implement and validate the '{cleaned}' stage so it behaves as described by the accepted flowchart.",
-                    "rationale": f"This unit maps directly to the '{cleaned}' node in the accepted Mermaid.",
-                    "strategy": "atomic_from_mermaid",
-                }
-            )
-        if not units:
-            units.append(
-                {
-                    "title": f"Atomic work for {objective.title}",
-                    "objective": "Derive the first reviewable implementation unit from the accepted flowchart.",
-                    "rationale": "Fallback atomic unit because no specific Mermaid nodes were available.",
-                    "strategy": "atomic_from_mermaid",
-                }
-            )
-        return units
 
     def run_task(self, task_id: str) -> dict[str, object]:
         task = self.store.get_task(task_id)
@@ -5032,11 +5014,14 @@ class HarnessUIDataService:
     def _action_receipts(self, project_id: str) -> list[dict[str, object]]:
         receipts = []
         for record in self.store.list_context_records(project_id=project_id, record_type="action_receipt"):
+            text = record.content
+            if text.startswith("Action receipt: "):
+                text = text[len("Action receipt: "):]
             receipts.append(
                 {
                     "id": record.id,
                     "objective_id": record.objective_id,
-                    "text": record.content,
+                    "text": text,
                     "created_at": record.created_at.isoformat(),
                     "metadata": record.metadata,
                 }
