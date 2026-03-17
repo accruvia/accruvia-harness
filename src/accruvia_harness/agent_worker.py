@@ -209,6 +209,12 @@ def _run_validation_process(
 
 
 def select_worker_llm_command(environ: Mapping[str, str]) -> tuple[str, str]:
+    chain = select_worker_llm_chain(environ)
+    return chain[0] if chain else ("codex", "codex exec")
+
+
+def select_worker_llm_chain(environ: Mapping[str, str]) -> list[tuple[str, str]]:
+    """Return an ordered list of (backend, command) to try for worker execution."""
     preferred = str(environ.get("ACCRUVIA_WORKER_LLM_BACKEND", "")).strip().lower()
     commands = {
         "command": str(environ.get("ACCRUVIA_LLM_COMMAND", "")).strip(),
@@ -216,12 +222,13 @@ def select_worker_llm_command(environ: Mapping[str, str]) -> tuple[str, str]:
         "claude": str(environ.get("ACCRUVIA_LLM_CLAUDE_COMMAND", "")).strip(),
         "accruvia_client": str(environ.get("ACCRUVIA_LLM_ACCRUVIA_CLIENT_COMMAND", "")).strip(),
     }
+    chain: list[tuple[str, str]] = []
     if preferred in commands and commands[preferred]:
-        return preferred, commands[preferred]
+        chain.append((preferred, commands[preferred]))
     for backend in ("codex", "claude", "command", "accruvia_client"):
-        if commands[backend]:
-            return backend, commands[backend]
-    return "codex", "codex exec"
+        if commands[backend] and not any(b == backend for b, _ in chain):
+            chain.append((backend, commands[backend]))
+    return chain or [("codex", "codex exec")]
 
 
 def _first_nonempty_line(text: str) -> str:
@@ -295,7 +302,7 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
     )
     prompt_path.write_text(prompt_text, encoding="utf-8")
 
-    llm_backend, llm_command = select_worker_llm_command(env)
+    llm_chain = select_worker_llm_chain(env)
     llm_env = dict(env)
     llm_env.update(
         {
@@ -307,17 +314,30 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
         }
     )
 
-    try:
-        completed = run_command_process(
-            llm_command,
-            cwd=workspace,
-            env=llm_env,
-            timeout_seconds=llm_timeout_seconds,
-            stdin_text=prompt_text if not command_uses_file_contract(llm_command) else None,
-        )
-    except subprocess.TimeoutExpired as exc:
-        stdout_path.write_text(_coerce_subprocess_output(exc.stdout), encoding="utf-8")
-        stderr_path.write_text(_coerce_subprocess_output(exc.stderr), encoding="utf-8")
+    completed = None
+    llm_backend = llm_chain[0][0] if llm_chain else "codex"
+    chain_failures: list[str] = []
+    for llm_backend, llm_command in llm_chain:
+        try:
+            completed = run_command_process(
+                llm_command,
+                cwd=workspace,
+                env=llm_env,
+                timeout_seconds=llm_timeout_seconds,
+                stdin_text=prompt_text if not command_uses_file_contract(llm_command) else None,
+            )
+            if completed.returncode == 0:
+                break
+            # Non-zero exit: log and try next backend
+            chain_failures.append(f"{llm_backend}: exit code {completed.returncode}")
+            completed = None
+        except subprocess.TimeoutExpired as exc:
+            chain_failures.append(f"{llm_backend}: timed out after {llm_timeout_seconds}s")
+            stdout_path.write_text(_coerce_subprocess_output(exc.stdout), encoding="utf-8")
+            stderr_path.write_text(_coerce_subprocess_output(exc.stderr), encoding="utf-8")
+            completed = None
+
+    if completed is None:
         report_path.write_text(
             json.dumps(
                 {
@@ -333,7 +353,7 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
                     "blocked": True,
                     "infrastructure_failure": True,
                     "failure_category": "executor_timeout",
-                    "failure_message": f"{llm_backend} worker command timed out",
+                    "failure_message": f"All worker backends failed: {'; '.join(chain_failures)}",
                     "timeout_seconds": llm_timeout_seconds,
                     "changed_files": [],
                     "test_files": [],

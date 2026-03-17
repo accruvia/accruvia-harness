@@ -3511,8 +3511,11 @@ function renderHarnessDashboard() {
     const objLine = obj
       ? `<div class="objective-name">${escapeHtml(obj.title)} · ${escapeHtml(obj.status)}${obj.task_total ? ` · ${obj.task_counts?.completed || 0}/${obj.task_total} done` : ''}</div>`
       : '<div class="objective-name" style="color:var(--muted)">No active objective</div>';
+    const atomicParams = new URLSearchParams({ project_id: p.id });
+    if (obj) atomicParams.set('objective_id', obj.id);
+    const atomicLink = `/atomic?${atomicParams.toString()}`;
     return `
-      <div class="harness-project-card">
+      <a href="${atomicLink}" class="harness-project-card" style="text-decoration:none;color:inherit">
         <div class="project-header">
           <span class="project-name">${escapeHtml(p.name)}</span>
           <span class="supervisor-pill ${supClass}">${escapeHtml(supRunning ? 'running' : supState)}</span>
@@ -3525,7 +3528,7 @@ function renderHarnessDashboard() {
         </div>
         <div class="task-summary">${ts.completed || 0} done · ${ts.active || 0} active · ${ts.failed || 0} failed · ${ts.pending || 0} pending — ${total} total</div>
         ${objLine}
-      </div>
+      </a>
     `;
   }).join('');
 
