@@ -3500,7 +3500,13 @@ function renderHarnessDashboard() {
 
   // Project cards
   const projects = harnessData.projects || [];
-  projectCards.innerHTML = projects.map((p) => {
+  const statusOrder = { running: 0, starting: 1, error: 2, finished: 3, idle: 4 };
+  const sorted = [...projects].sort((a, b) => {
+    const aState = a.supervisor?.running ? 'running' : (a.supervisor?.state || 'idle');
+    const bState = b.supervisor?.running ? 'running' : (b.supervisor?.state || 'idle');
+    return (statusOrder[aState] ?? 5) - (statusOrder[bState] ?? 5);
+  });
+  projectCards.innerHTML = sorted.map((p) => {
     const ts = p.tasks_by_status || {};
     const total = p.task_total || 0;
     const ppct = (n) => total > 0 ? ((n / total) * 100).toFixed(1) + '%' : '0%';
