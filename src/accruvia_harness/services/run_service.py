@@ -559,6 +559,10 @@ class RunService:
             return
         if not bool(diagnostics.get("infrastructure_failure")):
             return
+        # Don't spawn repair tasks for transient backend unavailability (credits, outages).
+        # The task was already requeued as pending by the backends_unavailable handler.
+        if bool(diagnostics.get("backends_unavailable")):
+            return
         existing = self.store.find_follow_on_task(task.id, run.id)
         if existing is not None and existing.strategy == "executor_repair":
             return
