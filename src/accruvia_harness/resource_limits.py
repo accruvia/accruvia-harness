@@ -24,20 +24,16 @@ def _total_memory_mb() -> int | None:
 
 
 def resolve_memory_limit_mb(configured_mb: int, *, backend_names: tuple[str, ...] = ()) -> int | None:
-    base_limit_mb = max(int(configured_mb), 1)
-    total_memory_mb = _total_memory_mb()
-    budget_mb = int(total_memory_mb * 0.8) if total_memory_mb is not None else None
     requires_large_heap = any(name in LARGE_HEAP_BACKENDS for name in backend_names)
 
+    # Node.js backends (codex, claude) need >4GB virtual address space just to
+    # start.  RLIMIT_AS at any practical value breaks them, so skip it entirely.
     if requires_large_heap:
-        desired_mb = max(base_limit_mb, 4096)
-        if budget_mb is None:
-            return desired_mb
-        if budget_mb >= desired_mb:
-            return desired_mb
-        if budget_mb >= 4096:
-            return budget_mb
         return None
+
+    base_limit_mb = max(int(configured_mb or 0), 1)
+    total_memory_mb = _total_memory_mb()
+    budget_mb = int(total_memory_mb * 0.8) if total_memory_mb is not None else None
 
     if budget_mb is None:
         return base_limit_mb
