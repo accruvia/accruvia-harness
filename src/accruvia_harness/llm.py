@@ -360,17 +360,17 @@ class LLMRouter:
                     if not is_transient:
                         self._demoted.add(backend)
                     failures.append({"backend": backend, "error": error_str, "attempts": attempt})
-                if telemetry is not None:
-                    category = "executor_timeout" if "timed out" in str(exc).lower() else "llm_executor_failure"
-                    telemetry.warn(
-                        category,
-                        str(exc),
-                        backend=backend,
-                        worker_backend=backend,
-                        validation_profile=invocation.task.validation_profile,
-                        task_id=invocation.task.id,
-                        run_id=invocation.run.id,
-                    )
+                    if telemetry is not None:
+                        category = "executor_timeout" if "timed out" in error_str.lower() else "llm_executor_failure"
+                        telemetry.warn(
+                            category,
+                            error_str,
+                            backend=backend,
+                            worker_backend=backend,
+                            validation_profile=invocation.task.validation_profile,
+                            task_id=invocation.task.id,
+                            run_id=invocation.run.id,
+                        )
         details = "; ".join(f"{item['backend']}: {item['error']}" for item in failures)
         raise LLMExecutionError(f"All configured LLM executors failed. {details}")
 

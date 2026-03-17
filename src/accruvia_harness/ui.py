@@ -832,6 +832,13 @@ body[data-view="atomic"] .conversation-form {
   flex-shrink: 0;
 }
 
+.atomic-card .runtime {
+  font-size: 0.72rem;
+  color: var(--muted);
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
 .atomic-card .meta {
   color: var(--muted);
   font-size: 0.82rem;
@@ -2718,6 +2725,18 @@ function renderAtomicUnits() {
         const status = task.status || 'pending';
         const attemptText = latestRun ? `#${latestRun.attempt}` : '';
         const isExpanded = task.id === state.taskId;
+        const runtimeText = (() => {
+          if (!latestRun || !latestRun.started_at) return '';
+          const start = new Date(latestRun.started_at);
+          const end = latestRun.finished_at ? new Date(latestRun.finished_at) : new Date();
+          const secs = Math.max(0, Math.floor((end - start) / 1000));
+          if (secs < 60) return secs + 's';
+          const mins = Math.floor(secs / 60);
+          const rem = secs % 60;
+          if (mins < 60) return mins + 'm ' + rem + 's';
+          const hrs = Math.floor(mins / 60);
+          return hrs + 'h ' + (mins % 60) + 'm';
+        })();
         return `
           <div class="atomic-card ${isExpanded ? 'active expanded' : ''}" data-atomic-task="${task.id}">
             <div class="status-bar ${status}"></div>
@@ -2726,6 +2745,7 @@ function renderAtomicUnits() {
                 <div class="title">${escapeHtml(task.title)}</div>
                 <span class="status-pill ${status}">${escapeHtml(status)}</span>
                 ${attemptText ? `<span class="attempt-count">${attemptText}</span>` : ''}
+                ${runtimeText ? `<span class="runtime${!latestRun.finished_at ? ' active-timer' : ''}">${runtimeText}</span>` : ''}
               </div>
               <div class="meta">${escapeHtml(task.objective || '').split('\\n')[0]}</div>
               <div class="body">${escapeHtml(task.objective || 'No task objective recorded.')}${task.rationale ? `\n\nWhy this unit exists: ${escapeHtml(task.rationale)}` : ''}</div>
@@ -6333,6 +6353,8 @@ class HarnessUIDataService:
                         {
                             "attempt": latest_run.attempt,
                             "status": latest_run.status.value,
+                            "started_at": latest_run.created_at.isoformat() if latest_run.created_at else None,
+                            "finished_at": latest_run.updated_at.isoformat() if latest_run.status.value in ("completed", "failed", "blocked", "disposed") and latest_run.updated_at else None,
                         }
                         if latest_run is not None
                         else None
