@@ -471,36 +471,127 @@ body[data-view="atomic"] .conversation-form {
   50% { opacity: 1; transform: scale(1.05); }
 }
 
+.atomic-progress-bar {
+  display: flex;
+  height: 0.5rem;
+  border-radius: 0.25rem;
+  overflow: hidden;
+  background: #e8e2d4;
+  margin-bottom: 0.5rem;
+}
+
+.atomic-progress-bar .segment {
+  transition: width 0.3s ease;
+}
+
+.atomic-progress-bar .segment.completed { background: #2f6f4f; }
+.atomic-progress-bar .segment.active { background: #d9b26a; }
+.atomic-progress-bar .segment.failed { background: #c0504d; }
+.atomic-progress-bar .segment.pending { background: #dfd3b8; }
+
+.atomic-progress-summary {
+  font-size: 0.82rem;
+  color: var(--muted);
+  margin-bottom: 0.75rem;
+}
+
 .atomic-list {
   display: grid;
-  gap: 0.85rem;
+  gap: 0.35rem;
 }
 
 .atomic-card {
   border: 1px solid var(--line);
-  border-radius: 1rem;
-  padding: 0.9rem;
+  border-radius: 0.6rem;
+  padding: 0;
   background: #fffdf8;
+  display: flex;
+  overflow: hidden;
+  cursor: pointer;
+  transition: box-shadow 0.15s ease;
+}
+
+.atomic-card:hover {
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
 }
 
 .atomic-card.active {
   border-color: var(--accent);
-  box-shadow: 0 8px 24px rgba(162, 76, 43, 0.08);
+  box-shadow: 0 4px 16px rgba(162, 76, 43, 0.1);
+}
+
+.atomic-card .status-bar {
+  width: 4px;
+  flex-shrink: 0;
+}
+
+.atomic-card .status-bar.pending { background: #b8b0a0; }
+.atomic-card .status-bar.active { background: #d9b26a; }
+.atomic-card .status-bar.completed { background: #2f6f4f; }
+.atomic-card .status-bar.failed { background: #c0504d; }
+
+.atomic-card .card-content {
+  flex: 1;
+  padding: 0.55rem 0.75rem;
+  min-width: 0;
+}
+
+.atomic-card .card-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
 }
 
 .atomic-card .title {
-  font-weight: 700;
-  margin-bottom: 0.35rem;
+  font-weight: 600;
+  font-size: 0.92rem;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.atomic-card .status-pill {
+  font-size: 0.72rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 0.3rem;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.atomic-card .status-pill.pending { background: #f0ebe0; color: #7a7060; }
+.atomic-card .status-pill.active { background: #fff5df; color: #8b5a00; }
+.atomic-card .status-pill.completed { background: #edf9f0; color: #1f6b35; }
+.atomic-card .status-pill.failed { background: #fff1f1; color: #9f2f2f; }
+
+.atomic-card .attempt-count {
+  font-size: 0.72rem;
+  color: var(--muted);
+  flex-shrink: 0;
 }
 
 .atomic-card .meta {
   color: var(--muted);
-  font-size: 0.88rem;
-  margin-bottom: 0.45rem;
+  font-size: 0.82rem;
+  margin-top: 0.15rem;
+  display: none;
+}
+
+.atomic-card.expanded .meta {
+  display: block;
 }
 
 .atomic-card .body {
   white-space: pre-wrap;
+  font-size: 0.85rem;
+  margin-top: 0.35rem;
+  display: none;
+  color: var(--ink);
+  line-height: 1.45;
+}
+
+.atomic-card.expanded .body {
+  display: block;
 }
 
 .app-shell.sidebar-collapsed {
@@ -2306,18 +2397,43 @@ function renderAtomicUnits() {
     atomicList.innerHTML = '<div class="empty">No atomic units yet.</div>';
     return;
   }
-  atomicList.innerHTML = linkedTasks.map((task) => {
+  // Progress bar
+  const counts = { completed: 0, active: 0, failed: 0, pending: 0 };
+  for (const task of linkedTasks) {
+    const s = task.status || 'pending';
+    if (s in counts) counts[s]++;
+    else counts.pending++;
+  }
+  const total = linkedTasks.length;
+  const pct = (n) => total > 0 ? ((n / total) * 100).toFixed(1) + '%' : '0%';
+  const progressBar = `
+    <div class="atomic-progress-bar">
+      <div class="segment completed" style="width:${pct(counts.completed)}"></div>
+      <div class="segment active" style="width:${pct(counts.active)}"></div>
+      <div class="segment failed" style="width:${pct(counts.failed)}"></div>
+      <div class="segment pending" style="width:${pct(counts.pending)}"></div>
+    </div>
+    <div class="atomic-progress-summary">
+      ${counts.completed} done · ${counts.active} active · ${counts.failed} failed · ${counts.pending} pending — ${total} total
+    </div>
+  `;
+  atomicList.innerHTML = progressBar + linkedTasks.map((task) => {
     const latestRun = task.latest_run || null;
-    const meta = [
-      `Status: ${escapeHtml(task.status)}`,
-      task.strategy ? `Strategy: ${escapeHtml(task.strategy)}` : '',
-      latestRun ? `Latest run: attempt ${latestRun.attempt} · ${escapeHtml(latestRun.status)}` : 'No run yet',
-    ].filter(Boolean).join(' · ');
+    const status = task.status || 'pending';
+    const attemptText = latestRun ? `#${latestRun.attempt}` : '';
+    const isExpanded = task.id === state.taskId;
     return `
-      <div class="atomic-card ${task.id === state.taskId ? 'active' : ''}" data-atomic-task="${task.id}">
-        <div class="title">${escapeHtml(task.title)}</div>
-        <div class="meta">${meta}</div>
-        <div class="body">${escapeHtml(task.objective || 'No task objective recorded.')}${task.rationale ? `\n\nWhy this unit exists: ${escapeHtml(task.rationale)}` : ''}</div>
+      <div class="atomic-card ${isExpanded ? 'active expanded' : ''}" data-atomic-task="${task.id}">
+        <div class="status-bar ${status}"></div>
+        <div class="card-content">
+          <div class="card-header">
+            <div class="title">${escapeHtml(task.title)}</div>
+            <span class="status-pill ${status}">${escapeHtml(status)}</span>
+            ${attemptText ? `<span class="attempt-count">${attemptText}</span>` : ''}
+          </div>
+          <div class="meta">${escapeHtml(task.objective || '').split('\\n')[0]}</div>
+          <div class="body">${escapeHtml(task.objective || 'No task objective recorded.')}${task.rationale ? `\n\nWhy this unit exists: ${escapeHtml(task.rationale)}` : ''}</div>
+        </div>
       </div>
     `;
   }).join('');
