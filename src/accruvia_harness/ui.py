@@ -366,6 +366,211 @@ body:not([data-view="atomic"]) #supervisor-panel {
   display: none !important;
 }
 
+/* === Harness dashboard view === */
+body[data-view="harness"] .sidebar { display: none !important; }
+body[data-view="harness"] .header { display: none !important; }
+body[data-view="harness"] #next-action-panel { display: none !important; }
+body[data-view="harness"] #objective-panel { display: none !important; }
+body[data-view="harness"] #interrogation-panel { display: none !important; }
+body[data-view="harness"] #mermaid-panel { display: none !important; }
+body[data-view="harness"] #execution-panel { display: none !important; }
+body[data-view="harness"] #supervisor-panel { display: none !important; }
+body[data-view="harness"] #atomic-panel { display: none !important; }
+body[data-view="harness"] #cli-panel { display: none !important; }
+body[data-view="harness"] .content { max-width: none; margin: 0; padding: 0; }
+body[data-view="harness"] .grid { display: block; padding: 0; gap: 0; }
+
+body[data-view="harness"] #harness-dashboard {
+  display: block !important;
+  width: 100%;
+  max-width: none;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  margin: 0;
+  padding: 1.5rem 2rem;
+  background: var(--bg);
+  min-height: 100vh;
+}
+
+.harness-global-status {
+  margin-bottom: 1.5rem;
+}
+
+.harness-global-status h2 {
+  margin: 0 0 0.5rem 0;
+  font-size: 1.3rem;
+}
+
+.harness-global-status .global-progress-bar {
+  display: flex;
+  height: 0.75rem;
+  border-radius: 0.4rem;
+  overflow: hidden;
+  background: #e8e2d4;
+  margin-bottom: 0.4rem;
+}
+
+.harness-global-status .global-progress-bar .segment { transition: width 0.3s ease; }
+.harness-global-status .global-progress-bar .segment.completed { background: #2f6f4f; }
+.harness-global-status .global-progress-bar .segment.active { background: #d9b26a; }
+.harness-global-status .global-progress-bar .segment.failed { background: #c0504d; }
+.harness-global-status .global-progress-bar .segment.pending { background: #dfd3b8; }
+
+.harness-global-status .summary {
+  font-size: 0.88rem;
+  color: var(--muted);
+}
+
+.harness-llm-health {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1.5rem;
+  flex-wrap: wrap;
+}
+
+.harness-llm-health .llm-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.25rem 0.65rem;
+  border-radius: 0.4rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  border: 1px solid var(--line);
+}
+
+.harness-llm-health .llm-badge.healthy {
+  background: #edf9f0;
+  border-color: #8fc8a5;
+  color: #1f6b35;
+}
+
+.harness-llm-health .llm-badge.demoted {
+  background: #fff1f1;
+  border-color: #d49b9b;
+  color: #9f2f2f;
+}
+
+.harness-llm-health .llm-badge .dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+}
+
+.harness-llm-health .llm-badge.healthy .dot { background: #2f6f4f; }
+.harness-llm-health .llm-badge.demoted .dot { background: #c0504d; }
+
+.harness-project-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.harness-project-card {
+  border: 1px solid var(--line);
+  border-radius: 0.75rem;
+  padding: 1rem;
+  background: var(--panel);
+}
+
+.harness-project-card .project-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+
+.harness-project-card .project-name {
+  font-weight: 700;
+  font-size: 1rem;
+}
+
+.harness-project-card .supervisor-pill {
+  font-size: 0.72rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 0.3rem;
+  font-weight: 600;
+}
+
+.harness-project-card .supervisor-pill.running { background: #fff5df; color: #8b5a00; }
+.harness-project-card .supervisor-pill.idle { background: #f0ebe0; color: #7a7060; }
+.harness-project-card .supervisor-pill.finished { background: #edf9f0; color: #1f6b35; }
+.harness-project-card .supervisor-pill.error { background: #fff1f1; color: #9f2f2f; }
+
+.harness-project-card .mini-progress {
+  display: flex;
+  height: 0.4rem;
+  border-radius: 0.2rem;
+  overflow: hidden;
+  background: #e8e2d4;
+  margin-bottom: 0.35rem;
+}
+
+.harness-project-card .mini-progress .segment { transition: width 0.3s ease; }
+.harness-project-card .mini-progress .segment.completed { background: #2f6f4f; }
+.harness-project-card .mini-progress .segment.active { background: #d9b26a; }
+.harness-project-card .mini-progress .segment.failed { background: #c0504d; }
+.harness-project-card .mini-progress .segment.pending { background: #dfd3b8; }
+
+.harness-project-card .task-summary {
+  font-size: 0.82rem;
+  color: var(--muted);
+  margin-bottom: 0.35rem;
+}
+
+.harness-project-card .objective-name {
+  font-size: 0.88rem;
+  color: var(--ink);
+}
+
+.harness-event-feed h3 {
+  margin: 0 0 0.75rem 0;
+  font-size: 1.1rem;
+}
+
+.harness-feed-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.harness-feed-item {
+  display: flex;
+  gap: 0.75rem;
+  padding: 0.4rem 0.6rem;
+  border-radius: 0.4rem;
+  font-size: 0.82rem;
+  background: var(--panel);
+  border: 1px solid transparent;
+}
+
+.harness-feed-item:hover {
+  border-color: var(--line);
+}
+
+.harness-feed-item .feed-time {
+  color: var(--muted);
+  flex-shrink: 0;
+  min-width: 5.5rem;
+}
+
+.harness-feed-item .feed-project {
+  color: var(--accent);
+  font-weight: 600;
+  flex-shrink: 0;
+  min-width: 8rem;
+}
+
+.harness-feed-item .feed-text {
+  color: var(--ink);
+  flex: 1;
+  min-width: 0;
+}
+
 body[data-view="atomic"] #atomic-panel {
   display: block !important;
   width: 100%;
@@ -2349,8 +2554,18 @@ function renderAtomicUnits() {
       generation.coverage_complete === false ? ' · Coverage: gaps found' : '';
     atomicGenerationStatus.textContent = `Generating atomic units from Mermaid v${generation.diagram_version}${dots}${roundInfo}${taskCount}${critiqueInfo}${coverageInfo}`;
   } else if (generation.status === 'completed') {
-    const roundInfo = generation.refinement_round ? ` after ${generation.refinement_round} round(s)` : '';
-    atomicGenerationStatus.textContent = `Atomic generation complete for Mermaid v${generation.diagram_version}${roundInfo}. ${linkedTasks.length} task(s) ready.`;
+    const tasksDone = linkedTasks.filter((t) => t.status === 'completed').length;
+    const tasksFailed = linkedTasks.filter((t) => t.status === 'failed').length;
+    const tasksActive = linkedTasks.filter((t) => t.status === 'active').length;
+    const tasksPending = linkedTasks.filter((t) => t.status === 'pending').length;
+    const allDone = tasksPending === 0 && tasksActive === 0;
+    if (allDone && linkedTasks.length > 0) {
+      atomicGenerationStatus.textContent = `All ${linkedTasks.length} task(s) finished. ${tasksDone} completed, ${tasksFailed} failed.`;
+    } else if (linkedTasks.length > 0) {
+      atomicGenerationStatus.textContent = `${linkedTasks.length} atomic tasks split from Mermaid v${generation.diagram_version}. ${tasksDone} done, ${tasksActive} active, ${tasksPending} pending, ${tasksFailed} failed.`;
+    } else {
+      atomicGenerationStatus.textContent = `Decomposition finished but produced no tasks.`;
+    }
   } else if (generation.status === 'failed') {
     atomicGenerationStatus.textContent = generation.error || 'Atomic generation failed.';
   } else {
@@ -2359,19 +2574,29 @@ function renderAtomicUnits() {
   const lastActivity = generation.last_activity_at ? formatRelativeTime(generation.last_activity_at) : '';
   const phase = generation.phase || '';
   const pills = [];
-  const statusClass = generation.status === 'running'
-    ? 'status-running'
-    : generation.status === 'completed'
-      ? 'status-complete'
-      : generation.status === 'failed'
-        ? 'status-failed'
-        : 'status-idle';
-  if (phase) {
-    const liveClass = generation.status === 'running' ? ' live' : '';
-    pills.push(`<span class="pill ${statusClass}${liveClass}">Phase: ${escapeHtml(phase)}</span>`);
-  } else if (generation.status) {
-    pills.push(`<span class="pill ${statusClass}">Status: ${escapeHtml(generation.status)}</span>`);
+  // Determine the effective status: if generation is done but tasks are in flight, show execution status
+  const hasInFlightTasks = linkedTasks.some((t) => t.status === 'pending' || t.status === 'active');
+  let effectiveStatus;
+  let effectiveLabel;
+  if (generation.status === 'completed' && hasInFlightTasks) {
+    effectiveStatus = 'status-running';
+    effectiveLabel = 'Executing';
+  } else if (generation.status === 'completed' && linkedTasks.length > 0) {
+    const allPassed = linkedTasks.every((t) => t.status === 'completed');
+    effectiveStatus = allPassed ? 'status-complete' : 'status-failed';
+    effectiveLabel = allPassed ? 'All tasks done' : 'Tasks finished with failures';
+  } else if (generation.status === 'running') {
+    effectiveStatus = 'status-running';
+    effectiveLabel = phase ? `Splitting: ${phase}` : 'Splitting into tasks';
+  } else if (generation.status === 'failed') {
+    effectiveStatus = 'status-failed';
+    effectiveLabel = 'Decomposition failed';
+  } else {
+    effectiveStatus = 'status-idle';
+    effectiveLabel = 'Idle';
   }
+  const liveClass = effectiveStatus === 'status-running' ? ' live' : '';
+  pills.push(`<span class="pill ${effectiveStatus}${liveClass}">${escapeHtml(effectiveLabel)}</span>`);
   if (generation.refinement_round) {
     pills.push(`<span class="pill">Round ${generation.refinement_round}</span>`);
   }
@@ -3201,7 +3426,109 @@ function escapeHtml(value) {
     .replaceAll("'", '&#39;');
 }
 
+// === Harness dashboard ===
+
+let harnessData = null;
+
+async function loadHarnessDashboard() {
+  try {
+    harnessData = await api('/api/harness');
+    renderHarnessDashboard();
+  } catch (_error) {
+    // Silently retry on next poll.
+  }
+}
+
+function renderHarnessDashboard() {
+  if (!harnessData) return;
+  const globalStatus = document.getElementById('harness-global-status');
+  const llmHealth = document.getElementById('harness-llm-health');
+  const projectCards = document.getElementById('harness-project-cards');
+  const feedList = document.getElementById('harness-feed-list');
+  if (!globalStatus) return;
+
+  const gc = harnessData.global_counts || {};
+  const gt = harnessData.global_total || 0;
+  const pct = (n) => gt > 0 ? ((n / gt) * 100).toFixed(1) + '%' : '0%';
+  const anyRunning = (harnessData.projects || []).some((p) => p.supervisor?.running);
+  const statusWord = anyRunning ? 'Working' : 'Idle';
+
+  globalStatus.innerHTML = `
+    <h2>Harness — ${escapeHtml(statusWord)}</h2>
+    <div class="global-progress-bar">
+      <div class="segment completed" style="width:${pct(gc.completed || 0)}"></div>
+      <div class="segment active" style="width:${pct(gc.active || 0)}"></div>
+      <div class="segment failed" style="width:${pct(gc.failed || 0)}"></div>
+      <div class="segment pending" style="width:${pct(gc.pending || 0)}"></div>
+    </div>
+    <div class="summary">
+      ${gc.completed || 0} done · ${gc.active || 0} active · ${gc.failed || 0} failed · ${gc.pending || 0} pending — ${gt} total tasks
+    </div>
+  `;
+
+  // LLM health badges
+  const backends = harnessData.llm_health || [];
+  llmHealth.innerHTML = backends.length
+    ? backends.map((b) => `
+        <span class="llm-badge ${b.demoted ? 'demoted' : 'healthy'}">
+          <span class="dot"></span>
+          ${escapeHtml(b.name)}${b.demoted ? ' (down)' : ''}
+        </span>
+      `).join('')
+    : '<span style="color:var(--muted);font-size:0.85rem">No LLM backends configured</span>';
+
+  // Project cards
+  const projects = harnessData.projects || [];
+  projectCards.innerHTML = projects.map((p) => {
+    const ts = p.tasks_by_status || {};
+    const total = p.task_total || 0;
+    const ppct = (n) => total > 0 ? ((n / total) * 100).toFixed(1) + '%' : '0%';
+    const supState = p.supervisor?.state || 'idle';
+    const supRunning = p.supervisor?.running;
+    const supClass = supRunning ? 'running' : supState === 'finished' ? 'finished' : supState === 'error' ? 'error' : 'idle';
+    const obj = p.active_objective;
+    const objLine = obj
+      ? `<div class="objective-name">${escapeHtml(obj.title)} · ${escapeHtml(obj.status)}${obj.task_total ? ` · ${obj.task_counts?.completed || 0}/${obj.task_total} done` : ''}</div>`
+      : '<div class="objective-name" style="color:var(--muted)">No active objective</div>';
+    return `
+      <div class="harness-project-card">
+        <div class="project-header">
+          <span class="project-name">${escapeHtml(p.name)}</span>
+          <span class="supervisor-pill ${supClass}">${escapeHtml(supRunning ? 'running' : supState)}</span>
+        </div>
+        <div class="mini-progress">
+          <div class="segment completed" style="width:${ppct(ts.completed || 0)}"></div>
+          <div class="segment active" style="width:${ppct(ts.active || 0)}"></div>
+          <div class="segment failed" style="width:${ppct(ts.failed || 0)}"></div>
+          <div class="segment pending" style="width:${ppct(ts.pending || 0)}"></div>
+        </div>
+        <div class="task-summary">${ts.completed || 0} done · ${ts.active || 0} active · ${ts.failed || 0} failed · ${ts.pending || 0} pending — ${total} total</div>
+        ${objLine}
+      </div>
+    `;
+  }).join('');
+
+  // Event feed
+  const events = harnessData.recent_events || [];
+  feedList.innerHTML = events.length
+    ? events.map((e) => `
+        <div class="harness-feed-item">
+          <span class="feed-time">${escapeHtml(formatRelativeTime(e.created_at))}</span>
+          <span class="feed-project">${escapeHtml(e.project_name)}</span>
+          <span class="feed-text">${escapeHtml(e.text)}</span>
+        </div>
+      `).join('')
+    : '<div style="color:var(--muted);padding:0.5rem">No recent events.</div>';
+}
+
+// === Main ===
+
 async function main() {
+  if (state.view === 'harness') {
+    await loadHarnessDashboard();
+    window.setInterval(loadHarnessDashboard, 3000);
+    return;
+  }
   try {
     applySidebarState();
     await loadProjects();
@@ -3473,6 +3800,15 @@ _FULL_UI_HTML = """
             <div id="output-tabs" class="output-tabs"></div>
             <div id="output-body" class="output-body"></div>
           </section>
+          <section id="harness-dashboard" class="panel" hidden>
+            <div id="harness-global-status" class="harness-global-status"></div>
+            <div id="harness-llm-health" class="harness-llm-health"></div>
+            <div id="harness-project-cards" class="harness-project-cards"></div>
+            <div id="harness-event-feed" class="harness-event-feed">
+              <h3>Live feed</h3>
+              <div id="harness-feed-list" class="harness-feed-list"></div>
+            </div>
+          </section>
         </div>
       </main>
     </div>
@@ -3483,6 +3819,7 @@ _FULL_UI_HTML = """
 
 _INDEX_HTML = _FULL_UI_HTML.replace('data-view="default"', 'data-view="control-flow"', 1)
 _ATOMIC_HTML = _FULL_UI_HTML.replace('data-view="default"', 'data-view="atomic"', 1)
+_HARNESS_HTML = _FULL_UI_HTML.replace('data-view="default"', 'data-view="harness"', 1)
 
 
 @dataclass(slots=True)
@@ -4804,6 +5141,95 @@ class HarnessUIDataService:
         return {
             "running": _BACKGROUND_SUPERVISOR.is_running(project_id),
             "supervisor": _BACKGROUND_SUPERVISOR.status(project_id),
+        }
+
+    def harness_overview(self) -> dict[str, object]:
+        """System-wide harness dashboard data."""
+        projects = []
+        global_counts = {"completed": 0, "active": 0, "failed": 0, "pending": 0}
+        for project in self.store.list_projects():
+            metrics = self.store.metrics_snapshot(project.id)
+            tasks_by_status = metrics.get("tasks_by_status", {})
+            for status_key in global_counts:
+                global_counts[status_key] += int(tasks_by_status.get(status_key, 0))
+            objectives = self.store.list_objectives(project.id)
+            active_objective = None
+            for obj in objectives:
+                if obj.status.value in ("executing", "planning"):
+                    gen = self._atomic_generation_state(obj.id)
+                    linked_tasks = [t for t in self.store.list_tasks(project.id) if t.objective_id == obj.id]
+                    task_counts = {"completed": 0, "active": 0, "failed": 0, "pending": 0}
+                    for t in linked_tasks:
+                        s = t.status.value if hasattr(t.status, "value") else str(t.status)
+                        if s in task_counts:
+                            task_counts[s] += 1
+                    active_objective = {
+                        "id": obj.id,
+                        "title": obj.title,
+                        "status": obj.status.value,
+                        "atomic_generation": gen,
+                        "task_counts": task_counts,
+                        "task_total": len(linked_tasks),
+                    }
+                    break
+            supervisor = _BACKGROUND_SUPERVISOR.status(project.id)
+            projects.append({
+                "id": project.id,
+                "name": project.name,
+                "supervisor": {
+                    "running": _BACKGROUND_SUPERVISOR.is_running(project.id),
+                    **supervisor,
+                },
+                "tasks_by_status": dict(tasks_by_status),
+                "task_total": sum(int(v) for v in tasks_by_status.values()),
+                "active_objective": active_objective,
+            })
+        # LLM health from router
+        llm_health = []
+        interrogation_service = getattr(self.ctx, "interrogation_service", None)
+        llm_router = getattr(interrogation_service, "llm_router", None)
+        if llm_router is not None:
+            for name in sorted(llm_router.executors.keys()):
+                llm_health.append({
+                    "name": name,
+                    "demoted": name in llm_router._demoted,
+                })
+        # Recent events for the feed
+        recent_events = []
+        for project in self.store.list_projects():
+            records = self.store.list_context_records(
+                project_id=project.id, record_type="action_receipt",
+            )
+            for record in records[-20:]:
+                text = record.content
+                if text.startswith("Action receipt: "):
+                    text = text[len("Action receipt: "):]
+                recent_events.append({
+                    "project_id": project.id,
+                    "project_name": project.name,
+                    "text": text,
+                    "created_at": record.created_at.isoformat(),
+                    "objective_id": record.objective_id or "",
+                })
+            # Also include decomposition telemetry
+            telemetry = self.store.list_context_records(
+                project_id=project.id, record_type="atomic_decomposition_telemetry",
+            )
+            for record in telemetry[-10:]:
+                recent_events.append({
+                    "project_id": project.id,
+                    "project_name": project.name,
+                    "text": record.content,
+                    "created_at": record.created_at.isoformat(),
+                    "objective_id": record.objective_id or "",
+                })
+        recent_events.sort(key=lambda e: e["created_at"], reverse=True)
+        return {
+            "global_counts": global_counts,
+            "global_total": sum(global_counts.values()),
+            "projects": projects,
+            "llm_health": llm_health,
+            "recent_events": recent_events[:50],
         }
 
     def run_cli_command(self, command: str) -> dict[str, object]:
@@ -6289,6 +6715,9 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
         if parsed.path == "/workspace":
             self._send_html(_FULL_UI_HTML)
             return
+        if parsed.path == "/harness":
+            self._send_html(_HARNESS_HTML)
+            return
         if parsed.path == "/app.js":
             self._send_text(_APP_JS, content_type="application/javascript; charset=utf-8")
             return
@@ -6301,6 +6730,9 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/api/projects/") and parsed.path.endswith("/workspace"):
             project_ref = parsed.path[len("/api/projects/") : -len("/workspace")].strip("/")
             self._dispatch_json(lambda: self.data_service.project_workspace(project_ref))
+            return
+        if parsed.path == "/api/harness":
+            self._send_json(self.data_service.harness_overview())
             return
         if parsed.path.startswith("/api/objectives/") and parsed.path.endswith("/intent"):
             self._send_json({"error": "Method not allowed"}, status=HTTPStatus.METHOD_NOT_ALLOWED)
