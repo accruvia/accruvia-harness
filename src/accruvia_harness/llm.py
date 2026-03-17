@@ -317,17 +317,49 @@ class LLMRouter:
             ordered = healthy + demoted
         return [(self.executors[name], name) for name in ordered]
 
+    _TRANSIENT_SIGNALS = (
+        "unable to connect",
+        "connection reset",
+        "connection refused",
+        "connection timed out",
+        "temporary failure",
+        "service unavailable",
+        "502",
+        "503",
+        "504",
+        "rate limit",
+        "overloaded",
+    )
+
+    def _is_transient(self, error_message: str) -> bool:
+        lowered = error_message.lower()
+        return any(signal in lowered for signal in self._TRANSIENT_SIGNALS)
+
     def execute(self, invocation: LLMInvocation, telemetry=None) -> tuple[LLMExecutionResult, str]:
         failures: list[dict[str, str]] = []
         for executor, backend in self.resolve_chain():
-            try:
-                result = executor.execute(invocation)
-                # Success: un-demote this backend
-                self._demoted.discard(backend)
-                return result, backend
-            except LLMExecutionError as exc:
-                self._demoted.add(backend)
-                failures.append({"backend": backend, "error": str(exc)})
+            max_tries = 3
+            for attempt in range(1, max_tries + 1):
+                try:
+                    result = executor.execute(invocation)
+                    self._demoted.discard(backend)
+                    return result, backend
+                except LLMExecutionError as exc:
+                    error_str = str(exc)
+                    is_transient = self._is_transient(error_str)
+                    if is_transient and attempt < max_tries:
+                        if telemetry is not None:
+                            telemetry.warn(
+                                "llm_transient_retry",
+                                f"Transient error on {backend} (attempt {attempt}/{max_tries}): {error_str}",
+                                backend=backend,
+                            )
+                        import time as _time
+                        _time.sleep(min(attempt * 5, 15))
+                        continue
+                    if not is_transient:
+                        self._demoted.add(backend)
+                    failures.append({"backend": backend, "error": error_str, "attempts": attempt})
                 if telemetry is not None:
                     category = "executor_timeout" if "timed out" in str(exc).lower() else "llm_executor_failure"
                     telemetry.warn(

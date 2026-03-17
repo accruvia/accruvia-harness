@@ -4412,7 +4412,7 @@ class HarnessUIDataService:
         result, _backend = llm_router.execute(
             LLMInvocation(
                 task=task_stub, run=run, prompt=prompt, run_dir=run_dir,
-                timeout_seconds_override=300,  # 5 min — atomic decomposition prompts are large
+                timeout_seconds_override=1200,  # 20 min — atomic decomposition prompts are large
             ),
         )
         return result.response_text.strip()
@@ -6412,8 +6412,15 @@ def start_ui_server(ctx, *, host: str, port: int, open_browser: bool, project_re
 
 
 def _auto_start_supervisors(data_service: HarnessUIDataService, ctx) -> None:
-    """Start background supervisors for any project with pending/active tasks."""
+    """Start background supervisors for projects with pending tasks, and resume stalled atomic generation."""
     for project in data_service.store.list_projects():
+        # Resume any stalled atomic generation
+        for objective in data_service.store.list_objectives(project.id):
+            try:
+                data_service._maybe_resume_atomic_generation(objective.id)
+            except Exception:
+                pass
+        # Start supervisor if there's work to do
         metrics = data_service.store.metrics_snapshot(project.id)
         pending = int(metrics.get("tasks_by_status", {}).get("pending", 0))
         active = int(metrics.get("tasks_by_status", {}).get("active", 0))
