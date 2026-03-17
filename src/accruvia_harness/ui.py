@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from queue import Queue, Empty
+
 from .commands.common import resolve_project_ref
 from .context_control import objective_execution_gate
 from .frustration_triage import triage_frustration
@@ -2727,8 +2729,9 @@ function renderAtomicUnits() {
         const isExpanded = task.id === state.taskId;
         const runtimeText = (() => {
           if (!latestRun || !latestRun.started_at) return '';
+          if (!latestRun.finished_at) return ''; // Active timers are updated by the 1s tick
           const start = new Date(latestRun.started_at);
-          const end = latestRun.finished_at ? new Date(latestRun.finished_at) : new Date();
+          const end = new Date(latestRun.finished_at);
           const secs = Math.max(0, Math.floor((end - start) / 1000));
           if (secs < 60) return secs + 's';
           const mins = Math.floor(secs / 60);
@@ -2737,6 +2740,7 @@ function renderAtomicUnits() {
           const hrs = Math.floor(mins / 60);
           return hrs + 'h ' + (mins % 60) + 'm';
         })();
+        const isActiveTimer = latestRun && latestRun.started_at && !latestRun.finished_at;
         return `
           <div class="atomic-card ${isExpanded ? 'active expanded' : ''}" data-atomic-task="${task.id}">
             <div class="status-bar ${status}"></div>
@@ -2745,7 +2749,8 @@ function renderAtomicUnits() {
                 <div class="title">${escapeHtml(task.title)}</div>
                 <span class="status-pill ${status}">${escapeHtml(status)}</span>
                 ${attemptText ? `<span class="attempt-count">${attemptText}</span>` : ''}
-                ${runtimeText ? `<span class="runtime${!latestRun.finished_at ? ' active-timer' : ''}">${runtimeText}</span>` : ''}
+                ${isActiveTimer ? `<span class="runtime active-timer" data-started="${latestRun.started_at}"></span>` : ''}
+                ${runtimeText ? `<span class="runtime">${runtimeText}</span>` : ''}
               </div>
               <div class="meta">${escapeHtml(task.objective || '').split('\\n')[0]}</div>
               <div class="body">${escapeHtml(task.objective || 'No task objective recorded.')}${task.rationale ? `\n\nWhy this unit exists: ${escapeHtml(task.rationale)}` : ''}</div>
@@ -2754,7 +2759,13 @@ function renderAtomicUnits() {
         `;
       }).join('')
     : `<div class="empty">No ${state.atomicTab} tasks.</div>`;
-  atomicList.innerHTML = tabsHtml + progressBar + cardsHtml;
+  const newHtml = tabsHtml + progressBar + cardsHtml;
+  // Skip DOM rebuild if content is unchanged (avoids scroll/selection disruption).
+  if (atomicList._lastHtml === newHtml) return;
+  atomicList._lastHtml = newHtml;
+  const scrollTop = atomicList.scrollTop;
+  atomicList.innerHTML = newHtml;
+  atomicList.scrollTop = scrollTop;
   // Wire tab clicks
   const tabContainer = document.getElementById('atomic-tabs');
   if (tabContainer) {
@@ -2762,6 +2773,7 @@ function renderAtomicUnits() {
       const tab = event.target.closest('[data-tab]');
       if (!tab) return;
       state.atomicTab = tab.dataset.tab;
+      atomicList._lastHtml = null; // force rebuild on tab change
       renderAtomicUnits();
     });
   }
@@ -3658,24 +3670,44 @@ async function main() {
     applySidebarState();
     await loadProjects();
     await loadWorkspace();
+    // Tick active-timer runtime labels every second without rebuilding the DOM.
     window.setInterval(() => {
+      document.querySelectorAll('.runtime.active-timer').forEach((el) => {
+        const started = el.dataset.started;
+        if (!started) return;
+        const secs = Math.max(0, Math.floor((Date.now() - new Date(started).getTime()) / 1000));
+        let text;
+        if (secs < 60) text = secs + 's';
+        else { const m = Math.floor(secs/60), r = secs%60; text = m < 60 ? m+'m '+r+'s' : Math.floor(m/60)+'h '+(m%60)+'m'; }
+        el.textContent = text;
+      });
       renderMermaidMeta(currentObjective());
-      if (state.view === 'atomic') {
-        renderAtomicUnits();
-        renderSupervisorStatus();
-      }
     }, 1000);
-    window.setInterval(async () => {
-      try {
-        const objective = currentObjective();
-        const supervisorActive = state.workspace?.supervisor?.running || state.workspace?.supervisor?.state === 'running';
-        if (state.view === 'atomic' && (objective?.atomic_generation?.status === 'running' || supervisorActive)) {
-          await loadWorkspace();
+    // Use SSE for data updates; fall back to polling if EventSource unavailable.
+    if (typeof EventSource !== 'undefined') {
+      let es = new EventSource('/api/events');
+      es.onmessage = async (evt) => {
+        if (evt.data === 'workspace-changed') {
+          try { await loadWorkspace(); } catch (_e) {}
         }
-      } catch (_error) {
-        // Ignore polling failures; the next poll can recover.
-      }
-    }, 2000);
+      };
+      es.onerror = () => {
+        // Reconnect is automatic with EventSource, but refresh data on recovery.
+        setTimeout(async () => {
+          try { await loadWorkspace(); } catch (_e) {}
+        }, 3000);
+      };
+    } else {
+      window.setInterval(async () => {
+        try {
+          const objective = currentObjective();
+          const supervisorActive = state.workspace?.supervisor?.running || state.workspace?.supervisor?.state === 'running';
+          if (state.view === 'atomic' && (objective?.atomic_generation?.status === 'running' || supervisorActive)) {
+            await loadWorkspace();
+          }
+        } catch (_error) {}
+      }, 5000);
+    }
   } catch (error) {
     showError(error.message || 'Failed to load workspace');
   }
@@ -6824,12 +6856,51 @@ class HarnessUIDataService:
         }
 
 
+class _EventBus:
+    """Simple pub/sub for SSE.  Clients register a queue; writers broadcast."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._subscribers: list[Queue[str | None]] = []
+
+    def subscribe(self) -> Queue[str | None]:
+        q: Queue[str | None] = Queue(maxsize=32)
+        with self._lock:
+            self._subscribers.append(q)
+        return q
+
+    def unsubscribe(self, q: Queue[str | None]) -> None:
+        with self._lock:
+            try:
+                self._subscribers.remove(q)
+            except ValueError:
+                pass
+
+    def publish(self, event: str) -> None:
+        with self._lock:
+            dead: list[Queue[str | None]] = []
+            for q in self._subscribers:
+                try:
+                    q.put_nowait(event)
+                except Exception:
+                    dead.append(q)
+            for q in dead:
+                try:
+                    self._subscribers.remove(q)
+                except ValueError:
+                    pass
+
+
 class HarnessUIHandler(BaseHTTPRequestHandler):
     server_version = "AccruviaHarnessUI/0.1"
 
     @property
     def data_service(self) -> HarnessUIDataService:
         return self.server.data_service  # type: ignore[attr-defined]
+
+    @property
+    def event_bus(self) -> _EventBus:
+        return self.server.event_bus  # type: ignore[attr-defined]
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
@@ -6872,6 +6943,9 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
             project_id = parsed.path[len("/api/projects/") : -len("/supervisor")].strip("/")
             self._send_json(self.data_service.supervisor_status(project_id))
             return
+        if parsed.path == "/api/events":
+            self._handle_sse()
+            return
         self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:  # noqa: N802
@@ -6886,6 +6960,7 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
                     str(payload.get("summary") or ""),
                 ),
                 status=HTTPStatus.CREATED,
+                notify=True,
             )
             return
         if parsed.path.startswith("/api/projects/") and parsed.path.endswith("/comments"):
@@ -6899,6 +6974,7 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
                     str(payload.get("objective_id") or "").strip() or None,
                 ),
                 status=HTTPStatus.CREATED,
+                notify=True,
             )
             return
         if parsed.path.startswith("/api/objectives/") and parsed.path.endswith("/tasks"):
@@ -6906,6 +6982,7 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
             self._dispatch_json(
                 lambda: self.data_service.create_linked_task(objective_id),
                 status=HTTPStatus.CREATED,
+                notify=True,
             )
             return
         if parsed.path.startswith("/api/objectives/") and parsed.path.endswith("/interrogation"):
@@ -6913,6 +6990,7 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
             self._dispatch_json(
                 lambda: self.data_service.complete_interrogation_review(objective_id),
                 status=HTTPStatus.CREATED,
+                notify=True,
             )
             return
         if parsed.path.startswith("/api/objectives/") and parsed.path.endswith("/mermaid/proposal/accept"):
@@ -6921,6 +6999,7 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
             self._dispatch_json(
                 lambda: self.data_service.accept_mermaid_proposal(objective_id, str(payload.get("proposal_id") or "")),
                 status=HTTPStatus.CREATED,
+                notify=True,
             )
             return
         if parsed.path.startswith("/api/objectives/") and parsed.path.endswith("/mermaid/proposal/reject"):
@@ -6933,6 +7012,7 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
                     resolution=str(payload.get("resolution") or "refine"),
                 ),
                 status=HTTPStatus.CREATED,
+                notify=True,
             )
             return
         if parsed.path.startswith("/api/tasks/") and parsed.path.endswith("/run"):
@@ -6940,6 +7020,7 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
             self._dispatch_json(
                 lambda: self.data_service.run_task(task_id),
                 status=HTTPStatus.CREATED,
+                notify=True,
             )
             return
         if parsed.path.startswith("/api/projects/") and parsed.path.endswith("/supervise"):
@@ -6947,12 +7028,14 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
             self._dispatch_json(
                 lambda: self.data_service.start_supervisor(project_id),
                 status=HTTPStatus.CREATED,
+                notify=True,
             )
             return
         if parsed.path.startswith("/api/projects/") and parsed.path.endswith("/supervise/stop"):
             project_id = parsed.path[len("/api/projects/") : -len("/supervise/stop")].strip("/")
             self._dispatch_json(
                 lambda: self.data_service.stop_supervisor(project_id),
+                notify=True,
             )
             return
         if parsed.path == "/api/cli/command":
@@ -6960,6 +7043,7 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
             self._dispatch_json(
                 lambda: self.data_service.run_cli_command(str(payload.get("command") or "")),
                 status=HTTPStatus.CREATED,
+                notify=True,
             )
             return
         if parsed.path.startswith("/api/projects/") and parsed.path.endswith("/frustrations"):
@@ -6973,6 +7057,7 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
                     str(payload.get("objective_id") or "").strip() or None,
                 ),
                 status=HTTPStatus.CREATED,
+                notify=True,
             )
             return
         self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
@@ -6988,7 +7073,8 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
                     status=str(payload.get("status") or ""),
                     summary=str(payload.get("summary") or ""),
                     blocking_reason=str(payload.get("blocking_reason") or ""),
-                )
+                ),
+                notify=True,
             )
             return
         if parsed.path.startswith("/api/objectives/") and parsed.path.endswith("/intent"):
@@ -7001,7 +7087,8 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
                     success_definition=str(payload.get("success_definition") or ""),
                     non_negotiables=list(payload.get("non_negotiables") or []),
                     frustration_signals=list(payload.get("frustration_signals") or []),
-                )
+                ),
+                notify=True,
             )
             return
         self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
@@ -7009,13 +7096,15 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
     def log_message(self, _format: str, *args) -> None:
         return
 
-    def _dispatch_json(self, fn, *, status: HTTPStatus = HTTPStatus.OK) -> None:
+    def _dispatch_json(self, fn, *, status: HTTPStatus = HTTPStatus.OK, notify: bool = False) -> None:
         try:
             payload = fn()
         except ValueError as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
             return
         self._send_json(payload, status=status)
+        if notify:
+            self.event_bus.publish("workspace-changed")
 
     def _read_json_body(self) -> dict[str, object]:
         content_length = int(self.headers.get("Content-Length", "0") or 0)
@@ -7051,6 +7140,32 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self._write_body(encoded)
 
+    def _handle_sse(self) -> None:
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        q = self.event_bus.subscribe()
+        try:
+            while True:
+                try:
+                    event = q.get(timeout=15)
+                except Empty:
+                    # Send keepalive comment
+                    self.wfile.write(b":\n\n")
+                    self.wfile.flush()
+                    continue
+                if event is None:
+                    break
+                self.wfile.write(f"data: {event}\n\n".encode("utf-8"))
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            self.event_bus.unsubscribe(q)
+
     def _write_body(self, body: bytes) -> None:
         try:
             self.wfile.write(body)
@@ -7063,8 +7178,10 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
 def start_ui_server(ctx, *, host: str, port: int, open_browser: bool, project_ref: str | None = None) -> None:
     data_service = HarnessUIDataService(ctx)
     resolved_port = _resolve_ui_port(host, port)
+    event_bus = _EventBus()
     server = ThreadingHTTPServer((host, resolved_port), HarnessUIHandler)
     server.data_service = data_service  # type: ignore[attr-defined]
+    server.event_bus = event_bus  # type: ignore[attr-defined]
     url = f"http://{host}:{resolved_port}/"
     if project_ref:
         project_id = resolve_project_ref(ctx, project_ref)
@@ -7075,12 +7192,33 @@ def start_ui_server(ctx, *, host: str, port: int, open_browser: bool, project_re
     print("Press Ctrl+C to stop.", flush=True)
     if open_browser:
         print(f"Refresh your existing browser tab at {url}", flush=True)
+    # Background thread polls for database changes and pushes SSE events.
+    _stop_change_detector = threading.Event()
+
+    def _detect_changes() -> None:
+        last_signature: str | None = None
+        while not _stop_change_detector.wait(timeout=3):
+            try:
+                tasks = data_service.store.list_tasks()
+                sig = ";".join(
+                    f"{t.id}:{t.status.value}:{t.updated_at.isoformat()}" for t in tasks
+                )
+                if last_signature is not None and sig != last_signature:
+                    event_bus.publish("workspace-changed")
+                last_signature = sig
+            except Exception:
+                pass
+
+    change_thread = threading.Thread(target=_detect_changes, daemon=True)
+    change_thread.start()
+
     _auto_start_supervisors(data_service, ctx)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        _stop_change_detector.set()
         for project in data_service.store.list_projects():
             _BACKGROUND_SUPERVISOR.stop(project.id)
         server.server_close()
