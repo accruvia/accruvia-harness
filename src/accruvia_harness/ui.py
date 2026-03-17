@@ -3212,7 +3212,7 @@ diagramShell.addEventListener('click', (event) => {
     return;
   }
   const objective = currentObjective();
-  if (!objective || currentFocusMode(objective) !== 'mermaid_review') return;
+  if (!objective || !objective.diagram) return;
   const target = findDiagramAnchorTarget(event.target);
   if (!target) return;
   const anchor = anchorFromElement(target);
