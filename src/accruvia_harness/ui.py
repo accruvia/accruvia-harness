@@ -613,7 +613,8 @@ body[data-view="atomic"] #objective-banner {
   background: #ffffff;
 }
 
-body[data-view="atomic"] .atomic-objective-picker {
+body[data-view="atomic"] .atomic-objective-picker,
+body[data-view="control-flow"] .atomic-objective-picker {
   display: block;
 }
 
