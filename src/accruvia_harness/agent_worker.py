@@ -231,6 +231,22 @@ def select_worker_llm_chain(environ: Mapping[str, str]) -> list[tuple[str, str]]
     return chain or [("codex", "codex exec")]
 
 
+_CREDIT_EXHAUSTION_SIGNALS = (
+    "usage limit",
+    "rate limit",
+    "credits",
+    "quota exceeded",
+    "billing",
+    "insufficient_quota",
+    "exceeded your current quota",
+)
+
+
+def _is_credit_exhaustion(output: str) -> bool:
+    lowered = output.lower()
+    return any(signal in lowered for signal in _CREDIT_EXHAUSTION_SIGNALS)
+
+
 def _first_nonempty_line(text: str) -> str:
     for line in text.splitlines():
         if line.strip():
@@ -328,8 +344,11 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
             )
             if completed.returncode == 0:
                 break
-            # Non-zero exit: log and try next backend
+            # Non-zero exit: log output and try next backend
+            combined_output = (completed.stdout or "") + (completed.stderr or "")
             chain_failures.append(f"{llm_backend}: exit code {completed.returncode}")
+            if _is_credit_exhaustion(combined_output):
+                chain_failures[-1] += " (credits exhausted)"
             completed = None
         except subprocess.TimeoutExpired as exc:
             chain_failures.append(f"{llm_backend}: timed out after {llm_timeout_seconds}s")
@@ -338,6 +357,8 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
             completed = None
 
     if completed is None:
+        all_credit_exhausted = all("credits exhausted" in f for f in chain_failures)
+        failure_cat = "llm_credits_exhausted" if all_credit_exhausted else "executor_timeout"
         report_path.write_text(
             json.dumps(
                 {
@@ -352,7 +373,8 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
                     "worker_outcome": "blocked",
                     "blocked": True,
                     "infrastructure_failure": True,
-                    "failure_category": "executor_timeout",
+                    "credits_exhausted": all_credit_exhausted,
+                    "failure_category": failure_cat,
                     "failure_message": f"All worker backends failed: {'; '.join(chain_failures)}",
                     "timeout_seconds": llm_timeout_seconds,
                     "changed_files": [],

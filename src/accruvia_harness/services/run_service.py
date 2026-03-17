@@ -277,6 +277,19 @@ class RunService:
             if callable(set_progress_callback):
                 set_progress_callback(None)
         work = self._ensure_failure_evidence(task, run, work)
+
+        # Credits exhausted: don't burn an attempt — requeue the task and signal the supervisor to freeze.
+        if work.diagnostics and work.diagnostics.get("credits_exhausted"):
+            run = self.store.mark_run(run, RunStatus.BLOCKED, "All LLM backends out of credits.")
+            self.store.update_task_status(task.id, TaskStatus.PENDING)
+            progress({
+                "type": "credits_exhausted",
+                "task_id": task.id,
+                "run_id": run.id,
+                "message": str(work.diagnostics.get("failure_message", "")),
+            })
+            return run
+
         self.store.create_event(
             Event(
                 id=new_id("event"),
