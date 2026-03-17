@@ -2757,6 +2757,15 @@ function renderSupervisorStatus() {
   const stopBtn = document.getElementById('supervisor-stop-btn');
   const statusEl = document.getElementById('supervisor-status');
   const metaEl = document.getElementById('supervisor-meta');
+  // Scope counts to current objective
+  const objective = currentObjective();
+  const objTasks = Array.isArray(objective?.atomic_units) ? objective.atomic_units : [];
+  const objCounts = { completed: 0, active: 0, failed: 0, pending: 0 };
+  for (const t of objTasks) {
+    const s = t.status || 'pending';
+    if (s in objCounts) objCounts[s]++;
+  }
+  const objTotal = objTasks.length;
   // Only show the panel when harness is active or has something to report
   panel.hidden = !isRunning && !hasHistory;
   // Start button only when stopped after having run (restart), never on initial idle
@@ -2765,13 +2774,17 @@ function renderSupervisorStatus() {
   if (statusEl) {
     if (supervisor.state === 'running' || supervisor.state === 'starting') {
       const dots = '.'.repeat((Math.floor(Date.now() / 500) % 3) + 1);
-      statusEl.textContent = `The harness is working through your tasks${dots}`;
+      statusEl.textContent = objTotal
+        ? `The harness is working through your tasks${dots} ${objCounts.completed}/${objTotal} done.`
+        : `The harness is working through your tasks${dots}`;
     } else if (supervisor.state === 'finished') {
       const reason = supervisor.exit_reason === 'idle' ? 'No more tasks to process.'
         : supervisor.exit_reason === 'graceful_stop_requested' ? 'Stopped by operator.'
         : supervisor.exit_reason === 'max_iterations_reached' ? 'Reached iteration limit.'
         : 'Finished.';
-      statusEl.textContent = `${reason} Completed ${supervisor.processed_count || 0} task(s).`;
+      statusEl.textContent = objTotal
+        ? `${reason} ${objCounts.completed}/${objTotal} tasks completed.`
+        : `${reason}`;
     } else if (supervisor.state === 'error') {
       statusEl.textContent = `Something went wrong while processing tasks. You can restart to retry.`;
     } else {
@@ -2783,8 +2796,8 @@ function renderSupervisorStatus() {
     const stateClass = isRunning ? 'status-running' : supervisor.state === 'finished' ? 'status-complete' : supervisor.state === 'error' ? 'status-failed' : 'status-idle';
     const liveClass = isRunning ? ' live' : '';
     pills.push(`<span class="pill ${stateClass}${liveClass}">${escapeHtml(supervisor.state || 'idle')}</span>`);
-    if (supervisor.processed_count) {
-      pills.push(`<span class="pill">${supervisor.processed_count} task(s) done</span>`);
+    if (objTotal) {
+      pills.push(`<span class="pill">${objCounts.completed}/${objTotal} done</span>`);
     }
     if (supervisor.last_task_title && isRunning) {
       const friendlyTitle = supervisor.last_task_title.replace(/: repair executor\/runtime failure$/i, '').replace(/: repair .*$/i, '');
