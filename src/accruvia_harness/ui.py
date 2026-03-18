@@ -21,6 +21,20 @@ from urllib.parse import urlparse
 from queue import Queue, Empty
 
 from .commands.common import resolve_project_ref
+
+def _get_git_commit() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).resolve().parents[2],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        return "unknown"
+
+_GIT_COMMIT = _get_git_commit()
+_SERVER_STARTED_AT = _dt.datetime.now(_dt.timezone.utc).isoformat()
 from .context_control import objective_execution_gate
 from .frustration_triage import triage_frustration
 from .llm import LLMExecutionError, LLMInvocation
@@ -3742,6 +3756,11 @@ function renderHarnessDashboard() {
 // === Main ===
 
 async function main() {
+  try {
+    const ver = await api('/api/version');
+    const tag = document.getElementById('version-tag');
+    if (tag && ver.commit) tag.textContent = ver.commit;
+  } catch (_e) {}
   if (state.view === 'harness') {
     await loadHarnessDashboard();
     window.setInterval(loadHarnessDashboard, 3000);
@@ -3871,6 +3890,7 @@ _FULL_UI_HTML = """
               <div class="label">Mode</div>
               <div id="objective-banner-meta" class="body"></div>
             </div>
+            <div id="version-tag" style="font-size:0.7rem;color:var(--muted);margin-left:auto;white-space:nowrap;"></div>
             <div class="atomic-objective-picker">
               <div class="label">Project</div>
               <select id="banner-project-select"></select>
@@ -7070,6 +7090,9 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
             project_ref = parsed.path[len("/api/projects/") : -len("/workspace")].strip("/")
             self._dispatch_json(lambda: self.data_service.project_workspace(project_ref))
             return
+        if parsed.path == "/api/version":
+            self._send_json({"commit": _GIT_COMMIT, "started_at": _SERVER_STARTED_AT})
+            return
         if parsed.path == "/api/harness":
             self._send_json(self.data_service.harness_overview())
             return
@@ -7356,7 +7379,7 @@ def start_ui_server(ctx, *, host: str, port: int, open_browser: bool, project_re
         url = f"{url}?project_id={project_id}"
     if resolved_port != port:
         print(f"Port {port} is busy. Using {resolved_port} instead.", flush=True)
-    print(f"Harness UI running at {url}", flush=True)
+    print(f"Harness UI running at {url} (commit {_GIT_COMMIT})", flush=True)
     print("Press Ctrl+C to stop.", flush=True)
     if open_browser:
         print(f"Refresh your existing browser tab at {url}", flush=True)
