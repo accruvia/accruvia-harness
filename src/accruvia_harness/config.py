@@ -165,7 +165,7 @@ class HarnessConfig:
     task_validation_startup_timeout_seconds: int = 30
     task_compile_timeout_seconds: int = 120
     task_git_timeout_seconds: int = 30
-    task_stale_timeout_seconds: int = 900
+    task_stale_timeout_seconds: int = 7200
     memory_limit_mb: int = 1024
     cpu_time_limit_seconds: int = 300
     observer_webhook_url: str | None = None
@@ -247,7 +247,7 @@ class HarnessConfig:
             task_validation_startup_timeout_seconds=int(payload.get("task_validation_startup_timeout_seconds", 30)),
             task_compile_timeout_seconds=int(payload.get("task_compile_timeout_seconds", 120)),
             task_git_timeout_seconds=int(payload.get("task_git_timeout_seconds", 30)),
-            task_stale_timeout_seconds=int(payload.get("task_stale_timeout_seconds", 900)),
+            task_stale_timeout_seconds=int(payload.get("task_stale_timeout_seconds", 7200)),
             memory_limit_mb=int(payload.get("memory_limit_mb", 1024)),
             cpu_time_limit_seconds=int(payload.get("cpu_time_limit_seconds", 300)),
             observer_webhook_url=(
@@ -447,7 +447,7 @@ class HarnessConfig:
                 ),
                 "task_stale_timeout_seconds": _env_int(
                     "ACCRUVIA_TASK_STALE_TIMEOUT_SECONDS",
-                    int(payload.get("task_stale_timeout_seconds", 900)),
+                    int(payload.get("task_stale_timeout_seconds", 7200)),
                 ),
                 "memory_limit_mb": _env_int(
                     "ACCRUVIA_MEMORY_LIMIT_MB",

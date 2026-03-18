@@ -48,7 +48,7 @@ class Phase1Tests(unittest.TestCase):
         self.assertEqual(30, config.task_validation_startup_timeout_seconds)
         self.assertEqual(120, config.task_compile_timeout_seconds)
         self.assertEqual(30, config.task_git_timeout_seconds)
-        self.assertEqual(900, config.task_stale_timeout_seconds)
+        self.assertEqual(7200, config.task_stale_timeout_seconds)
         self.assertFalse(config.telemetry_fsync_writes)
         self.assertEqual("accruvia-harness", config.otel_service_name)
         self.assertIsNone(config.otel_exporter_otlp_endpoint)
