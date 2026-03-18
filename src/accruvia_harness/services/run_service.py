@@ -499,6 +499,45 @@ class RunService:
                 payload={"status": task_status.value, "run_id": run.id},
             )
         )
+        # Emit structured failure diagnostic on any non-success outcome.
+        if task_status != TaskStatus.COMPLETED:
+            diagnostics = work.diagnostics or {}
+            failure_report = {
+                "task_id": task.id,
+                "task_title": task.title,
+                "run_id": run.id,
+                "attempt": attempt,
+                "max_attempts": task.max_attempts,
+                "task_status": task_status.value,
+                "run_status": final_status.value,
+                "decision": decision_result.action.value,
+                "decision_rationale": decision_result.rationale,
+                "verdict": analysis.verdict.value if analysis.verdict else None,
+                "analysis_summary": analysis.summary,
+                "worker_outcome": work.outcome,
+                "failure_category": str(diagnostics.get("failure_category") or ""),
+                "failure_message": str(diagnostics.get("failure_message") or ""),
+                "changed_files": diagnostics.get("changed_files", []),
+                "atomicity_gate": diagnostics.get("atomicity_gate"),
+                "compile_check": diagnostics.get("compile_check"),
+                "test_check": diagnostics.get("test_check"),
+                "validation_elapsed_seconds": diagnostics.get("validation_elapsed_seconds"),
+                "infrastructure_failure": bool(diagnostics.get("infrastructure_failure")),
+                "backends_unavailable": bool(diagnostics.get("backends_unavailable")),
+            }
+            self.store.create_event(
+                Event(
+                    id=new_id("event"),
+                    entity_type="run",
+                    entity_id=run.id,
+                    event_type="failure_diagnostic",
+                    payload=failure_report,
+                )
+            )
+            progress({
+                "type": "failure_diagnostic",
+                **failure_report,
+            })
         if self.telemetry is not None:
             self.telemetry.metric(
                 "run_finished",

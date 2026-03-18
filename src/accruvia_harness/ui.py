@@ -112,6 +112,9 @@ class BackgroundSupervisorCoordinator:
 
         def worker() -> None:
             try:
+                # Wire stop signal to the worker so it kills the subprocess on stop.
+                if hasattr(engine.worker, "set_stop_requested"):
+                    engine.worker.set_stop_requested(stop_event.is_set)
                 self._status[project_id]["state"] = "running"
                 result = engine.supervise(
                     project_id=project_id,
@@ -135,6 +138,8 @@ class BackgroundSupervisorCoordinator:
                     "finished_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
                 })
             finally:
+                if hasattr(engine.worker, "set_stop_requested"):
+                    engine.worker.set_stop_requested(None)
                 with self._lock:
                     self._running.pop(project_id, None)
 

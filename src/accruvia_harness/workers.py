@@ -121,6 +121,10 @@ class CommandWorker:
         self.stale_after_seconds = stale_after_seconds
         self._monotonic = monotonic or time.monotonic
         self._sleep = sleep_fn or time.sleep
+        self._stop_requested = lambda: False
+
+    def set_stop_requested(self, fn) -> None:
+        self._stop_requested = fn or (lambda: False)
 
     def set_progress_callback(self, callback) -> None:
         self.progress_callback = callback
@@ -207,6 +211,15 @@ class CommandWorker:
                 now = self._monotonic()
                 if returncode is not None:
                     break
+                if self._stop_requested():
+                    process.kill()
+                    stdout_text, stderr_text = process.communicate(timeout=5)
+                    raise subprocess.TimeoutExpired(
+                        self.command,
+                        timeout=0,
+                        output=stdout_text,
+                        stderr=stderr_text,
+                    )
                 if timeout_seconds is not None and now - started_at >= timeout_seconds:
                     process.kill()
                     stdout_text, stderr_text = process.communicate()
