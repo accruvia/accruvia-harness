@@ -1339,7 +1339,7 @@ body[data-view="atomic"] .conversation-form {
 }
 
 .diagram-shell.updating {
-  opacity: 0.75;
+  opacity: 0.5;
   transition: opacity 140ms ease;
 }
 
