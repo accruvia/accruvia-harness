@@ -359,6 +359,75 @@ class SQLiteHarnessStoreTests(unittest.TestCase):
 
         self.assertEqual(EvaluationVerdict.ACCEPTABLE, loaded.verdict)
 
+    def test_update_objective_phase_derives_from_tasks(self) -> None:
+        project = Project(id=new_id("project"), name="phases", description="Phases")
+        self.store.create_project(project)
+        objective = Objective(
+            id=new_id("objective"),
+            project_id=project.id,
+            title="Phase test",
+            summary="Derive phase from tasks",
+            status=ObjectiveStatus.OPEN,
+        )
+        self.store.create_objective(objective)
+
+        # No tasks -> returns None, status unchanged
+        result = self.store.update_objective_phase(objective.id)
+        self.assertIsNone(result)
+        loaded = self.store.get_objective(objective.id)
+        assert loaded is not None
+        self.assertEqual(ObjectiveStatus.OPEN, loaded.status)
+
+        # Add a pending task -> PLANNING
+        task = Task(
+            id=new_id("task"),
+            project_id=project.id,
+            objective_id=objective.id,
+            title="T1",
+            objective="Do something",
+            status=TaskStatus.PENDING,
+        )
+        self.store.create_task(task)
+        result = self.store.update_objective_phase(objective.id)
+        self.assertEqual(ObjectiveStatus.PLANNING, result)
+        loaded = self.store.get_objective(objective.id)
+        assert loaded is not None
+        self.assertEqual(ObjectiveStatus.PLANNING, loaded.status)
+
+        # Move task to active -> EXECUTING
+        self.store.update_task_status(task.id, TaskStatus.ACTIVE)
+        result = self.store.update_objective_phase(objective.id)
+        self.assertEqual(ObjectiveStatus.EXECUTING, result)
+
+        # Complete the task -> RESOLVED
+        self.store.update_task_status(task.id, TaskStatus.COMPLETED)
+        result = self.store.update_objective_phase(objective.id)
+        self.assertEqual(ObjectiveStatus.RESOLVED, result)
+
+    def test_update_objective_phase_failed_tasks_pause(self) -> None:
+        project = Project(id=new_id("project"), name="fail-phase", description="Fail")
+        self.store.create_project(project)
+        objective = Objective(
+            id=new_id("objective"),
+            project_id=project.id,
+            title="Fail phase",
+            summary="All-failed pauses objective",
+            status=ObjectiveStatus.OPEN,
+        )
+        self.store.create_objective(objective)
+        task = Task(
+            id=new_id("task"),
+            project_id=project.id,
+            objective_id=objective.id,
+            title="T1",
+            objective="Fail",
+            status=TaskStatus.FAILED,
+        )
+        self.store.create_task(task)
+
+        result = self.store.update_objective_phase(objective.id)
+        self.assertEqual(ObjectiveStatus.PAUSED, result)
+
     def test_corrupt_task_json_falls_back_instead_of_crashing(self) -> None:
         project = Project(id=new_id("project"), name="corrupt", description="Corrupt")
         self.store.create_project(project)

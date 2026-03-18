@@ -240,6 +240,14 @@ class SupervisorService:
                 exclude_task_ids=attempted_task_ids,
                 progress_callback=progress,
             )
+            # Gate blocked: sleep for the backoff duration, don't count as idle.
+            if isinstance(result, dict) and result.get("gate_blocked"):
+                sleep_for = min(float(result.get("retry_in_seconds", 30)), 60)
+                progress({"type": "gate_backoff", "seconds": sleep_for})
+                self._sleep(sleep_for)
+                slept_seconds += sleep_for
+                sleep_count += 1
+                continue
             if result is not None:
                 processed_task_ids.append(result["task"].id)
                 attempted_task_ids.add(result["task"].id)

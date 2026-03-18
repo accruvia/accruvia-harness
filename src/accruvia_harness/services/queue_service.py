@@ -27,12 +27,14 @@ class QueueService:
         progress = progress_callback or (lambda _event: None)
         # Gate: refuse to start work if no LLM backend is reachable.
         if self.llm_gate is not None and not self.llm_gate.is_available():
+            retry_in = self.llm_gate.seconds_until_retry
             progress({
                 "type": "backends_unavailable",
-                "message": f"No LLM backends reachable. Retry in {self.llm_gate.seconds_until_retry:.0f}s.",
+                "message": f"No LLM backends reachable. Retry in {retry_in:.0f}s.",
                 "probe_results": self.llm_gate.last_probe_results,
+                "retry_in_seconds": retry_in,
             })
-            return None
+            return {"gate_blocked": True, "retry_in_seconds": retry_in}
         task = self.store.acquire_task_lease(
             worker_id,
             lease_seconds,
