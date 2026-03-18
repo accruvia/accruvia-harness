@@ -791,7 +791,8 @@ body[data-view="atomic"] .conversation-form {
 }
 
 .atomic-card .status-bar.pending { background: #b8b0a0; }
-.atomic-card .status-bar.active { background: #d9b26a; }
+.atomic-card .status-bar.active, .atomic-card .status-bar.working { background: #4a90d9; }
+.atomic-card .status-bar.validating { background: #2f6f4f; }
 .atomic-card .status-bar.completed { background: #2f6f4f; }
 .atomic-card .status-bar.failed { background: #c0504d; }
 
@@ -825,9 +826,21 @@ body[data-view="atomic"] .conversation-form {
 }
 
 .atomic-card .status-pill.pending { background: #f0ebe0; color: #7a7060; }
-.atomic-card .status-pill.active { background: #fff5df; color: #8b5a00; }
+.atomic-card .status-pill.active, .atomic-card .status-pill.working { background: #e3effa; color: #1a5294; }
+.atomic-card .status-pill.validating { background: #e3f5e8; color: #1a6b35; }
 .atomic-card .status-pill.completed { background: #edf9f0; color: #1f6b35; }
 .atomic-card .status-pill.failed { background: #fff1f1; color: #9f2f2f; }
+
+.atomic-card .validation-summary {
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin-top: 0.15rem;
+  display: none;
+}
+.atomic-card.expanded .validation-summary,
+.atomic-card .validation-summary.inline { display: block; }
+.validation-summary .pass { color: #1f6b35; }
+.validation-summary .fail { color: #9f2f2f; }
 
 .atomic-card .attempt-count {
   font-size: 0.72rem;
@@ -2715,18 +2728,23 @@ function renderAtomicUnits() {
     return;
   }
   // Counts
-  const counts = { all: linkedTasks.length, completed: 0, active: 0, failed: 0, pending: 0 };
-  const activeStatuses = new Set(['active', 'working', 'validating']);
+  const counts = { all: linkedTasks.length, completed: 0, working: 0, validating: 0, active: 0, failed: 0, pending: 0 };
   for (const task of linkedTasks) {
     const s = task.status || 'pending';
-    if (activeStatuses.has(s)) counts.active++;
+    if (s === 'working') counts.working++;
+    else if (s === 'validating') counts.validating++;
+    else if (s === 'active') counts.active++;
     else if (s in counts) counts[s]++;
     else counts.pending++;
   }
+  // "Active" tab combines working + validating + active
+  const totalActive = counts.working + counts.validating + counts.active;
   const total = linkedTasks.length;
   const pct = (n) => total > 0 ? ((n / total) * 100).toFixed(1) + '%' : '0%';
   // Auto-select a tab that has content if current tab is empty
-  if (state.atomicTab !== 'all' && counts[state.atomicTab] === 0) {
+  const activeStatuses = new Set(['active', 'working', 'validating']);
+  const tabCounts = { all: counts.all, active: totalActive, pending: counts.pending, completed: counts.completed, failed: counts.failed };
+  if (state.atomicTab !== 'all' && (tabCounts[state.atomicTab] || 0) === 0) {
     state.atomicTab = 'all';
   }
   const filteredTasks = state.atomicTab === 'all'
@@ -2739,14 +2757,15 @@ function renderAtomicUnits() {
   const tabLabels = { all: 'All', active: 'Active', pending: 'Pending', completed: 'Done', failed: 'Failed' };
   const tabsHtml = `
     <div class="atomic-status-tabs" id="atomic-tabs">
-      ${tabs.map((tab) => `<button class="${tab === state.atomicTab ? 'active' : ''}" data-tab="${tab}">${tabLabels[tab]}<span class="tab-count">${counts[tab] || 0}</span></button>`).join('')}
+      ${tabs.map((tab) => `<button class="${tab === state.atomicTab ? 'active' : ''}" data-tab="${tab}">${tabLabels[tab]}<span class="tab-count">${tabCounts[tab] || 0}</span></button>`).join('')}
       ${counts.failed > 0 ? `<button class="retry-all-btn" id="retry-all-failed">Retry all failed</button>` : ''}
     </div>
   `;
   const progressBar = `
     <div class="atomic-progress-bar">
       <div class="segment completed" style="width:${pct(counts.completed)}"></div>
-      <div class="segment active" style="width:${pct(counts.active)}"></div>
+      <div class="segment active" style="width:${pct(counts.working)}; background:#4a90d9"></div>
+      <div class="segment active" style="width:${pct(counts.validating)}; background:#2f6f4f"></div>
       <div class="segment failed" style="width:${pct(counts.failed)}"></div>
       <div class="segment pending" style="width:${pct(counts.pending)}"></div>
     </div>
@@ -2755,6 +2774,7 @@ function renderAtomicUnits() {
     ? filteredTasks.map((task) => {
         const latestRun = task.latest_run || null;
         const status = task.status || 'pending';
+        const displayStatus = latestRun && activeStatuses.has(status) ? latestRun.status : status;
         const attemptText = latestRun ? `#${latestRun.attempt}` : '';
         const isExpanded = task.id === state.taskId;
         const runtimeText = (() => {
@@ -2771,17 +2791,25 @@ function renderAtomicUnits() {
           return hrs + 'h ' + (mins % 60) + 'm';
         })();
         const isActiveTimer = latestRun && latestRun.started_at && !latestRun.finished_at;
+        const valSummary = (() => {
+          const v = latestRun?.validation;
+          if (!v) return '';
+          const compile = v.compile_passed ? '<span class="pass">compile: pass</span>' : '<span class="fail">compile: fail</span>';
+          const tests = v.test_passed ? '<span class="pass">tests: pass</span>' : (v.test_timed_out ? '<span class="fail">tests: timeout</span>' : '<span class="fail">tests: fail</span>');
+          return `${compile} · ${tests}`;
+        })();
         return `
           <div class="atomic-card ${isExpanded ? 'active expanded' : ''}" data-atomic-task="${task.id}">
-            <div class="status-bar ${status}"></div>
+            <div class="status-bar ${displayStatus}"></div>
             <div class="card-content">
               <div class="card-header">
                 <div class="title">${escapeHtml(task.title)}</div>
-                <span class="status-pill ${status}">${status === 'active' && latestRun ? escapeHtml(latestRun.status) : escapeHtml(status)}</span>
+                <span class="status-pill ${displayStatus}">${escapeHtml(displayStatus)}</span>
                 ${attemptText ? `<span class="attempt-count">${attemptText}</span>` : ''}
                 ${isActiveTimer ? `<span class="runtime active-timer" data-started="${latestRun.started_at}"></span>` : ''}
                 ${runtimeText ? `<span class="runtime">${runtimeText}</span>` : ''}
               </div>
+              ${valSummary ? `<div class="validation-summary inline">${valSummary}</div>` : ''}
               <div class="meta">${escapeHtml(task.objective || '').split('\\n')[0]}</div>
               <div class="body">${escapeHtml(task.objective || 'No task objective recorded.')}${task.rationale ? `\n\nWhy this unit exists: ${escapeHtml(task.rationale)}` : ''}</div>
               ${status === 'failed' ? `<button class="retry-btn" data-retry-task="${task.id}">Retry</button>` : ''}
@@ -6462,6 +6490,28 @@ class HarnessUIDataService:
 
             status = task.status.value if task is not None else "pending"
 
+            # Read validation results from the report artifact if available.
+            validation_info = None
+            if latest_run is not None:
+                report_artifacts = [
+                    a for a in self.store.list_artifacts(latest_run.id)
+                    if a.kind == "report" and a.path
+                ]
+                if report_artifacts:
+                    try:
+                        import json as _json
+                        report_data = _json.loads(Path(report_artifacts[-1].path).read_text(encoding="utf-8"))
+                        cc = report_data.get("compile_check")
+                        tc = report_data.get("test_check")
+                        if cc is not None or tc is not None:
+                            validation_info = {
+                                "compile_passed": bool(cc.get("passed")) if cc else None,
+                                "test_passed": bool(tc.get("passed")) if tc else None,
+                                "test_timed_out": bool(tc.get("timed_out")) if tc else False,
+                            }
+                    except Exception:
+                        pass
+
             units.append(
                 {
                     "id": task_id or record.id,
@@ -6477,6 +6527,7 @@ class HarnessUIDataService:
                             "status": latest_run.status.value,
                             "started_at": latest_run.created_at.isoformat() if latest_run.created_at else None,
                             "finished_at": latest_run.updated_at.isoformat() if latest_run.status.value in ("completed", "failed", "blocked", "disposed") and latest_run.updated_at else None,
+                            "validation": validation_info,
                         }
                         if latest_run is not None
                         else None
