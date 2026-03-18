@@ -153,6 +153,8 @@ class BackgroundSupervisorCoordinator:
             if stop_event is None:
                 return False
             stop_event.set()
+            status = self._status.get(project_id, {})
+            status["state"] = "stopping"
             return True
 
     def is_running(self, project_id: str) -> bool:
@@ -2861,7 +2863,8 @@ function renderSupervisorStatus() {
   const panel = document.getElementById('supervisor-panel');
   if (!panel) return;
   const supervisor = state.workspace?.supervisor || {};
-  const isRunning = supervisor.running || supervisor.state === 'running' || supervisor.state === 'starting';
+  const isRunning = supervisor.running || supervisor.state === 'running' || supervisor.state === 'starting' || supervisor.state === 'stopping';
+  const isStopping = supervisor.state === 'stopping';
   const hasHistory = supervisor.state === 'finished' || supervisor.state === 'error';
   const startBtn = document.getElementById('supervisor-start-btn');
   const stopBtn = document.getElementById('supervisor-stop-btn');
@@ -2880,9 +2883,20 @@ function renderSupervisorStatus() {
   panel.hidden = !isRunning && !hasHistory;
   // Start button only when stopped after having run (restart), never on initial idle
   if (startBtn) startBtn.hidden = isRunning || !hasHistory;
-  if (stopBtn) stopBtn.hidden = !isRunning;
+  if (stopBtn) {
+    stopBtn.hidden = !isRunning;
+    if (isStopping) {
+      stopBtn.textContent = 'Stopping...';
+      stopBtn.disabled = true;
+    } else {
+      stopBtn.textContent = 'Stop harness';
+      stopBtn.disabled = false;
+    }
+  }
   if (statusEl) {
-    if (supervisor.state === 'running' || supervisor.state === 'starting') {
+    if (supervisor.state === 'stopping') {
+      statusEl.textContent = 'Stopping harness... waiting for current worker to finish.';
+    } else if (supervisor.state === 'running' || supervisor.state === 'starting') {
       const dots = '.'.repeat((Math.floor(Date.now() / 500) % 3) + 1);
       statusEl.textContent = objTotal
         ? `The harness is working through your tasks${dots} ${objCounts.completed}/${objTotal} done.`
@@ -3637,10 +3651,15 @@ if (supervisorStopBtn) {
     if (!state.projectId) return;
     try {
       clearError();
+      supervisorStopBtn.textContent = 'Stopping...';
+      supervisorStopBtn.disabled = true;
       await api(`/api/projects/${encodeURIComponent(state.projectId)}/supervise/stop`, { method: 'POST' });
       await loadWorkspace();
     } catch (error) {
       showError(error.message || 'Unable to stop harness');
+    } finally {
+      supervisorStopBtn.textContent = 'Stop harness';
+      supervisorStopBtn.disabled = false;
     }
   });
 }
