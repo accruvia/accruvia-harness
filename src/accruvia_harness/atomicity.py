@@ -205,7 +205,7 @@ def atomicity_gate(
         score += 1
         flags.append("wide_surface")
     if project_is_self_hosting and touches_control_plane:
-        score += 2
+        score += 1
         flags.append("control_plane_touch")
     if touches_validation_policy:
         score += 2
@@ -213,21 +213,14 @@ def atomicity_gate(
     if self_referential_change_detected:
         score += 3
         flags.append("self_referential_change")
-    if attempt >= 2:
-        score += 1
-        flags.append("retry_pressure")
-    if prior_timeout_count >= 1:
+    # retry_pressure removed: penalizing retries is counterproductive when
+    # the design relies on retries with narrowed scope.
+    if prior_timeout_count >= 2:
         score += 1
         flags.append("timeout_history")
-    if intent_surface_mismatch_detected:
-        score += 1
-        flags.append("intent_surface_mismatch")
     if touched_files_without_validation_target_count >= 2:
         score += 1
         flags.append("validation_scope_mismatch")
-    if operator_task_touches_non_operator_surface:
-        score += 1
-        flags.append("operator_surface_drift")
 
     effective_validation_mode = validation_mode
     action = "validate_normal"

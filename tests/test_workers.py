@@ -574,6 +574,68 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue((run_dir / "atomicity_telemetry.json").exists())
         self.assertFalse((run_dir / "test_output.txt").exists())
 
+    def test_high_atomicity_score_does_not_hard_block(self) -> None:
+        """Per Mermaid spec: only block_self_referential hard-blocks.
+        High scores from wide diffs should produce a candidate, not block."""
+        workspace = self.base / "workspace-wide-diff"
+        src = workspace / "src" / "accruvia_harness"
+        persistence = src / "persistence"
+        tests_dir = workspace / "tests"
+        persistence.mkdir(parents=True)
+        tests_dir.mkdir(parents=True)
+        # Create many files so the diff is wide (high score) but NOT self-referential.
+        (src / "domain.py").write_text("VALUE = 1\n", encoding="utf-8")
+        (src / "migrations.py").write_text("VALUE = 1\n", encoding="utf-8")
+        (persistence / "common.py").write_text("VALUE = 1\n", encoding="utf-8")
+        (persistence / "project_task.py").write_text("VALUE = 1\n", encoding="utf-8")
+        (tests_dir / "test_store.py").write_text(
+            "import unittest\n\nclass Smoke(unittest.TestCase):\n    def test_ok(self):\n        self.assertTrue(True)\n",
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "init", "-b", "main"], cwd=workspace, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
+            cwd=workspace, check=True, capture_output=True, text=True,
+        )
+        # Script modifies all 5 files (wide diff, high score, but not self-referential)
+        cli_script = self.base / "fake_codex_wide.sh"
+        cli_script.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf 'worker summary\\n'\n"
+            "printf 'VALUE = 2\\n' > src/accruvia_harness/domain.py\n"
+            "printf 'VALUE = 2\\n' > src/accruvia_harness/migrations.py\n"
+            "printf 'VALUE = 2\\n' > src/accruvia_harness/persistence/common.py\n"
+            "printf 'VALUE = 2\\n' > src/accruvia_harness/persistence/project_task.py\n"
+            "printf 'VALUE = 2\\n' > tests/test_store.py\n",
+            encoding="utf-8",
+        )
+        cli_script.chmod(0o755)
+        run_dir = self.base / "run-wide-diff"
+
+        result = run_agent_worker(
+            {
+                "ACCRUVIA_RUN_DIR": str(run_dir),
+                "ACCRUVIA_PROJECT_WORKSPACE": str(workspace),
+                "ACCRUVIA_TASK_ID": self.task.id,
+                "ACCRUVIA_TASK_TITLE": "Add CRUD methods for WIP plans",
+                "ACCRUVIA_RUN_ID": self.run.id,
+                "ACCRUVIA_RUN_ATTEMPT": "2",
+                "ACCRUVIA_TASK_OBJECTIVE": "Add CRUD methods for WIP plans to the store",
+                "ACCRUVIA_RUN_SUMMARY": self.run.summary,
+                "ACCRUVIA_TASK_STRATEGY": "atomic_from_mermaid",
+                "ACCRUVIA_TASK_VALIDATION_MODE": "lightweight_operator",
+                "ACCRUVIA_WORKER_LLM_BACKEND": "codex",
+                "ACCRUVIA_LLM_CODEX_COMMAND": str(cli_script),
+            }
+        )
+
+        report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
+        # Should NOT block — should return candidate for validation
+        self.assertEqual(0, result)
+        self.assertEqual("candidate", report["worker_outcome"])
+        self.assertNotEqual("block_self_referential", report["atomicity_gate"]["action"])
+
     def test_atomicity_gate_narrows_default_validation_for_operator_surface(self) -> None:
         workspace = self.base / "workspace-narrow"
         src = workspace / "src" / "accruvia_harness" / "commands"
@@ -627,8 +689,8 @@ class WorkerTests(unittest.TestCase):
 
         report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
         self.assertEqual(0, result)
-        self.assertEqual("validate_narrow", report["atomicity_gate"]["action"])
-        self.assertEqual("lightweight_operator", report["effective_validation_mode"])
+        # Single CLI file change scores 1 — validate_normal with default mode.
+        self.assertEqual("validate_normal", report["atomicity_gate"]["action"])
 
     def test_build_worker_from_config_defaults_agent_worker_command(self) -> None:
         config = HarnessConfig(
