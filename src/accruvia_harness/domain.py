@@ -96,6 +96,24 @@ class ObjectiveStatus(StrEnum):
     RESOLVED = "resolved"
 
 
+VALID_OBJECTIVE_TRANSITIONS: dict[ObjectiveStatus, frozenset[ObjectiveStatus]] = {
+    ObjectiveStatus.OPEN: frozenset({ObjectiveStatus.INVESTIGATING, ObjectiveStatus.PLANNING, ObjectiveStatus.PAUSED, ObjectiveStatus.RESOLVED}),
+    ObjectiveStatus.INVESTIGATING: frozenset({ObjectiveStatus.PLANNING, ObjectiveStatus.PAUSED, ObjectiveStatus.RESOLVED}),
+    ObjectiveStatus.PLANNING: frozenset({ObjectiveStatus.EXECUTING, ObjectiveStatus.INVESTIGATING, ObjectiveStatus.PAUSED, ObjectiveStatus.RESOLVED}),
+    ObjectiveStatus.EXECUTING: frozenset({ObjectiveStatus.PLANNING, ObjectiveStatus.PAUSED, ObjectiveStatus.RESOLVED}),
+    ObjectiveStatus.PAUSED: frozenset({ObjectiveStatus.OPEN, ObjectiveStatus.INVESTIGATING, ObjectiveStatus.PLANNING, ObjectiveStatus.EXECUTING, ObjectiveStatus.RESOLVED}),
+    ObjectiveStatus.RESOLVED: frozenset(),
+}
+
+
+def validate_objective_transition(current: ObjectiveStatus, target: ObjectiveStatus) -> None:
+    if current == target:
+        return  # idempotent no-op
+    allowed = VALID_OBJECTIVE_TRANSITIONS.get(current, frozenset())
+    if target not in allowed:
+        raise ValueError(f"Invalid objective transition: {current} -> {target}")
+
+
 class MermaidStatus(StrEnum):
     DRAFT = "draft"
     IN_REVIEW = "in_review"

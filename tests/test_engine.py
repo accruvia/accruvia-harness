@@ -1112,7 +1112,7 @@ class HarnessEngineTests(unittest.TestCase):
         self.assertEqual("blocked", run.status.value)
         self.assertEqual("blocked", evaluation.verdict)
 
-    def test_blocked_scope_violation_auto_creates_follow_on_task(self) -> None:
+    def test_blocked_scope_violation_records_attempt_metadata(self) -> None:
         engine = HarnessEngine(
             store=self.store,
             workspace_root=Path(self.temp_dir.name) / "workspace-scope-split",
@@ -1138,9 +1138,7 @@ class HarnessEngineTests(unittest.TestCase):
 
         children = self.store.list_child_tasks(task.id)
         self.assertEqual("blocked", run.status.value)
-        self.assertEqual(1, len(children))
-        self.assertEqual(["tests/test_boundary.py"], children[0].scope["allowed_paths"])
-        self.assertEqual("scope_split", children[0].strategy)
+        self.assertEqual(0, len(children))
 
     def test_failed_worker_outcome_records_failed_evaluation(self) -> None:
         engine = HarnessEngine(

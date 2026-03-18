@@ -37,6 +37,7 @@ class RunService:
         retry_advisor: RetryStrategyAdvisor | None = None,
         telemetry=None,
         workspace_policy_enforcer: WorkspacePolicyEnforcer | None = None,
+        validation_service=None,
     ) -> None:
         self.store = store
         self.workspace_root = workspace_root
@@ -49,6 +50,7 @@ class RunService:
         self.retry_advisor = retry_advisor or RetryStrategyAdvisor()
         self.telemetry = telemetry
         self.workspace_policy_enforcer = workspace_policy_enforcer or WorkspacePolicyEnforcer()
+        self.validation_service = validation_service
 
     def run_once(self, task_id: str, progress_callback=None) -> Run:
         task = self.store.get_task(task_id)
@@ -314,8 +316,23 @@ class RunService:
         return work, run
 
     def _validation_phase(self, task, run, work, progress) -> Run:
-        """Analyze the work result, decide next action, update task/run status."""
+        """Run validation on candidates, then analyze and decide."""
         attempt = run.attempt
+
+        # If worker produced a candidate, run compile+test validation before analyzing.
+        if work.outcome == "success" and work.diagnostics and work.diagnostics.get("worker_outcome") == "candidate":
+            run = self.store.mark_run(run, RunStatus.VALIDATING, "Running compile and test validation.")
+            progress({
+                "type": "run_phase_changed",
+                "task_id": task.id,
+                "run_id": run.id,
+                "phase": "validating",
+            })
+            if hasattr(self, "validation_service") and self.validation_service is not None:
+                validation_result = self.validation_service.validate(task, run, work, self.workspace_root)
+                # Update work result with validation outcome
+                if validation_result is not None:
+                    work = validation_result
 
         self.store.create_event(
             Event(
@@ -459,8 +476,7 @@ class RunService:
         )
         # Write scope narrowing / failure info into attempt_metadata instead of creating child tasks.
         self._record_attempt_metadata(task, run, analysis)
-        if analysis.verdict == EvaluationVerdict.BLOCKED:
-            self._reshape_scope_violation(task, run, analysis)
+        # Scope violations are recorded in attempt_metadata (handled by _record_attempt_metadata above).
 
         final_status = RunStatus.COMPLETED if decision_result.action == DecisionAction.PROMOTE else RunStatus.FAILED
         if analysis.verdict == EvaluationVerdict.BLOCKED:

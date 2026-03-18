@@ -5,7 +5,7 @@ import sqlite3
 from datetime import UTC, datetime
 
 from .common import project_from_row, task_from_row, task_lease_from_row
-from ..domain import Project, Task, TaskLease, TaskStatus, validate_task_transition
+from ..domain import ObjectiveStatus, Project, Task, TaskLease, TaskStatus, validate_task_transition
 
 
 class ProjectTaskStoreMixin:
@@ -324,6 +324,35 @@ class ProjectTaskStoreMixin:
                 "UPDATE tasks SET attempt_metadata_json = ?, updated_at = ? WHERE id = ?",
                 (json.dumps(existing, sort_keys=True), datetime.now(UTC).isoformat(), task_id),
             )
+
+    def update_objective_phase(self, objective_id: str) -> ObjectiveStatus | None:
+        """Derive and persist the objective's phase from its linked tasks' statuses.
+
+        Returns the new status, or ``None`` when the objective has no tasks
+        (in which case the status is left unchanged).
+        """
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT status FROM tasks WHERE objective_id = ?",
+                (objective_id,),
+            ).fetchall()
+            if not rows:
+                return None
+            statuses = [TaskStatus(row["status"]) for row in rows]
+            if any(s == TaskStatus.ACTIVE for s in statuses):
+                phase = ObjectiveStatus.EXECUTING
+            elif all(s == TaskStatus.COMPLETED for s in statuses):
+                phase = ObjectiveStatus.RESOLVED
+            elif any(s == TaskStatus.PENDING for s in statuses):
+                phase = ObjectiveStatus.PLANNING
+            else:
+                # All tasks failed (or mix of completed + failed) — pause
+                phase = ObjectiveStatus.PAUSED
+            connection.execute(
+                "UPDATE objectives SET status = ?, updated_at = ? WHERE id = ?",
+                (phase.value, datetime.now(UTC).isoformat(), objective_id),
+            )
+        return phase
 
     def update_task_external_metadata(self, task_id: str, metadata: dict[str, object]) -> None:
         with self.connect() as connection:

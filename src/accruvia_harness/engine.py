@@ -86,6 +86,7 @@ class HarnessEngine:
             project_adapter_registry=self.project_adapter_registry,
             task_service=self.tasks,
             telemetry=self.telemetry,
+            validation_service=self.validation,
         )
         self.branches = BranchService(
             store=self.store,

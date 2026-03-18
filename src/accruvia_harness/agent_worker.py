@@ -410,9 +410,9 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
         prior_timeout_count=prior_timeout_count,
     )
     write_atomicity_telemetry(atomicity_path, gate_result)
-    if gate_result.action in {"narrow_scope", "block_self_referential"}:
-        failure_category = "policy_self_modification" if gate_result.action == "block_self_referential" else "atomicity_decomposition"
-        worker_outcome = "blocked"
+    # block_self_referential is a hard safety gate — the worker must not
+    # proceed when modifying its own validation/task-selection machinery.
+    if gate_result.action == "block_self_referential":
         report_path.write_text(
             json.dumps(
                 {
@@ -424,9 +424,9 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
                     "llm_backend": llm_backend,
                     "validation_profile": validation_profile,
                     "validation_mode": validation_mode,
-                    "worker_outcome": worker_outcome,
+                    "worker_outcome": "blocked",
                     "blocked": True,
-                    "failure_category": failure_category,
+                    "failure_category": "policy_self_modification",
                     "failure_message": gate_result.rationale,
                     "changed_files": all_changed,
                     "test_files": [path for path in all_changed if path.startswith("tests/")],
@@ -444,6 +444,9 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
             encoding="utf-8",
         )
         return 1
+    # narrow_scope: the gate detected elevated risk but the candidate can still
+    # proceed to validation. The scope metadata is included so the retry advisor
+    # can narrow the next attempt if validation fails.
 
     # LLM succeeded and atomicity gate passed — emit candidate report for separate validation.
     llm_failed = completed.returncode != 0
@@ -517,8 +520,8 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
     }
     report_path.write_text(json.dumps(candidate_payload, indent=2, sort_keys=True), encoding="utf-8")
 
-    # Inline validation: run compile + test immediately so we return a complete result.
-    return run_validation(env)
+    # Candidate produced. Validation runs as a separate step orchestrated by run_service.
+    return 0
 
 
 def run_validation(environ: Mapping[str, str] | None = None) -> int:

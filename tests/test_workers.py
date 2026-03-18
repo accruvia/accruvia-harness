@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from accruvia_harness.atomicity import atomicity_gate
-from accruvia_harness.agent_worker import _focused_test_command, run_agent_worker, select_worker_llm_command
+from accruvia_harness.agent_worker import _focused_test_command, run_agent_worker, run_validation, select_worker_llm_command
 from accruvia_harness.adapters import build_adapter_registry
 from accruvia_harness.config import HarnessConfig
 from accruvia_harness.domain import Run, RunStatus, Task, new_id
@@ -391,7 +391,7 @@ class WorkerTests(unittest.TestCase):
         report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
         self.assertEqual(0, result)
         self.assertEqual("codex", report["llm_backend"])
-        self.assertEqual("success", report["worker_outcome"])
+        self.assertEqual("candidate", report["worker_outcome"])
         self.assertIn("changed_module.py", report["changed_files"])
         self.assertIn("Objective: Verify worker abstraction", (run_dir / "codex_worker_prompt.txt").read_text(encoding="utf-8"))
         self.assertIn("Objective: Verify worker abstraction", (workspace / "shared_prompt.txt").read_text(encoding="utf-8"))
@@ -427,8 +427,7 @@ class WorkerTests(unittest.TestCase):
         cli_script.chmod(0o755)
         run_dir = self.base / "run-timeout"
 
-        result = run_agent_worker(
-            {
+        env = {
                 "ACCRUVIA_RUN_DIR": str(run_dir),
                 "ACCRUVIA_PROJECT_WORKSPACE": str(workspace),
                 "ACCRUVIA_TASK_ID": self.task.id,
@@ -439,11 +438,15 @@ class WorkerTests(unittest.TestCase):
                 "ACCRUVIA_WORKER_LLM_BACKEND": "codex",
                 "ACCRUVIA_LLM_CODEX_COMMAND": str(cli_script),
                 "ACCRUVIA_AGENT_TEST_TIMEOUT_SECONDS": "1",
-            }
-        )
+        }
+        worker_result = run_agent_worker(env)
+        self.assertEqual(0, worker_result)  # Worker returns candidate
+
+        # Validation runs separately and should timeout
+        val_result = run_validation(env)
 
         report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
-        self.assertEqual(1, result)
+        self.assertEqual(1, val_result)
         self.assertEqual("failed", report["worker_outcome"])
         self.assertEqual("validation_timeout", report["failure_category"])
         self.assertTrue(report["test_check"]["timed_out"])
@@ -492,12 +495,7 @@ class WorkerTests(unittest.TestCase):
         cli_script.chmod(0o755)
         run_dir = self.base / "run-startup-timeout"
 
-        with patch(
-            "accruvia_harness.agent_worker._focused_test_command",
-            return_value=["python3", "-c", "import time; time.sleep(2)"],
-        ):
-            result = run_agent_worker(
-                {
+        env = {
                     "ACCRUVIA_RUN_DIR": str(run_dir),
                     "ACCRUVIA_PROJECT_WORKSPACE": str(workspace),
                     "ACCRUVIA_TASK_ID": self.task.id,
@@ -510,11 +508,18 @@ class WorkerTests(unittest.TestCase):
                     "ACCRUVIA_LLM_CODEX_COMMAND": str(cli_script),
                     "ACCRUVIA_TASK_VALIDATION_STARTUP_TIMEOUT_SECONDS": "1",
                     "ACCRUVIA_AGENT_TEST_TIMEOUT_SECONDS": "5",
-                }
-            )
+        }
+        worker_result = run_agent_worker(env)
+        self.assertEqual(0, worker_result)  # Worker returns candidate
+
+        with patch(
+            "accruvia_harness.agent_worker._focused_test_command",
+            return_value=["python3", "-c", "import time; time.sleep(2)"],
+        ):
+            val_result = run_validation(env)
 
         report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
-        self.assertEqual(1, result)
+        self.assertEqual(1, val_result)
         self.assertEqual("validation_startup_timeout", report["failure_category"])
         self.assertTrue(report["test_check"]["timed_out"])
         self.assertEqual(1, report["test_check"]["startup_timeout_seconds"])
@@ -623,7 +628,7 @@ class WorkerTests(unittest.TestCase):
         report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
         self.assertEqual(0, result)
         self.assertEqual("validate_narrow", report["atomicity_gate"]["action"])
-        self.assertEqual("lightweight_operator", report["test_check"]["selection"])
+        self.assertEqual("lightweight_operator", report["effective_validation_mode"])
 
     def test_build_worker_from_config_defaults_agent_worker_command(self) -> None:
         config = HarnessConfig(
