@@ -620,69 +620,6 @@ class RunService:
                 )
             )
 
-    def _reshape_scope_violation(self, task, run, analysis) -> None:
-        if self.task_service is None:
-            return
-        diagnostics = analysis.details.get("diagnostics")
-        if not isinstance(diagnostics, dict):
-            return
-        scope_violation = diagnostics.get("scope_violation")
-        if not isinstance(scope_violation, dict):
-            return
-        candidate_paths = scope_violation.get("outside_allowed_paths") or []
-        if not isinstance(candidate_paths, list):
-            return
-        existing = self.store.list_child_tasks(task.id)
-        existing_paths = {
-            tuple(sorted((child.scope or {}).get("allowed_paths", [])))
-            for child in existing
-            if (child.scope or {}).get("allowed_paths")
-        }
-        created_paths: list[str] = []
-        for path in [str(item) for item in candidate_paths if item]:
-            key = (path,)
-            if key in existing_paths:
-                continue
-            follow_on = self.task_service.create_task_with_policy(
-                project_id=task.project_id,
-                title=f"{task.title}: follow-up for {path}",
-                objective=f"Apply the blocked out-of-scope change for `{path}` as a separate atomic task.",
-                priority=max(task.priority - 10, 1),
-                parent_task_id=task.id,
-                source_run_id=run.id,
-                external_ref_type=task.external_ref_type,
-                external_ref_id=task.external_ref_id,
-                external_ref_metadata=dict(task.external_ref_metadata),
-                validation_profile=task.validation_profile,
-                validation_mode=task.validation_mode,
-                scope={"allowed_paths": [path]},
-                strategy="scope_split",
-                max_attempts=task.max_attempts,
-                max_branches=task.max_branches,
-                required_artifacts=list(task.required_artifacts),
-            )
-            existing_paths.add(key)
-            created_paths.append(path)
-            self.store.create_event(
-                Event(
-                    id=new_id("event"),
-                    entity_type="task",
-                    entity_id=follow_on.id,
-                    event_type="scope_split_task_created",
-                    payload={"parent_task_id": task.id, "run_id": run.id, "path": path},
-                )
-            )
-        if created_paths:
-            self.store.create_event(
-                Event(
-                    id=new_id("event"),
-                    entity_type="run",
-                    entity_id=run.id,
-                    event_type="scope_violation_reshaped",
-                    payload={"created_paths": created_paths},
-                )
-            )
-
     def run_until_stable(self, task_id: str) -> list[Run]:
         completed_runs: list[Run] = []
         while True:
