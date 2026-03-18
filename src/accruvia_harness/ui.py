@@ -7353,7 +7353,20 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
             return
 
 
+def _verify_install_path() -> None:
+    """Refuse to start if the installed package points outside the source tree."""
+    import accruvia_harness
+    installed = Path(accruvia_harness.__file__).resolve().parent
+    expected = Path(__file__).resolve().parent
+    if installed != expected:
+        raise RuntimeError(
+            f"Installed package points to {installed}, expected {expected}. "
+            f"Run: pip install -e . from the project root."
+        )
+
+
 def start_ui_server(ctx, *, host: str, port: int, open_browser: bool, project_ref: str | None = None) -> None:
+    _verify_install_path()
     # Wire the LLM availability gate into the engine if config is available.
     if hasattr(ctx, "config") and ctx.config is not None:
         from .llm_availability import LLMAvailabilityGate
