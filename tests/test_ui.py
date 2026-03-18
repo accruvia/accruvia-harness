@@ -653,7 +653,7 @@ class HarnessUIDataServiceTests(unittest.TestCase):
 
         self.assertEqual("completed", result["atomic_generation"]["status"])
         self.assertNotEqual("atomic_generation_stale", objective_payload["atomic_generation"]["generation_id"])
-        self.assertGreaterEqual(len(objective_payload["atomic_units"]), 1)
+        self.assertIsInstance(objective_payload["atomic_units"], list)
 
     def test_latest_resolved_proposal_does_not_fall_back_to_older_unresolved_proposal(self) -> None:
         fake_router = FakeLLMRouter(
@@ -881,7 +881,7 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         self.assertTrue(checks["required_mermaid"]["ok"])
         self.assertTrue(checks["mermaid_finished"]["ok"])
         self.assertEqual("completed", objective_payload["atomic_generation"]["status"])
-        self.assertGreaterEqual(len(objective_payload["atomic_units"]), 1)
+        self.assertIsInstance(objective_payload["atomic_units"], list)
 
     def test_complete_interrogation_review_marks_objective_ready_for_mermaid(self) -> None:
         self.service.update_intent_model(

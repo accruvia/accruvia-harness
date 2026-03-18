@@ -5705,39 +5705,49 @@ class HarnessUIDataService:
         if objective_id and mermaid_update_requested:
             responder_result.reply = (
                 responder_result.reply.rstrip()
-                + "\n\nGenerating a Mermaid proposal from your instruction — this will appear shortly."
+                + "\n\nGenerating a proposed Mermaid update from your instruction — this will appear shortly."
             )
             responder_result.recommended_action = "review_mermaid"
-            # Run Mermaid proposal in background so the text reply returns immediately.
             _proposal_objective_id = objective_id
             _proposal_project_id = project.id
             _proposal_directive = body
 
-            def _generate_proposal():
-                try:
-                    result = self.propose_mermaid_update(_proposal_objective_id, directive=_proposal_directive)
-                    receipt_content = (
-                        "Action receipt: Mermaid proposal generated."
-                        if result is not None
-                        else "Action receipt: Mermaid update was requested but no proposal was generated."
+            def _generate_proposal() -> dict[str, object] | None:
+                result = self.propose_mermaid_update(_proposal_objective_id, directive=_proposal_directive)
+                receipt_content = (
+                    "Action receipt: Mermaid proposal generated."
+                    if result is not None
+                    else "Action receipt: Mermaid update was requested but no proposal was generated."
+                )
+                receipt_status = "proposal_generated" if result is not None else "not_applied"
+                self.store.create_context_record(
+                    ContextRecord(
+                        id=new_id("context"),
+                        record_type="action_receipt",
+                        project_id=_proposal_project_id,
+                        objective_id=_proposal_objective_id,
+                        visibility="operator_visible",
+                        author_type="system",
+                        content=receipt_content,
+                        metadata={"kind": "mermaid_update", "status": receipt_status},
                     )
-                    receipt_status = "proposal_generated" if result is not None else "not_applied"
-                    self.store.create_context_record(
-                        ContextRecord(
-                            id=new_id("context"),
-                            record_type="action_receipt",
-                            project_id=_proposal_project_id,
-                            objective_id=_proposal_objective_id,
-                            visibility="operator_visible",
-                            author_type="system",
-                            content=receipt_content,
-                            metadata={"kind": "mermaid_update", "status": receipt_status},
-                        )
-                    )
-                except Exception:
-                    pass
+                )
+                return result
 
-            threading.Thread(target=_generate_proposal, daemon=True).start()
+            if getattr(self.ctx, "is_test", False):
+                try:
+                    proposal = _generate_proposal()
+                except Exception:
+                    proposal = None
+            else:
+                # Run Mermaid proposal in background so the text reply returns immediately.
+                def _generate_proposal_background() -> None:
+                    try:
+                        _generate_proposal()
+                    except Exception:
+                        pass
+
+                threading.Thread(target=_generate_proposal_background, daemon=True).start()
         self._log_ui_memory_retrieval(
             project_id=project.id,
             objective_id=objective_id,
