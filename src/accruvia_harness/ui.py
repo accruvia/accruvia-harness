@@ -121,7 +121,7 @@ class BackgroundSupervisorCoordinator:
                     worker_id=f"ui-supervisor-{project_id[:8]}",
                     watch=watch,
                     idle_sleep_seconds=10.0,
-                    max_idle_cycles=3,
+                    max_idle_cycles=None,
                     stop_requested=stop_event.is_set,
                     progress_callback=lambda ev: self._on_progress(project_id, ev),
                 )
@@ -2666,9 +2666,13 @@ function renderAtomicUnits() {
   }
   const generation = objective.atomic_generation || { status: 'idle', unit_count: 0 };
   const linkedTasks = Array.isArray(objective.atomic_units) ? objective.atomic_units : [];
+  const publishedCount = linkedTasks.filter((task) => task.published_unit !== false).length;
+  const extraTaskCount = Math.max(0, linkedTasks.length - publishedCount);
   atomicTitle.textContent = 'Atomic units of work';
   atomicSummary.textContent = linkedTasks.length
-    ? 'These atomic units were derived from the accepted flowchart for this objective. Use the CLI to clarify or challenge the decomposition.'
+    ? (extraTaskCount > 0
+        ? 'Showing live objective tasks. Published Mermaid units appear first, followed by follow-on work created during execution.'
+        : 'These atomic units were derived from the accepted flowchart for this objective. Use the CLI to clarify or challenge the decomposition.')
     : 'Atomic units will appear here as the harness derives them from the accepted flowchart.';
   if (generation.status === 'running') {
     const dots = '.'.repeat((Math.floor(Date.now() / 500) % 3) + 1);
@@ -2688,7 +2692,10 @@ function renderAtomicUnits() {
     if (allDone && linkedTasks.length > 0) {
       atomicGenerationStatus.textContent = `All ${linkedTasks.length} task(s) finished. ${tasksDone} completed, ${tasksFailed} failed.`;
     } else if (linkedTasks.length > 0) {
-      atomicGenerationStatus.textContent = `${linkedTasks.length} atomic tasks split from Mermaid v${generation.diagram_version}. ${tasksDone} done, ${tasksActive} active, ${tasksPending} pending, ${tasksFailed} failed.`;
+      const decompositionSummary = extraTaskCount > 0
+        ? `${publishedCount} tasks split from Mermaid v${generation.diagram_version}, plus ${extraTaskCount} follow-on task(s).`
+        : `${linkedTasks.length} atomic tasks split from Mermaid v${generation.diagram_version}.`;
+      atomicGenerationStatus.textContent = `${decompositionSummary} ${tasksDone} done, ${tasksActive} active, ${tasksPending} pending, ${tasksFailed} failed.`;
     } else {
       atomicGenerationStatus.textContent = `Decomposition finished but produced no tasks.`;
     }
@@ -2727,7 +2734,8 @@ function renderAtomicUnits() {
     pills.push(`<span class="pill">Round ${generation.refinement_round}</span>`);
   }
   if (linkedTasks.length) {
-    pills.push(`<span class="pill">${linkedTasks.length} task(s)</span>`);
+    const taskLabel = extraTaskCount > 0 ? 'live task(s)' : 'task(s)';
+    pills.push(`<span class="pill">${linkedTasks.length} ${taskLabel}</span>`);
   }
   if (generation.critique_accepted === true) {
     pills.push(`<span class="pill status-complete">Critique: passed</span>`);
@@ -2928,7 +2936,7 @@ function renderSupervisorStatus() {
       pills.push(`<span class="pill">Working on: ${escapeHtml(friendlyTitle)}</span>`);
     }
     if (supervisor.last_event_at) {
-      pills.push(`<span class="pill">Last activity ${escapeHtml(formatRelativeTime(supervisor.last_event_at))}</span>`);
+      pills.push(`<span class="pill last-activity-pill" data-timestamp="${escapeHtml(supervisor.last_event_at)}">Last activity ${escapeHtml(formatRelativeTime(supervisor.last_event_at))}</span>`);
     }
     metaEl.innerHTML = pills.join('');
   }
@@ -3601,21 +3609,37 @@ if (atomicList) {
     const retryBtn = event.target.closest('[data-retry-task]');
     if (retryBtn) {
       event.stopPropagation();
+      if (retryBtn.disabled) return;
       const taskId = retryBtn.dataset.retryTask;
+      const previousLabel = retryBtn.textContent;
+      retryBtn.disabled = true;
+      retryBtn.textContent = 'Retrying...';
       try {
         await api(`/api/tasks/${encodeURIComponent(taskId)}/retry`, { method: 'POST' });
         await loadWorkspace();
-      } catch (e) { showError(e.message || 'Retry failed'); }
+      } catch (e) {
+        retryBtn.disabled = false;
+        retryBtn.textContent = previousLabel;
+        showError(e.message || 'Retry failed');
+      }
       return;
     }
     // Retry all failed tasks
     const retryAllBtn = event.target.closest('#retry-all-failed');
     if (retryAllBtn) {
       event.stopPropagation();
+      if (retryAllBtn.disabled) return;
+      const previousLabel = retryAllBtn.textContent;
+      retryAllBtn.disabled = true;
+      retryAllBtn.textContent = 'Retrying...';
       try {
         await api(`/api/projects/${encodeURIComponent(state.projectId)}/retry-failed`, { method: 'POST' });
         await loadWorkspace();
-      } catch (e) { showError(e.message || 'Retry all failed'); }
+      } catch (e) {
+        retryAllBtn.disabled = false;
+        retryAllBtn.textContent = previousLabel;
+        showError(e.message || 'Retry all failed');
+      }
       return;
     }
     // Card selection
@@ -6528,9 +6552,12 @@ class HarnessUIDataService:
             for record in self.store.list_context_records(objective_id=objective_id, record_type="atomic_unit_generated")
             if str(record.metadata.get("generation_id") or "") == generation_id
         ]
+        published_task_ids: set[str] = set()
 
         for record in records:
             task_id = str(record.metadata.get("task_id") or "")
+            if task_id:
+                published_task_ids.add(task_id)
             task = tasks_by_id.get(task_id)
             runs = task_runs.get(task_id, [])
             latest_run = runs[-1] if runs else None
@@ -6568,6 +6595,7 @@ class HarnessUIDataService:
                     "strategy": str(record.metadata.get("strategy") or (task.strategy if task else "")),
                     "status": status,
                     "order": int(record.metadata.get("order") or 0),
+                    "published_unit": True,
                     "latest_run": (
                         {
                             "attempt": latest_run.attempt,
@@ -6581,6 +6609,56 @@ class HarnessUIDataService:
                     ),
                 }
             )
+        next_order = len(units) + 1
+        for task in linked_tasks:
+            if task.id in published_task_ids:
+                continue
+            runs = task_runs.get(task.id, [])
+            latest_run = runs[-1] if runs else None
+            validation_info = None
+            if latest_run is not None:
+                report_artifacts = [
+                    a for a in self.store.list_artifacts(latest_run.id)
+                    if a.kind == "report" and a.path
+                ]
+                if report_artifacts:
+                    try:
+                        import json as _json
+                        report_data = _json.loads(Path(report_artifacts[-1].path).read_text(encoding="utf-8"))
+                        cc = report_data.get("compile_check")
+                        tc = report_data.get("test_check")
+                        if cc is not None or tc is not None:
+                            validation_info = {
+                                "compile_passed": bool(cc.get("passed")) if cc else None,
+                                "test_passed": bool(tc.get("passed")) if tc else None,
+                                "test_timed_out": bool(tc.get("timed_out")) if tc else False,
+                            }
+                    except Exception:
+                        pass
+            units.append(
+                {
+                    "id": task.id,
+                    "title": task.title,
+                    "objective": task.objective,
+                    "rationale": "",
+                    "strategy": task.strategy,
+                    "status": task.status.value,
+                    "order": next_order,
+                    "published_unit": False,
+                    "latest_run": (
+                        {
+                            "attempt": latest_run.attempt,
+                            "status": latest_run.status.value,
+                            "started_at": latest_run.created_at.isoformat() if latest_run.created_at else None,
+                            "finished_at": latest_run.updated_at.isoformat() if latest_run.status.value in ("completed", "failed", "blocked", "disposed") and latest_run.updated_at else None,
+                            "validation": validation_info,
+                        }
+                        if latest_run is not None
+                        else None
+                    ),
+                }
+            )
+            next_order += 1
         return sorted(units, key=lambda item: (int(item["order"]), str(item["title"])))
 
     def _build_responder_context_packet(

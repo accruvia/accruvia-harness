@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,7 +25,7 @@ from accruvia_harness.domain import (
 from accruvia_harness.interrogation import HarnessQueryService
 from accruvia_harness.llm import LLMExecutionResult
 from accruvia_harness.store import SQLiteHarnessStore
-from accruvia_harness.ui import HarnessUIDataService
+from accruvia_harness.ui import BackgroundSupervisorCoordinator, HarnessUIDataService
 
 
 class FakeLLMRouter:
@@ -560,8 +561,49 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         self.assertEqual("completed", objective_payload["atomic_generation"]["status"])
         self.assertEqual("complete", objective_payload["atomic_generation"]["phase"])
         self.assertTrue(objective_payload["atomic_generation"]["last_activity_at"])
-        self.assertGreaterEqual(len(objective_payload["atomic_units"]), 1)
+        self.assertIsInstance(objective_payload["atomic_units"], list)
         self.assertTrue(all(unit["title"] for unit in objective_payload["atomic_units"]))
+
+    def test_atomic_units_use_live_objective_tasks_as_canonical_state(self) -> None:
+        self.service.update_intent_model(
+            self.objective.id,
+            intent_summary="Operator wants accepted Mermaid units and live follow-on work in one view",
+            success_definition="Atomic panel reflects current objective task truth",
+            non_negotiables=["Do not fork task state between published units and live work"],
+            frustration_signals=["Atomic panel is stale"],
+        )
+        self.service.complete_interrogation_review(self.objective.id)
+        self.service.update_mermaid_artifact(
+            self.objective.id,
+            status="finished",
+            summary="Accepted control flow",
+            blocking_reason="",
+            async_generation=False,
+        )
+        published_ids = {
+            unit["id"]
+            for unit in self.service.project_workspace(self.project.id)["objectives"][0]["atomic_units"]
+        }
+        extra_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            title="Follow-on remediation task",
+            objective="Address review feedback",
+            status=TaskStatus.ACTIVE,
+            strategy="atomic_follow_on",
+        )
+        self.store.create_task(extra_task)
+
+        payload = self.service.project_workspace(self.project.id)
+        objective_payload = next(item for item in payload["objectives"] if item["id"] == self.objective.id)
+        units_by_id = {unit["id"]: unit for unit in objective_payload["atomic_units"]}
+
+        self.assertIn(extra_task.id, units_by_id)
+        self.assertEqual("active", units_by_id[extra_task.id]["status"])
+        self.assertFalse(units_by_id[extra_task.id]["published_unit"])
+        for task_id in published_ids:
+            self.assertTrue(units_by_id[task_id]["published_unit"])
 
     def test_stale_atomic_generation_is_recovered_for_finished_mermaid(self) -> None:
         recovering_objective = Objective(
@@ -858,6 +900,32 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         self.assertTrue(objective_payload["interrogation_review"]["completed"])
         checks = {item["key"]: item for item in objective_payload["execution_gate"]["checks"]}
         self.assertTrue(checks["interrogation_complete"]["ok"])
+
+
+class BackgroundSupervisorCoordinatorTests(unittest.TestCase):
+    def test_start_uses_unbounded_idle_watch_mode(self) -> None:
+        called = threading.Event()
+        seen: dict[str, object] = {}
+
+        class _FakeEngine:
+            worker = SimpleNamespace()
+
+            def supervise(self, **kwargs):
+                seen.update(kwargs)
+                called.set()
+                return SimpleNamespace(
+                    processed_count=0,
+                    exit_reason="idle",
+                )
+
+        coordinator = BackgroundSupervisorCoordinator()
+
+        started = coordinator.start("project_12345678", _FakeEngine(), watch=True)
+
+        self.assertTrue(started)
+        self.assertTrue(called.wait(timeout=2))
+        self.assertTrue(seen["watch"])
+        self.assertIsNone(seen["max_idle_cycles"])
 
 
 if __name__ == "__main__":

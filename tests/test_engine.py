@@ -425,6 +425,48 @@ class HarnessEngineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Execution is blocked until the current Mermaid is finished"):
             self.engine.run_once(task.id)
 
+    def test_process_next_task_skips_objective_gate_blocked_task_and_runs_next_candidate(self) -> None:
+        objective = Objective(
+            id=new_id("objective"),
+            project_id=self.project_id,
+            title="Blocked objective",
+            summary="Not ready for execution",
+        )
+        self.store.create_objective(objective)
+        blocked = self.engine.create_task_with_policy(
+            project_id=self.project_id,
+            objective_id=objective.id,
+            title="Blocked by objective gate",
+            objective="Should remain pending until the objective is ready",
+            priority=200,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+        )
+        runnable = self.engine.create_task_with_policy(
+            project_id=self.project_id,
+            title="Runnable task",
+            objective="Can execute immediately",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+        )
+
+        result = self.engine.process_next_task(worker_id="worker-a", lease_seconds=120)
+
+        assert result is not None
+        self.assertEqual(runnable.id, result["task"].id)
+        blocked_after = self.store.get_task(blocked.id)
+        runnable_after = self.store.get_task(runnable.id)
+        assert blocked_after is not None
+        assert runnable_after is not None
+        self.assertEqual(TaskStatus.PENDING, blocked_after.status)
+        self.assertEqual(TaskStatus.COMPLETED, runnable_after.status)
+        self.assertEqual([], self.store.list_task_leases())
+
     def test_project_adapter_can_supply_real_worker_override(self) -> None:
         registry = ProjectAdapterRegistry()
         registry.register(OverrideProjectAdapter())

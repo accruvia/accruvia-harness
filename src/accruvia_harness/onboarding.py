@@ -71,12 +71,19 @@ def command_executable_status(command: str | None, search_path: str | None = Non
     }
 
 
-def probe_llm_command(command: str, *, timeout_seconds: int = 20) -> dict[str, object]:
+def probe_llm_command(
+    command: str,
+    *,
+    timeout_seconds: int = 20,
+    cwd: str | Path | None = None,
+) -> dict[str, object]:
     with tempfile.TemporaryDirectory() as temp_dir:
         root = Path(temp_dir)
         prompt_path = root / "prompt.txt"
         response_path = root / "response.txt"
         prompt_path.write_text("Reply with a short confirmation that setup works.\n", encoding="utf-8")
+        run_cwd = Path(cwd) if cwd is not None else Path.cwd()
+        run_cwd.mkdir(parents=True, exist_ok=True)
         env = os.environ.copy()
         env.update(
             {
@@ -88,7 +95,7 @@ def probe_llm_command(command: str, *, timeout_seconds: int = 20) -> dict[str, o
         process = subprocess.Popen(
             command,
             shell=True,
-            cwd=root,
+            cwd=run_cwd,
             stdin=subprocess.PIPE
             if "ACCRUVIA_LLM_PROMPT_PATH" not in command and "ACCRUVIA_LLM_RESPONSE_PATH" not in command
             else None,
