@@ -71,6 +71,7 @@ def task_from_row(row: sqlite3.Row) -> Task:
         max_attempts=int(row["max_attempts"]),
         max_branches=int(row["max_branches"]) if "max_branches" in row.keys() else 1,
         required_artifacts=_safe_json_loads(row["required_artifacts_json"], [], column="tasks.required_artifacts_json"),
+        attempt_metadata=_safe_json_loads(row["attempt_metadata_json"], {}, column="tasks.attempt_metadata_json") if "attempt_metadata_json" in row.keys() else {},
         status=TaskStatus(row["status"]),
         created_at=parse_dt(row["created_at"]),
         updated_at=parse_dt(row["updated_at"]),

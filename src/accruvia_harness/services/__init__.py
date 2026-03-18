@@ -8,6 +8,7 @@ from .review_watcher_service import ReviewWatcherResult, ReviewWatcherService
 from .run_service import RunService
 from .supervisor_service import SupervisorResult, SupervisorService
 from .task_service import TaskService
+from .validation_service import ValidationService
 
 __all__ = [
     "BranchResult",
@@ -24,5 +25,6 @@ __all__ = [
     "SupervisorResult",
     "SupervisorService",
     "TaskService",
+    "ValidationService",
     "WinnerResult",
 ]

@@ -91,6 +91,16 @@ class RunService:
             raise
 
     def _run_once_inner(self, task, project, progress) -> Run:
+        work, run = self._work_phase(task, project, progress)
+        if run.status == RunStatus.BLOCKED:
+            return run
+        progress({"type": "ready_for_next", "task_id": task.id})
+        return self._validation_phase(task, run, work, progress)
+
+    def _work_phase(self, task, project, progress):
+        """Everything up to and including worker.work(). Returns (WorkResult, Run)."""
+        from ..policy import WorkResult as _WR
+
         self.store.create_event(
             Event(id=new_id("event"), entity_type="task", entity_id=task.id, event_type="task_activated", payload={})
         )
@@ -299,7 +309,13 @@ class RunService:
                 "run_id": run.id,
                 "message": str(work.diagnostics.get("failure_message", "")),
             })
-            return run
+            return work, run
+
+        return work, run
+
+    def _validation_phase(self, task, run, work, progress) -> Run:
+        """Analyze the work result, decide next action, update task/run status."""
+        attempt = run.attempt
 
         self.store.create_event(
             Event(
@@ -353,7 +369,7 @@ class RunService:
                     task_id=task.id,
                     run_id=run.id,
                     validation_profile=task.validation_profile,
-                    worker_backend=type(worker).__name__,
+                    worker_backend="unknown",
                 )
         if self.telemetry is not None:
             with self.telemetry.timed(
@@ -441,24 +457,10 @@ class RunService:
                 payload={"run_id": run.id, "action": decision.action.value},
             )
         )
-        if bool(analysis.details.get("infrastructure_failure")):
-            self._create_infrastructure_failure_follow_on(task, run, analysis)
-        atomicity_follow_on = self._create_atomicity_follow_on(task, run, analysis)
-        if atomicity_follow_on is not None:
-            progress(
-                {
-                    "type": "atomicity_follow_on_created",
-                    "task_id": task.id,
-                    "task_title": task.title,
-                    "run_id": run.id,
-                    "follow_on_task_id": atomicity_follow_on["task_id"],
-                    "follow_on_title": atomicity_follow_on["title"],
-                    "failure_category": atomicity_follow_on["failure_category"],
-                }
-            )
+        # Write scope narrowing / failure info into attempt_metadata instead of creating child tasks.
+        self._record_attempt_metadata(task, run, analysis)
         if analysis.verdict == EvaluationVerdict.BLOCKED:
             self._reshape_scope_violation(task, run, analysis)
-        self._create_timeout_decomposition_follow_on(task, run, analysis)
 
         final_status = RunStatus.COMPLETED if decision_result.action == DecisionAction.PROMOTE else RunStatus.FAILED
         if analysis.verdict == EvaluationVerdict.BLOCKED:
@@ -549,60 +551,58 @@ class RunService:
         work.artifacts.append(("report", str(report_path), "Structured failure evidence report"))
         return work
 
-    def _create_infrastructure_failure_follow_on(self, task, run, analysis) -> None:
-        if self.task_service is None:
-            return
-        if task.strategy == "executor_repair":
-            return
+    def _record_attempt_metadata(self, task, run, analysis) -> None:
+        """Record scope narrowing and failure info into attempt_metadata instead of creating child tasks."""
         diagnostics = analysis.details.get("diagnostics")
         if not isinstance(diagnostics, dict):
             return
-        if not bool(diagnostics.get("infrastructure_failure")):
-            return
-        # Don't spawn repair tasks for transient backend unavailability (credits, outages).
-        # The task was already requeued as pending by the backends_unavailable handler.
-        if bool(diagnostics.get("backends_unavailable")):
-            return
-        existing = self.store.find_follow_on_task(task.id, run.id)
-        if existing is not None and existing.strategy == "executor_repair":
-            return
-        queued_repairs = [
-            child
-            for child in self.store.list_child_tasks(task.id)
-            if child.strategy == "executor_repair" and child.status in {TaskStatus.PENDING, TaskStatus.ACTIVE}
-        ]
-        if queued_repairs:
-            return
-        category = str(diagnostics.get("failure_category") or "executor_failure")
-        message = str(
-            diagnostics.get("failure_message")
-            or diagnostics.get("error")
-            or diagnostics.get("blocked_reason")
-            or analysis.summary
-        ).strip()
-        follow_on = self.task_service.create_follow_on_task(
-            parent_task_id=task.id,
-            source_run_id=run.id,
-            title=f"{task.title}: repair executor/runtime failure",
-            objective=(
-                "Repair the harness executor/runtime failure blocking task execution. "
-                f"Latest category: {category}. Latest symptom: {message}"
-            ),
-            priority=max(task.priority + 100, 900),
-            strategy="executor_repair",
-            validation_mode="lightweight_repair",
-            max_attempts=1,
-            required_artifacts=["plan", "report"],
-        )
-        self.store.create_event(
-            Event(
-                id=new_id("event"),
-                entity_type="task",
-                entity_id=follow_on.id,
-                event_type="executor_failure_follow_on_created",
-                payload={"parent_task_id": task.id, "run_id": run.id, "failure_category": category},
+        metadata: dict[str, object] = {}
+
+        # Record infrastructure failure info
+        if bool(diagnostics.get("infrastructure_failure")) and not bool(diagnostics.get("backends_unavailable")):
+            category = str(diagnostics.get("failure_category") or "executor_failure")
+            message = str(
+                diagnostics.get("failure_message")
+                or diagnostics.get("error")
+                or diagnostics.get("blocked_reason")
+                or analysis.summary
+            ).strip()
+            metadata["infrastructure_failure"] = {
+                "run_id": run.id,
+                "category": category,
+                "message": message,
+            }
+
+        # Record atomicity decomposition info
+        category = str(diagnostics.get("failure_category") or "").strip()
+        if category in {"atomicity_decomposition", "policy_self_modification"}:
+            rationale = str(diagnostics.get("failure_message") or analysis.summary).strip()
+            metadata["atomicity_narrowing"] = {
+                "run_id": run.id,
+                "category": category,
+                "rationale": rationale,
+            }
+
+        # Record timeout decomposition info
+        if category in {"validation_timeout", "stale_progress_timeout"} and task.strategy in {"executor_repair", "bounded_unblocker"}:
+            timeout_seconds = diagnostics.get("timeout_seconds")
+            metadata["timeout_narrowing"] = {
+                "run_id": run.id,
+                "category": category,
+                "timeout_seconds": timeout_seconds,
+            }
+
+        if metadata:
+            self.store.update_task_attempt_metadata(task.id, metadata)
+            self.store.create_event(
+                Event(
+                    id=new_id("event"),
+                    entity_type="task",
+                    entity_id=task.id,
+                    event_type="attempt_metadata_recorded",
+                    payload=metadata,
+                )
             )
-        )
 
     def _reshape_scope_violation(self, task, run, analysis) -> None:
         if self.task_service is None:
@@ -666,114 +666,6 @@ class RunService:
                     payload={"created_paths": created_paths},
                 )
             )
-
-    def _create_timeout_decomposition_follow_on(self, task, run, analysis) -> None:
-        if self.task_service is None:
-            return
-        if task.strategy not in {"executor_repair", "bounded_unblocker"}:
-            return
-        diagnostics = analysis.details.get("diagnostics")
-        if not isinstance(diagnostics, dict):
-            return
-        category = str(diagnostics.get("failure_category") or "").strip()
-        if category not in {"validation_timeout", "stale_progress_timeout"}:
-            return
-        existing = self.store.find_follow_on_task(task.id, run.id)
-        if existing is not None and existing.strategy == "timeout_decomposition":
-            return
-        queued_children = [
-            child
-            for child in self.store.list_child_tasks(task.id)
-            if child.strategy == "timeout_decomposition" and child.status in {TaskStatus.PENDING, TaskStatus.ACTIVE}
-        ]
-        if queued_children:
-            return
-        timeout_seconds = diagnostics.get("timeout_seconds")
-        timeout_detail = f" after {timeout_seconds}s" if timeout_seconds else ""
-        follow_on = self.task_service.create_follow_on_task(
-            parent_task_id=task.id,
-            source_run_id=run.id,
-            title=f"{task.title}: narrow scope after timeout",
-            objective=(
-                "Reduce this remediation task to one smaller executable slice that can complete within the current "
-                f"validation budget. The latest run ended with {category}{timeout_detail}; isolate a narrower doctor, "
-                "preflight, or deterministic reproduction step using the same executor contract."
-            ),
-            priority=max(task.priority + 5, 1),
-            strategy="timeout_decomposition",
-            validation_mode="lightweight_repair",
-            max_attempts=1,
-            required_artifacts=["plan", "report"],
-        )
-        self.store.create_event(
-            Event(
-                id=new_id("event"),
-                entity_type="task",
-                entity_id=follow_on.id,
-                event_type="timeout_decomposition_follow_on_created",
-                payload={"parent_task_id": task.id, "run_id": run.id, "failure_category": category},
-            )
-        )
-
-    def _create_atomicity_follow_on(self, task, run, analysis) -> dict[str, str] | None:
-        if self.task_service is None:
-            return None
-        diagnostics = analysis.details.get("diagnostics")
-        if not isinstance(diagnostics, dict):
-            return None
-        category = str(diagnostics.get("failure_category") or "").strip()
-        if category not in {"atomicity_decomposition", "policy_self_modification"}:
-            return None
-        existing = self.store.find_follow_on_task(task.id, run.id)
-        if existing is not None and existing.strategy == "atomicity_split":
-            return None
-        # Prevent infinite decomposition: limit depth to 10 levels.
-        depth = 0
-        ancestor = task
-        while ancestor.parent_task_id:
-            parent = self.store.get_task(ancestor.parent_task_id)
-            if parent is None:
-                break
-            depth += 1
-            ancestor = parent
-        if depth >= 10:
-            return None
-        queued_children = [
-            child
-            for child in self.store.list_child_tasks(task.id)
-            if child.strategy == "atomicity_split" and child.status in {TaskStatus.PENDING, TaskStatus.ACTIVE}
-        ]
-        if queued_children:
-            return None
-        rationale = str(diagnostics.get("failure_message") or analysis.summary).strip()
-        follow_on = self.task_service.create_follow_on_task(
-            parent_task_id=task.id,
-            source_run_id=run.id,
-            title=f"{task.title}: narrower atomic slice",
-            objective=(
-                "Reduce this task to one narrower slice that avoids self-referential control-plane changes and "
-                f"matches a bounded validation surface. Latest atomicity category: {category}. Latest rationale: {rationale}"
-            ),
-            priority=max(task.priority + 5, 1),
-            strategy="atomicity_split",
-            validation_mode=task.validation_mode,
-            max_attempts=1,
-            required_artifacts=["plan", "report"],
-        )
-        self.store.create_event(
-            Event(
-                id=new_id("event"),
-                entity_type="task",
-                entity_id=follow_on.id,
-                event_type="atomicity_follow_on_created",
-                payload={"parent_task_id": task.id, "run_id": run.id, "failure_category": category},
-            )
-        )
-        return {
-            "task_id": follow_on.id,
-            "title": follow_on.title,
-            "failure_category": category,
-        }
 
     def run_until_stable(self, task_id: str) -> list[Run]:
         completed_runs: list[Run] = []

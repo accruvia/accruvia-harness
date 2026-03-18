@@ -276,6 +276,13 @@ MIGRATIONS: list[Migration] = [
         CREATE INDEX IF NOT EXISTS idx_tasks_objective_id ON tasks(objective_id);
         """,
     ),
+    Migration(
+        version=13,
+        name="task_attempt_metadata",
+        sql="""
+        ALTER TABLE tasks ADD COLUMN attempt_metadata_json TEXT NOT NULL DEFAULT '{}';
+        """,
+    ),
 ]
 
 

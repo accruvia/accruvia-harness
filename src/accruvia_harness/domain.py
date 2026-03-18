@@ -139,6 +139,7 @@ class Task:
     max_attempts: int = 3
     max_branches: int = 1
     required_artifacts: list[str] = field(default_factory=lambda: ["plan", "report"])
+    attempt_metadata: dict[str, Any] = field(default_factory=dict)
     status: TaskStatus = TaskStatus.PENDING
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)

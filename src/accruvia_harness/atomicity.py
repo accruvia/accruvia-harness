@@ -239,7 +239,7 @@ def atomicity_gate(
         action = "block_self_referential"
         rationale = "Atomicity risk is extremely high for this self-hosting control-plane attempt."
     elif score >= 4:
-        action = "decompose_first"
+        action = "narrow_scope"
         rationale = "Attempt spans too much surface area for efficient bounded validation."
     elif score >= 2:
         action = "validate_narrow"

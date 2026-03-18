@@ -2716,9 +2716,11 @@ function renderAtomicUnits() {
   }
   // Counts
   const counts = { all: linkedTasks.length, completed: 0, active: 0, failed: 0, pending: 0 };
+  const activeStatuses = new Set(['active', 'working', 'validating']);
   for (const task of linkedTasks) {
     const s = task.status || 'pending';
-    if (s in counts) counts[s]++;
+    if (activeStatuses.has(s)) counts.active++;
+    else if (s in counts) counts[s]++;
     else counts.pending++;
   }
   const total = linkedTasks.length;
@@ -2729,7 +2731,9 @@ function renderAtomicUnits() {
   }
   const filteredTasks = state.atomicTab === 'all'
     ? linkedTasks
-    : linkedTasks.filter((t) => (t.status || 'pending') === state.atomicTab);
+    : state.atomicTab === 'active'
+      ? linkedTasks.filter((t) => activeStatuses.has(t.status || 'pending'))
+      : linkedTasks.filter((t) => (t.status || 'pending') === state.atomicTab);
   // Tabs + progress bar
   const tabs = ['all', 'active', 'pending', 'completed', 'failed'];
   const tabLabels = { all: 'All', active: 'Active', pending: 'Pending', completed: 'Done', failed: 'Failed' };
@@ -6449,17 +6453,6 @@ class HarnessUIDataService:
             for record in self.store.list_context_records(objective_id=objective_id, record_type="atomic_unit_generated")
             if str(record.metadata.get("generation_id") or "") == generation_id
         ]
-        # Build child task index so parent status reflects active children.
-        children_by_parent: dict[str, list[Task]] = {}
-        for t in linked_tasks:
-            if t.parent_task_id and t.parent_task_id in tasks_by_id:
-                children_by_parent.setdefault(t.parent_task_id, []).append(t)
-        # Also include children not in linked_tasks (different strategy).
-        for task_id in tasks_by_id:
-            if task_id not in children_by_parent:
-                children = self.store.list_child_tasks(task_id)
-                if children:
-                    children_by_parent[task_id] = children
 
         for record in records:
             task_id = str(record.metadata.get("task_id") or "")
@@ -6467,17 +6460,7 @@ class HarnessUIDataService:
             runs = task_runs.get(task_id, [])
             latest_run = runs[-1] if runs else None
 
-            # Bubble up: if this task has an active/working child, reflect that.
-            effective_status = task.status.value if task is not None else "pending"
-            effective_run = latest_run
-            children = children_by_parent.get(task_id, [])
-            for child in children:
-                if child.status == TaskStatus.ACTIVE:
-                    effective_status = "active"
-                    child_runs = self.store.list_runs(child.id)
-                    if child_runs:
-                        effective_run = child_runs[-1]
-                    break
+            status = task.status.value if task is not None else "pending"
 
             units.append(
                 {
@@ -6486,16 +6469,16 @@ class HarnessUIDataService:
                     "objective": str(record.metadata.get("objective") or (task.objective if task else "")),
                     "rationale": str(record.metadata.get("rationale") or ""),
                     "strategy": str(record.metadata.get("strategy") or (task.strategy if task else "")),
-                    "status": effective_status,
+                    "status": status,
                     "order": int(record.metadata.get("order") or 0),
                     "latest_run": (
                         {
-                            "attempt": effective_run.attempt,
-                            "status": effective_run.status.value,
-                            "started_at": effective_run.created_at.isoformat() if effective_run.created_at else None,
-                            "finished_at": effective_run.updated_at.isoformat() if effective_run.status.value in ("completed", "failed", "blocked", "disposed") and effective_run.updated_at else None,
+                            "attempt": latest_run.attempt,
+                            "status": latest_run.status.value,
+                            "started_at": latest_run.created_at.isoformat() if latest_run.created_at else None,
+                            "finished_at": latest_run.updated_at.isoformat() if latest_run.status.value in ("completed", "failed", "blocked", "disposed") and latest_run.updated_at else None,
                         }
-                        if effective_run is not None
+                        if latest_run is not None
                         else None
                     ),
                 }

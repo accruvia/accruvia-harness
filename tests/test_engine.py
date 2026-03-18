@@ -1192,14 +1192,13 @@ class HarnessEngineTests(unittest.TestCase):
 
         run = engine.run_once(task.id)
 
-        children = self.store.list_child_tasks(task.id)
         decision = self.store.list_decisions(run.id)[0]
         self.assertEqual("blocked", run.status.value)
         self.assertEqual("fail", decision.action.value)
-        self.assertEqual(1, len(children))
-        self.assertEqual("executor_repair", children[0].strategy)
-        self.assertEqual("pending", children[0].status.value)
         self.assertEqual("failed", self.store.get_task(task.id).status.value)
+        # Infrastructure failure info is now recorded in attempt_metadata
+        updated_task = self.store.get_task(task.id)
+        self.assertIn("infrastructure_failure", updated_task.attempt_metadata)
 
     def test_infrastructure_failed_worker_persists_report_and_creates_one_repair_follow_on(self) -> None:
         engine = HarnessEngine(
@@ -1226,7 +1225,6 @@ class HarnessEngineTests(unittest.TestCase):
         artifacts = self.store.list_artifacts(run.id)
         evaluations = self.store.list_evaluations(run.id)
         decisions = self.store.list_decisions(run.id)
-        children = self.store.list_child_tasks(task.id)
 
         self.assertEqual("failed", run.status.value)
         self.assertIn("report", [artifact.kind for artifact in artifacts])
@@ -1234,8 +1232,9 @@ class HarnessEngineTests(unittest.TestCase):
         self.assertTrue(Path(report_artifact.path).exists())
         self.assertTrue(evaluations[0].details["infrastructure_failure"])
         self.assertEqual("fail", decisions[0].action.value)
-        self.assertEqual(1, len(children))
-        self.assertEqual("executor_repair", children[0].strategy)
+        # Infrastructure failure info is now recorded in attempt_metadata instead of child tasks
+        updated_task = self.store.get_task(task.id)
+        self.assertIn("infrastructure_failure", updated_task.attempt_metadata)
 
     def test_executor_repair_task_does_not_spawn_recursive_repair_follow_on(self) -> None:
         engine = HarnessEngine(
@@ -1285,13 +1284,12 @@ class HarnessEngineTests(unittest.TestCase):
 
         run = engine.run_once(task.id)
 
-        children = self.store.list_child_tasks(task.id)
         self.assertEqual("failed", run.status.value)
-        self.assertEqual(1, len(children))
-        self.assertEqual("timeout_decomposition", children[0].strategy)
-        self.assertEqual("pending", children[0].status.value)
-        self.assertIn("validation budget", children[0].objective)
         self.assertEqual("failed", self.store.get_task(task.id).status.value)
+        # Timeout narrowing info is now recorded in attempt_metadata instead of child tasks
+        updated_task = self.store.get_task(task.id)
+        self.assertIn("timeout_narrowing", updated_task.attempt_metadata)
+        self.assertEqual("validation_timeout", updated_task.attempt_metadata["timeout_narrowing"]["category"])
 
     def test_atomicity_blocked_worker_creates_atomicity_split_follow_on(self) -> None:
         engine = HarnessEngine(
@@ -1317,11 +1315,11 @@ class HarnessEngineTests(unittest.TestCase):
 
         run = engine.run_once(task.id)
 
-        children = self.store.list_child_tasks(task.id)
         self.assertEqual("blocked", run.status.value)
-        self.assertEqual(1, len(children))
-        self.assertEqual("atomicity_split", children[0].strategy)
-        self.assertIn("narrower slice", children[0].objective)
+        # Atomicity narrowing info is now recorded in attempt_metadata instead of child tasks
+        updated_task = self.store.get_task(task.id)
+        self.assertIn("atomicity_narrowing", updated_task.attempt_metadata)
+        self.assertEqual("atomicity_decomposition", updated_task.attempt_metadata["atomicity_narrowing"]["category"])
 
     def test_review_promotion_dedupes_follow_on_for_same_run(self) -> None:
         engine = HarnessEngine(

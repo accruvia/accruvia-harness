@@ -410,7 +410,7 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
         prior_timeout_count=prior_timeout_count,
     )
     write_atomicity_telemetry(atomicity_path, gate_result)
-    if gate_result.action in {"decompose_first", "block_self_referential"}:
+    if gate_result.action in {"narrow_scope", "block_self_referential"}:
         failure_category = "policy_self_modification" if gate_result.action == "block_self_referential" else "atomicity_decomposition"
         worker_outcome = "blocked"
         report_path.write_text(
@@ -444,8 +444,123 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
             encoding="utf-8",
         )
         return 1
-    # Write phase marker so the supervisor can report VALIDATING status.
-    (run_dir / "phase.txt").write_text("validating", encoding="utf-8")
+
+    # LLM succeeded and atomicity gate passed — emit candidate report for separate validation.
+    llm_failed = completed.returncode != 0
+    if llm_failed:
+        summary_text = _first_nonempty_line(completed.stdout)
+        failure_message = _first_nonempty_line(completed.stderr) or _first_nonempty_line(completed.stdout)
+        report_path.write_text(
+            json.dumps(
+                {
+                    "task_id": task_id,
+                    "run_id": run_id,
+                    "objective": objective,
+                    "strategy": strategy,
+                    "worker_backend": "agent",
+                    "llm_backend": llm_backend,
+                    "validation_profile": validation_profile,
+                    "validation_mode": validation_mode,
+                    "worker_outcome": "blocked",
+                    "blocked": True,
+                    "infrastructure_failure": True,
+                    "failure_category": "executor_process_failure",
+                    "failure_message": failure_message or f"{llm_backend} worker exited non-zero",
+                    "llm_returncode": completed.returncode,
+                    "changed_files": all_changed,
+                    "test_files": [],
+                    "summary": summary_text,
+                    "atomicity_gate": {
+                        "score": gate_result.score,
+                        "flags": gate_result.flags,
+                        "action": gate_result.action,
+                        "rationale": gate_result.rationale,
+                    },
+                    "atomicity_telemetry_path": str(atomicity_path),
+                },
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        return 1
+
+    test_files = [
+        path for path in all_changed if "/test" in path or path.startswith("tests/") or path.endswith("_test.py") or path.endswith(".test.js")
+    ]
+    summary_text = _first_nonempty_line(completed.stdout)
+    if not summary_text and stdout_path.exists():
+        summary_text = _first_nonempty_line(stdout_path.read_text(encoding="utf-8", errors="replace"))
+
+    candidate_payload = {
+        "task_id": task_id,
+        "run_id": run_id,
+        "objective": objective,
+        "strategy": strategy,
+        "worker_backend": "agent",
+        "llm_backend": llm_backend,
+        "validation_profile": validation_profile,
+        "validation_mode": validation_mode,
+        "worker_outcome": "candidate",
+        "changed_files": all_changed,
+        "test_files": test_files or ["tests/test_phase1.py"],
+        "summary": summary_text,
+        "command": llm_command,
+        "atomicity_gate": {
+            "score": gate_result.score,
+            "flags": gate_result.flags,
+            "action": gate_result.action,
+            "rationale": gate_result.rationale,
+        },
+        "atomicity_telemetry_path": str(atomicity_path),
+        "effective_validation_mode": gate_result.effective_validation_mode,
+    }
+    report_path.write_text(json.dumps(candidate_payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    # Inline validation: run compile + test immediately so we return a complete result.
+    return run_validation(env)
+
+
+def run_validation(environ: Mapping[str, str] | None = None) -> int:
+    """Run compile and test validation on an existing candidate report.
+
+    Reads report.json from run_dir, runs py_compile and pytest, then updates
+    the report with compile_check and test_check results.  Can be called as a
+    standalone subprocess or from within run_agent_worker.
+    """
+    env = dict(environ or os.environ)
+    run_dir = Path(env["ACCRUVIA_RUN_DIR"]).resolve()
+    workspace = Path(env["ACCRUVIA_PROJECT_WORKSPACE"]).resolve()
+    validation_mode = env.get("ACCRUVIA_TASK_VALIDATION_MODE", "default_focused")
+    compile_timeout_seconds = _env_timeout_seconds(
+        env,
+        "ACCRUVIA_TASK_COMPILE_TIMEOUT_SECONDS",
+        DEFAULT_AGENT_COMPILE_TIMEOUT_SECONDS,
+    )
+
+    report_path = run_dir / "report.json"
+    compile_output_path = run_dir / "compile_output.txt"
+    test_output_path = run_dir / "test_output.txt"
+
+    # Read existing report
+    payload: dict[str, object] = {}
+    if report_path.exists():
+        try:
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+
+    all_changed = payload.get("changed_files", [])
+    if not isinstance(all_changed, list):
+        all_changed = []
+    effective_validation_mode = str(payload.get("effective_validation_mode") or validation_mode)
+
+    compile_timed_out = False
+    git_timed_out = False
+    compile_failure_message = ""
+    git_failure_message = ""
+    python_files = "\n".join(path for path in all_changed if path.endswith(".py"))
+
     _validation_start = time.monotonic()
 
     if python_files:
@@ -471,17 +586,13 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
                 encoding="utf-8",
             )
     else:
-        if git_timed_out:
-            compile_output_path.write_text(git_failure_message + "\n", encoding="utf-8")
-        else:
-            compile_output_path.write_text("No Python files changed.\n", encoding="utf-8")
+        compile_output_path.write_text("No Python files changed.\n", encoding="utf-8")
         compile_rc = 0
 
-    validation_policy = _validation_policy(gate_result.effective_validation_mode, env)
+    validation_policy = _validation_policy(effective_validation_mode, env)
     test_command = validation_policy.command
     test_timeout_seconds = validation_policy.execution_timeout_seconds
     test_startup_timeout_seconds = validation_policy.startup_timeout_seconds
-    test_timeout_category = None
     test_completed, test_timeout_category = _run_validation_process(
         test_command,
         cwd=workspace,
@@ -505,30 +616,15 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
 
     _validation_elapsed = time.monotonic() - _validation_start
 
-    test_files = [
-        path for path in all_changed if "/test" in path or path.startswith("tests/") or path.endswith("_test.py") or path.endswith(".test.js")
-    ]
-    summary_text = _first_nonempty_line(completed.stdout)
-    if not summary_text and stdout_path.exists():
-        summary_text = _first_nonempty_line(stdout_path.read_text(encoding="utf-8", errors="replace"))
-
-    llm_failed = completed.returncode != 0
-    worker_outcome = "blocked" if llm_failed else "success"
-    failure_message = _first_nonempty_line(completed.stderr) or _first_nonempty_line(completed.stdout)
-    if not llm_failed and (compile_rc != 0 or test_completed.returncode != 0 or git_timed_out):
+    # Determine final outcome
+    worker_outcome = payload.get("worker_outcome", "candidate")
+    if compile_rc != 0 or test_completed.returncode != 0:
         worker_outcome = "failed"
-    payload = {
-        "task_id": task_id,
-        "run_id": run_id,
-        "objective": objective,
-        "strategy": strategy,
-        "worker_backend": "agent",
-        "llm_backend": llm_backend,
-        "validation_profile": validation_profile,
-        "validation_mode": validation_mode,
+    elif worker_outcome == "candidate":
+        worker_outcome = "success"
+
+    payload.update({
         "worker_outcome": worker_outcome,
-        "changed_files": all_changed,
-        "test_files": test_files or ["tests/test_phase1.py"],
         "compile_check": {
             "passed": compile_rc == 0,
             "targets": [path for path in all_changed if path.endswith(".py")],
@@ -542,22 +638,13 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
             "framework": "unittest",
             "command": test_command,
             "output_path": str(test_output_path),
-            "selection": gate_result.effective_validation_mode,
+            "selection": effective_validation_mode,
             "timeout_seconds": test_timeout_seconds,
             "startup_timeout_seconds": test_startup_timeout_seconds,
             "timed_out": test_timed_out,
         },
         "validation_elapsed_seconds": round(_validation_elapsed, 2),
-        "summary": summary_text,
-        "command": llm_command,
-        "atomicity_gate": {
-            "score": gate_result.score,
-            "flags": gate_result.flags,
-            "action": gate_result.action,
-            "rationale": gate_result.rationale,
-        },
-        "atomicity_telemetry_path": str(atomicity_path),
-    }
+    })
     if test_timeout_category == "validation_startup_timeout":
         payload.update(
             {
@@ -581,24 +668,8 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
                 "failure_message": compile_failure_message,
             }
         )
-    elif git_timed_out:
-        payload.update(
-            {
-                "failure_category": "git_timeout",
-                "failure_message": git_failure_message,
-            }
-        )
-    if llm_failed:
-        payload.update(
-            {
-                "blocked": True,
-                "infrastructure_failure": True,
-                "failure_category": "executor_process_failure",
-                "failure_message": failure_message or f"{llm_backend} worker exited non-zero",
-                "llm_returncode": completed.returncode,
-            }
-        )
+
     report_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    if llm_failed or compile_rc != 0 or test_completed.returncode != 0:
+    if compile_rc != 0 or test_completed.returncode != 0:
         return 1
     return 0

@@ -87,9 +87,9 @@ class ProjectTaskStoreMixin:
                     id, project_id, objective_id, title, objective, priority, parent_task_id, source_run_id,
                     external_ref_type, external_ref_id, external_ref_metadata_json,
                     validation_profile, validation_mode, scope_json, strategy, max_attempts, max_branches,
-                    required_artifacts_json, status, created_at, updated_at
+                    required_artifacts_json, attempt_metadata_json, status, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task.id,
@@ -110,6 +110,7 @@ class ProjectTaskStoreMixin:
                     task.max_attempts,
                     task.max_branches,
                     json.dumps(task.required_artifacts, sort_keys=True),
+                    json.dumps(task.attempt_metadata, sort_keys=True),
                     task.status.value,
                     task.created_at.isoformat(),
                     task.updated_at.isoformat(),
@@ -121,7 +122,7 @@ class ProjectTaskStoreMixin:
             SELECT id, project_id, title, objective, priority, parent_task_id, source_run_id,
                    objective_id,
                    external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile, validation_mode, scope_json,
-                   strategy, max_attempts, max_branches, required_artifacts_json, status, created_at, updated_at
+                   strategy, max_attempts, max_branches, required_artifacts_json, attempt_metadata_json, status, created_at, updated_at
             FROM tasks
         """
         params: tuple[str, ...] = ()
@@ -139,7 +140,7 @@ class ProjectTaskStoreMixin:
                 """
                 SELECT id, project_id, objective_id, title, objective, priority, parent_task_id, source_run_id,
                        external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile, validation_mode, scope_json,
-                       strategy, max_attempts, max_branches, required_artifacts_json, status, created_at, updated_at
+                       strategy, max_attempts, max_branches, required_artifacts_json, attempt_metadata_json, status, created_at, updated_at
                 FROM tasks WHERE id = ?
                 """,
                 (task_id,),
@@ -152,7 +153,7 @@ class ProjectTaskStoreMixin:
                 """
                 SELECT id, project_id, objective_id, title, objective, priority, parent_task_id, source_run_id,
                        external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile, validation_mode, scope_json,
-                       strategy, max_attempts, max_branches, required_artifacts_json, status, created_at, updated_at
+                       strategy, max_attempts, max_branches, required_artifacts_json, attempt_metadata_json, status, created_at, updated_at
                 FROM tasks
                 WHERE external_ref_type = ? AND external_ref_id = ?
                 ORDER BY created_at
@@ -166,7 +167,7 @@ class ProjectTaskStoreMixin:
         query = """
             SELECT id, project_id, title, objective, priority, parent_task_id, source_run_id,
                    external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile, validation_mode, scope_json,
-                   strategy, max_attempts, max_branches, required_artifacts_json, status, created_at, updated_at
+                   strategy, max_attempts, max_branches, required_artifacts_json, attempt_metadata_json, status, created_at, updated_at
             FROM tasks
             WHERE status = ?
         """
@@ -284,7 +285,7 @@ class ProjectTaskStoreMixin:
                 """
             SELECT id, project_id, objective_id, title, objective, priority, parent_task_id, source_run_id,
                    external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile, validation_mode, scope_json,
-                   strategy, max_attempts, max_branches, required_artifacts_json, status, created_at, updated_at
+                   strategy, max_attempts, max_branches, required_artifacts_json, attempt_metadata_json, status, created_at, updated_at
             FROM tasks
                 WHERE parent_task_id = ? AND source_run_id = ?
                 ORDER BY created_at
@@ -300,7 +301,7 @@ class ProjectTaskStoreMixin:
                 """
                 SELECT id, project_id, title, objective, priority, parent_task_id, source_run_id,
                        external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile, validation_mode, scope_json,
-                       strategy, max_attempts, max_branches, required_artifacts_json, status, created_at, updated_at
+                       strategy, max_attempts, max_branches, required_artifacts_json, attempt_metadata_json, status, created_at, updated_at
                 FROM tasks
                 WHERE parent_task_id = ?
                 ORDER BY created_at
@@ -308,6 +309,21 @@ class ProjectTaskStoreMixin:
                 (parent_task_id,),
             ).fetchall()
         return [task_from_row(row) for row in rows]
+
+    def update_task_attempt_metadata(self, task_id: str, metadata: dict[str, object]) -> None:
+        """Merge metadata into the existing attempt_metadata_json for the given task."""
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT attempt_metadata_json FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Unknown task: {task_id}")
+            existing = json.loads(row["attempt_metadata_json"]) if row["attempt_metadata_json"] else {}
+            existing.update(metadata)
+            connection.execute(
+                "UPDATE tasks SET attempt_metadata_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(existing, sort_keys=True), datetime.now(UTC).isoformat(), task_id),
+            )
 
     def update_task_external_metadata(self, task_id: str, metadata: dict[str, object]) -> None:
         with self.connect() as connection:

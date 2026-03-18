@@ -24,6 +24,7 @@ from .services import (
     SupervisorService,
     TaskService,
 )
+from .services.validation_service import ValidationService
 from .services.repository_promotion_service import RepositoryPromotionService
 from .store import SQLiteHarnessStore
 from .validation import PromotionValidatorRegistry, build_validator_registry
@@ -70,6 +71,11 @@ class HarnessEngine:
         self._build_services()
 
     def _build_services(self) -> None:
+        self.validation = ValidationService(
+            store=self.store,
+            workspace_root=self.workspace_root,
+            telemetry=self.telemetry,
+        )
         self.runs = RunService(
             store=self.store,
             workspace_root=self.workspace_root,
