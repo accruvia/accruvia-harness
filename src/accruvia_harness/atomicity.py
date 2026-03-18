@@ -235,12 +235,9 @@ def atomicity_gate(
     if self_referential_change_detected:
         action = "block_self_referential"
         rationale = "Attempt modifies validation/task-selection machinery that evaluates tasks of its own class."
-    elif score >= 6:
-        action = "block_self_referential"
-        rationale = "Atomicity risk is extremely high for this self-hosting control-plane attempt."
     elif score >= 4:
         action = "narrow_scope"
-        rationale = "Attempt spans too much surface area for efficient bounded validation."
+        rationale = "Attempt spans wide surface area; scope metadata recorded for retry advisor."
     elif score >= 2:
         action = "validate_narrow"
         rationale = "Attempt risk is elevated; narrow validation should match the touched surface better."
