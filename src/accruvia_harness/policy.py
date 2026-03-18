@@ -167,9 +167,16 @@ class DefaultDecider:
                 rationale="Required artifacts exist and analysis passed.",
             )
         if analysis.verdict == EvaluationVerdict.BLOCKED:
+            # Atomicity blocks and transient failures should retry with narrowed scope
+            # if attempts remain, not hard-fail.
+            if run.attempt < task.max_attempts:
+                return DecideResult(
+                    action=DecisionAction.RETRY,
+                    rationale="Worker blocked; retrying with scope narrowing metadata.",
+                )
             return DecideResult(
                 action=DecisionAction.FAIL,
-                rationale="Worker reported a blocked diagnosis.",
+                rationale="Worker reported a blocked diagnosis and retry budget is exhausted.",
             )
         if run.attempt >= task.max_attempts:
             if task.max_branches > 1 and run.branch_id is None:
