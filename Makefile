@@ -2,7 +2,7 @@ PYTHON ?= .venv/bin/python
 PIP ?= .venv/bin/pip
 PYTHONPATH_VALUE := src
 
-.PHONY: help venv init install bootstrap install-temporal install-observability run test test-fast test-e2e test-observer test-temporal temporal-up temporal-down
+.PHONY: help venv init install bootstrap install-temporal install-observability run ui-restart test test-fast test-e2e test-observer test-temporal temporal-up temporal-down
 
 help:
 	@echo "Targets:"
@@ -13,6 +13,7 @@ help:
 	@echo "  make install-temporal      Install Temporal extras"
 	@echo "  make install-observability Install observability extras"
 	@echo "  make run ARGS=\"status\"     Run the harness CLI"
+	@echo "  make ui-restart             Restart the Harness UI deterministically"
 	@echo "  make test-fast             Run the fast suite"
 	@echo "  make test                  Run the full suite"
 	@echo "  make test-e2e              Run end-to-end tests"
@@ -40,6 +41,9 @@ install-observability: venv
 
 run:
 	PYTHONPATH=$(PYTHONPATH_VALUE) $(PYTHON) -m accruvia_harness $(ARGS)
+
+ui-restart:
+	./bin/restart-ui
 
 test-fast:
 	PYTHONPATH=$(PYTHONPATH_VALUE) $(PYTHON) -m unittest \

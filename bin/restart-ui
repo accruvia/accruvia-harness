@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+python_bin="${ACCRUVIA_UI_PYTHON:-$repo_root/.venv/bin/python}"
+log_path="${ACCRUVIA_UI_LOG:-$repo_root/.accruvia-harness/ui.log}"
+pid_path="${ACCRUVIA_UI_PID:-$repo_root/.accruvia-harness/ui.pid}"
+
+mkdir -p "$(dirname "$log_path")"
+
+existing_pid=""
+if [[ -f "$pid_path" ]]; then
+  existing_pid="$(cat "$pid_path" 2>/dev/null || true)"
+fi
+
+if [[ -n "$existing_pid" ]] && kill -0 "$existing_pid" 2>/dev/null; then
+  kill "$existing_pid" 2>/dev/null || true
+  for _ in {1..50}; do
+    if ! kill -0 "$existing_pid" 2>/dev/null; then
+      break
+    fi
+    sleep 0.2
+  done
+fi
+
+if pgrep -f "accruvia_harness ui" >/dev/null 2>&1; then
+  pkill -f "accruvia_harness ui" || true
+  for _ in {1..50}; do
+    if ! pgrep -f "accruvia_harness ui" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.2
+  done
+fi
+
+nohup env PYTHONPATH=src "$python_bin" -m accruvia_harness ui --no-open-browser >>"$log_path" 2>&1 &
+new_pid=$!
+echo "$new_pid" > "$pid_path"
+
+for _ in {1..50}; do
+  if grep -q "Harness UI running at http://" "$log_path" 2>/dev/null; then
+    break
+  fi
+  sleep 0.2
+done
+
+echo "Restarted UI as PID $new_pid"

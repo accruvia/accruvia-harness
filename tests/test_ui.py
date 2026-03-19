@@ -4,6 +4,7 @@ import json
 import tempfile
 import threading
 import unittest
+import datetime as dt
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,7 +16,10 @@ from accruvia_harness.domain import (
     MermaidArtifact,
     MermaidStatus,
     Objective,
+    ObjectiveStatus,
     Project,
+    PromotionRecord,
+    PromotionStatus,
     Run,
     RunStatus,
     Task,
@@ -48,8 +52,66 @@ class FakeLLMRouter:
                     "content": "flowchart TD\nA[Objective Intake]-->B[Red-Team Intake]\nB-->C[Draft Planning Elements]\nC-->D[Mermaid Draft]",
                 }
             )
+        elif "Return JSON only with keys: summary, packets." in invocation.prompt:
+            response_text = json.dumps(
+                {
+                    "summary": "Objective review generated.",
+                    "packets": [
+                        {
+                            "reviewer": "QA agent",
+                            "dimension": "unit_test_coverage",
+                            "verdict": "concern",
+                            "progress_status": "improving",
+                            "severity": "medium",
+                            "owner_scope": "objective review evidence",
+                            "summary": "Unit coverage should be inspected before promotion.",
+                            "findings": ["Review the completed task reports for test evidence."],
+                            "evidence": ["64 completed tasks"],
+                            "closure_criteria": "A recorded QA review packet must cite completed-task unit-test evidence and conclude the concern is resolved or pass.",
+                            "evidence_required": "An objective review packet referencing concrete completed-task test artifacts.",
+                            "repeat_reason": "This concern is improving because later rounds add more test evidence, but the board still wants explicit artifact-backed QA closure.",
+                        },
+                        {
+                            "reviewer": "Structure agent",
+                            "dimension": "code_structure",
+                            "verdict": "pass",
+                            "progress_status": "resolved",
+                            "severity": "",
+                            "owner_scope": "",
+                            "summary": "No structural blocker was identified from the objective summary.",
+                            "findings": [],
+                            "evidence": ["5 waived historical failures"],
+                            "closure_criteria": "",
+                            "evidence_required": "",
+                            "repeat_reason": "",
+                        },
+                    ],
+                }
+            )
         else:
             response_text = self.response_text
+        prompt_path.write_text(invocation.prompt, encoding="utf-8")
+        response_path.write_text(response_text, encoding="utf-8")
+        return (
+            LLMExecutionResult(
+                backend="fake-ui-llm",
+                response_text=response_text,
+                prompt_path=prompt_path,
+                response_path=response_path,
+                diagnostics={},
+            ),
+            "fake-ui-llm",
+        )
+
+
+class InvalidObjectiveReviewRouter(FakeLLMRouter):
+    def execute(self, invocation, telemetry=None):
+        self.last_prompt = invocation.prompt
+        self.prompts.append(invocation.prompt)
+        invocation.run_dir.mkdir(parents=True, exist_ok=True)
+        prompt_path = invocation.run_dir / "llm_prompt.txt"
+        response_path = invocation.run_dir / "llm_response.md"
+        response_text = self.response_text
         prompt_path.write_text(invocation.prompt, encoding="utf-8")
         response_path.write_text(response_text, encoding="utf-8")
         return (
@@ -604,6 +666,377 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         self.assertFalse(units_by_id[extra_task.id]["published_unit"])
         for task_id in published_ids:
             self.assertTrue(units_by_id[task_id]["published_unit"])
+
+    def test_project_workspace_surfaces_promotion_review_summary_and_packets(self) -> None:
+        reviewed_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            title="Reviewed task",
+            objective="Ship the promotion review panel",
+            status=TaskStatus.COMPLETED,
+        )
+        failed_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            title="Historical failed task",
+            objective="Old control-plane implementation path",
+            status=TaskStatus.FAILED,
+            external_ref_metadata={"failed_task_disposition": {"kind": "waive_obsolete"}},
+        )
+        reviewed_run = Run(
+            id=new_id("run"),
+            task_id=reviewed_task.id,
+            status=RunStatus.COMPLETED,
+            attempt=1,
+            summary="Complete",
+        )
+        self.store.create_task(reviewed_task)
+        self.store.create_task(failed_task)
+        self.store.create_run(reviewed_run)
+        self.store.create_promotion(
+            PromotionRecord(
+                id=new_id("promotion"),
+                task_id=reviewed_task.id,
+                run_id=reviewed_run.id,
+                status=PromotionStatus.APPROVED,
+                summary="Promotion approved by the agent review.",
+                details={
+                    "affirmation": {"backend": "codex", "rationale": "The implementation matches intent."},
+                    "validators": [{"validator": "qa", "issues": []}],
+                },
+            )
+        )
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                project_id=self.project.id,
+                objective_id=self.objective.id,
+                task_id=failed_task.id,
+                record_type="failed_task_waived",
+                content="Superseded by manual control-plane implementation.",
+                metadata={"task_id": failed_task.id, "disposition": "waive_obsolete"},
+            )
+        )
+
+        self.service.project_workspace(self.project.id)
+        payload = self.service.project_workspace(self.project.id)
+        objective_payload = next(item for item in payload["objectives"] if item["id"] == self.objective.id)
+        review = objective_payload["promotion_review"]
+
+        self.assertTrue(review["ready"])
+        self.assertEqual(1, review["task_counts"]["completed"])
+        self.assertEqual(1, review["task_counts"]["failed"])
+        self.assertEqual(1, review["waived_failed_count"])
+        self.assertEqual(0, review["unresolved_failed_count"])
+        self.assertEqual(1, review["review_packet_count"])
+        self.assertEqual("Reviewed task", review["review_packets"][0]["task_title"])
+        self.assertEqual("codex", review["review_packets"][0]["latest"]["details"]["affirmation"]["backend"])
+        self.assertEqual("waived", review["failed_tasks"][0]["effective_status"])
+
+    def test_project_workspace_marks_unresolved_failed_tasks_as_blocking_review(self) -> None:
+        failed_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            title="Unresolved failed task",
+            objective="Still blocking promotion readiness",
+            status=TaskStatus.FAILED,
+        )
+        self.store.create_task(failed_task)
+
+        payload = self.service.project_workspace(self.project.id)
+        objective_payload = next(item for item in payload["objectives"] if item["id"] == self.objective.id)
+        review = objective_payload["promotion_review"]
+
+        self.assertFalse(review["ready"])
+        self.assertEqual(1, review["unresolved_failed_count"])
+        self.assertIn("Resolve or disposition", review["next_action"])
+
+    def test_project_workspace_recommends_promotion_review_for_resolved_objective(self) -> None:
+        completed_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            title="Complete promotion-ready task",
+            objective="No blockers remain",
+            status=TaskStatus.COMPLETED,
+        )
+        self.store.create_task(completed_task)
+        self.store.update_objective_status(self.objective.id, ObjectiveStatus.RESOLVED)
+
+        payload = self.service.project_workspace(self.project.id)
+        objective_payload = next(item for item in payload["objectives"] if item["id"] == self.objective.id)
+
+        self.assertEqual("promotion-review", objective_payload["recommended_view"])
+        self.assertEqual("promotion_review_pending", objective_payload["promotion_review"]["phase"])
+
+    def test_project_workspace_recommends_atomic_when_objective_returns_to_execution(self) -> None:
+        active_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            title="Remediation task",
+            objective="Objective moved back into execution",
+            status=TaskStatus.ACTIVE,
+        )
+        self.store.create_task(active_task)
+        self.store.update_objective_status(self.objective.id, ObjectiveStatus.EXECUTING)
+
+        payload = self.service.project_workspace(self.project.id)
+        objective_payload = next(item for item in payload["objectives"] if item["id"] == self.objective.id)
+
+        self.assertEqual("atomic", objective_payload["recommended_view"])
+        self.assertEqual("execution", objective_payload["promotion_review"]["phase"])
+
+    def test_queue_objective_review_generates_objective_level_packets(self) -> None:
+        fake_router = FakeLLMRouter("{}")
+        self.ctx.interrogation_service = SimpleNamespace(llm_router=fake_router)
+        self.service = HarnessUIDataService(self.ctx)
+        completed_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            title="Review-ready task",
+            objective="Execution is complete",
+            status=TaskStatus.COMPLETED,
+        )
+        self.store.create_task(completed_task)
+        self.store.update_objective_status(self.objective.id, ObjectiveStatus.RESOLVED)
+
+        result = self.service.queue_objective_review(self.objective.id, async_mode=False)
+        payload = self.service.project_workspace(self.project.id)
+        objective_payload = next(item for item in payload["objectives"] if item["id"] == self.objective.id)
+        review = objective_payload["promotion_review"]
+
+        self.assertEqual("completed", result["objective_review_state"]["status"])
+        self.assertEqual("execution", review["phase"])
+        self.assertEqual("atomic", objective_payload["recommended_view"])
+        self.assertEqual(2, review["review_packet_count"])
+        self.assertEqual(2, review["objective_review_packet_count"])
+        self.assertEqual("objective_review", review["review_packets"][0]["source"])
+        self.assertIn(review["review_packets"][0]["dimension"], {"unit_test_coverage", "code_structure"})
+        self.assertEqual(1, len(review["review_rounds"]))
+        self.assertEqual(1, review["review_rounds"][0]["round_number"])
+        self.assertEqual("remediating", review["review_rounds"][0]["status"])
+        remediation_tasks = [
+            task for task in payload["tasks"]
+            if task["objective_id"] == self.objective.id and task["strategy"] == "objective_review_remediation"
+        ]
+        self.assertEqual(1, len(remediation_tasks))
+
+    def test_project_workspace_groups_objective_review_packets_by_round(self) -> None:
+        fake_router = FakeLLMRouter("{}")
+        self.ctx.interrogation_service = SimpleNamespace(llm_router=fake_router)
+        self.service = HarnessUIDataService(self.ctx)
+        completed_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            title="Review-ready task",
+            objective="Execution is complete",
+            status=TaskStatus.COMPLETED,
+        )
+        self.store.create_task(completed_task)
+        self.store.update_objective_status(self.objective.id, ObjectiveStatus.RESOLVED)
+
+        self.service.queue_objective_review(self.objective.id, async_mode=False)
+        payload = self.service.project_workspace(self.project.id)
+        objective_payload = next(item for item in payload["objectives"] if item["id"] == self.objective.id)
+        review = objective_payload["promotion_review"]
+
+        self.assertEqual(1, len(review["review_rounds"]))
+        latest_round = review["review_rounds"][0]
+        self.assertEqual(1, latest_round["round_number"])
+        self.assertEqual(2, latest_round["packet_count"])
+        self.assertEqual(1, latest_round["verdict_counts"]["concern"])
+        self.assertEqual(1, latest_round["verdict_counts"]["pass"])
+        self.assertEqual(1, latest_round["remediation_counts"]["total"])
+        self.assertEqual("improving", latest_round["packets"][-1]["progress_status"])
+
+    def test_objective_review_auto_starts_next_round_after_remediation_completes(self) -> None:
+        fake_router = FakeLLMRouter("{}")
+        self.ctx.interrogation_service = SimpleNamespace(llm_router=fake_router)
+        self.service = HarnessUIDataService(self.ctx)
+        completed_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            title="Review-ready task",
+            objective="Execution is complete",
+            status=TaskStatus.COMPLETED,
+        )
+        self.store.create_task(completed_task)
+        self.store.update_objective_status(self.objective.id, ObjectiveStatus.RESOLVED)
+
+        self.service.queue_objective_review(self.objective.id, async_mode=False)
+        remediation_tasks = [
+            task for task in self.store.list_tasks(self.project.id)
+            if task.objective_id == self.objective.id and task.strategy == "objective_review_remediation"
+        ]
+        self.assertEqual(1, len(remediation_tasks))
+        remediation_task = remediation_tasks[0]
+        self.store.update_task_status(remediation_task.id, TaskStatus.COMPLETED)
+        self.store.update_objective_status(self.objective.id, ObjectiveStatus.PLANNING)
+
+        self.service._maybe_resume_objective_review(self.objective.id)
+        payload = self.service.project_workspace(self.project.id)
+        objective_payload = next(item for item in payload["objectives"] if item["id"] == self.objective.id)
+        review = objective_payload["promotion_review"]
+
+        self.assertEqual(2, len(review["review_rounds"]))
+        self.assertEqual(2, review["review_rounds"][0]["round_number"])
+        self.assertEqual("objective_review", review["review_rounds"][0]["packets"][0]["source"])
+        self.assertEqual(4, review["objective_review_packet_count"])
+
+    def test_objective_review_prompt_includes_prior_round_context(self) -> None:
+        fake_router = FakeLLMRouter("{}")
+        self.ctx.interrogation_service = SimpleNamespace(llm_router=fake_router)
+        self.service = HarnessUIDataService(self.ctx)
+        completed_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            title="Review-ready task",
+            objective="Execution is complete",
+            status=TaskStatus.COMPLETED,
+        )
+        self.store.create_task(completed_task)
+        self.store.update_objective_status(self.objective.id, ObjectiveStatus.RESOLVED)
+
+        self.service.queue_objective_review(self.objective.id, async_mode=False)
+        remediation_task = next(
+            task for task in self.store.list_tasks(self.project.id)
+            if task.objective_id == self.objective.id and task.strategy == "objective_review_remediation"
+        )
+        self.store.update_task_status(remediation_task.id, TaskStatus.COMPLETED)
+        self.store.update_objective_status(self.objective.id, ObjectiveStatus.PLANNING)
+
+        self.service._maybe_resume_objective_review(self.objective.id)
+
+        self.assertIn("Previous review rounds:", fake_router.prompts[-1])
+        self.assertIn("\"progress_status\"", fake_router.prompts[-1])
+        self.assertIn("closure_criteria", fake_router.prompts[-1])
+        self.assertIn("evidence_required", fake_router.prompts[-1])
+        self.assertIn("repeat_reason", fake_router.prompts[-1])
+
+    def test_parse_objective_review_response_rejects_vague_non_pass_packet(self) -> None:
+        response = json.dumps(
+            {
+                "summary": "Objective review generated.",
+                "packets": [
+                    {
+                        "reviewer": "QA agent",
+                        "dimension": "unit_test_coverage",
+                        "verdict": "concern",
+                        "progress_status": "improving",
+                        "severity": "medium",
+                        "owner_scope": "tests",
+                        "summary": "Testing should improve before promotion.",
+                        "findings": ["Need more testing."],
+                        "evidence": ["Current tests are not enough."],
+                        "closure_criteria": "Improve testing before promotion.",
+                        "evidence_required": "More evidence.",
+                        "repeat_reason": "This is still improving.",
+                    }
+                ],
+            }
+        )
+
+        parsed = self.service._parse_objective_review_response(response)
+
+        self.assertIsNone(parsed)
+
+    def test_queue_objective_review_falls_back_when_llm_packets_fail_policy_validation(self) -> None:
+        fake_router = InvalidObjectiveReviewRouter(
+            json.dumps(
+                {
+                    "summary": "Objective review generated.",
+                    "packets": [
+                        {
+                            "reviewer": "QA agent",
+                            "dimension": "unit_test_coverage",
+                            "verdict": "concern",
+                            "progress_status": "improving",
+                            "severity": "medium",
+                            "owner_scope": "tests",
+                            "summary": "Testing should improve before promotion.",
+                            "findings": ["Need more testing."],
+                            "evidence": ["Current tests are not enough."],
+                            "closure_criteria": "Improve testing before promotion.",
+                            "evidence_required": "More evidence.",
+                            "repeat_reason": "This is still improving.",
+                        }
+                    ],
+                }
+            )
+        )
+        self.ctx.interrogation_service = SimpleNamespace(llm_router=fake_router)
+        self.service = HarnessUIDataService(self.ctx)
+        completed_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            title="Review-ready task",
+            objective="Execution is complete",
+            status=TaskStatus.COMPLETED,
+        )
+        self.store.create_task(completed_task)
+        self.store.update_objective_status(self.objective.id, ObjectiveStatus.RESOLVED)
+
+        self.service.queue_objective_review(self.objective.id, async_mode=False)
+        payload = self.service.project_workspace(self.project.id)
+        objective_payload = next(item for item in payload["objectives"] if item["id"] == self.objective.id)
+        review = objective_payload["promotion_review"]
+
+        self.assertEqual(3, review["objective_review_packet_count"])
+        self.assertEqual(
+            {"intent_fidelity", "unit_test_coverage", "code_structure"},
+            {packet["dimension"] for packet in review["review_rounds"][0]["packets"]},
+        )
+        qa_packet = next(packet for packet in review["review_rounds"][0]["packets"] if packet["dimension"] == "unit_test_coverage")
+        self.assertEqual("objective review evidence", qa_packet["owner_scope"])
+        self.assertTrue(qa_packet["closure_criteria"])
+        self.assertTrue(qa_packet["evidence_required"])
+
+    def test_stale_objective_review_is_interrupted_and_restarted(self) -> None:
+        fake_router = FakeLLMRouter("{}")
+        self.ctx.interrogation_service = SimpleNamespace(llm_router=fake_router)
+        self.service = HarnessUIDataService(self.ctx)
+        completed_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            title="Review-ready task",
+            objective="Execution is complete",
+            status=TaskStatus.COMPLETED,
+        )
+        self.store.create_task(completed_task)
+        self.store.update_objective_status(self.objective.id, ObjectiveStatus.RESOLVED)
+        stale_review_id = new_id("objective_review")
+        started = ContextRecord(
+            id=new_id("context"),
+            record_type="objective_review_started",
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            visibility="operator_visible",
+            author_type="system",
+            content="Started automatic objective promotion review.",
+            metadata={"review_id": stale_review_id},
+            created_at=dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=10),
+        )
+        self.store.create_context_record(started)
+
+        self.service._maybe_resume_objective_review(self.objective.id)
+
+        review = self.service._objective_review_state(self.objective.id)
+        self.assertIn(review["status"], {"running", "completed"})
+        self.assertNotEqual(stale_review_id, review["review_id"])
+        failed_records = [
+            record for record in self.store.list_context_records(objective_id=self.objective.id, record_type="objective_review_failed")
+        ]
+        self.assertTrue(any(str(record.metadata.get("review_id") or "") == stale_review_id for record in failed_records))
 
     def test_stale_atomic_generation_is_recovered_for_finished_mermaid(self) -> None:
         recovering_objective = Objective(

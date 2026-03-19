@@ -90,6 +90,59 @@ class AtomicGenerationCoordinator:
 _ATOMIC_GENERATION = AtomicGenerationCoordinator()
 
 
+class ObjectiveReviewCoordinator:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._running: set[str] = set()
+
+    def start(self, objective_id: str, worker) -> bool:
+        with self._lock:
+            if objective_id in self._running:
+                return False
+            self._running.add(objective_id)
+        thread = threading.Thread(target=self._run, args=(objective_id, worker), daemon=True)
+        thread.start()
+        return True
+
+    def _run(self, objective_id: str, worker) -> None:
+        try:
+            worker()
+        finally:
+            with self._lock:
+                self._running.discard(objective_id)
+
+
+_OBJECTIVE_REVIEW = ObjectiveReviewCoordinator()
+
+_OBJECTIVE_REVIEW_DIMENSIONS = frozenset(
+    {
+        "intent_fidelity",
+        "unit_test_coverage",
+        "integration_e2e_coverage",
+        "security",
+        "devops",
+        "atomic_fidelity",
+        "code_structure",
+    }
+)
+_OBJECTIVE_REVIEW_VERDICTS = frozenset({"pass", "concern", "remediation_required"})
+_OBJECTIVE_REVIEW_PROGRESS = frozenset(
+    {"new_concern", "still_blocking", "improving", "resolved", "not_applicable"}
+)
+_OBJECTIVE_REVIEW_SEVERITIES = frozenset({"low", "medium", "high"})
+_OBJECTIVE_REVIEW_VAGUE_PHRASES = (
+    "improve",
+    "better",
+    "more coverage",
+    "additional tests",
+    "stronger evidence",
+    "more evidence",
+    "further validation",
+    "review further",
+    "be reviewed",
+)
+
+
 class BackgroundSupervisorCoordinator:
     """Manages background supervisor threads, one per project."""
 
@@ -213,8 +266,37 @@ body {
   transition: grid-template-columns 180ms ease;
 }
 
-body[data-view="control-flow"] .app-shell {
+body[data-layout="split-workspace"] .app-shell,
+body[data-layout="full-review"] .app-shell {
   grid-template-columns: 1fr;
+}
+
+body[data-layout="dashboard"] .app-shell {
+  display: block;
+}
+
+body[data-layout="split-workspace"] .content {
+  display: grid;
+  grid-template-columns: minmax(420px, 0.95fr) minmax(520px, 1.05fr);
+  align-items: start;
+  gap: 0;
+  min-height: 100vh;
+  padding: 0;
+  background: #ffffff;
+}
+
+body[data-layout="full-review"] .content {
+  width: 100%;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 1rem;
+}
+
+body[data-layout="dashboard"] .content {
+  max-width: 100%;
+  width: 100%;
+  margin: 0;
+  padding: 0;
 }
 
 body[data-view="control-flow"] .sidebar,
@@ -229,16 +311,6 @@ body[data-view="control-flow"] #next-action-saved,
 body[data-view="control-flow"] #workspace-title,
 body[data-view="control-flow"] #workspace-summary {
   display: none !important;
-}
-
-body[data-view="control-flow"] .content {
-  display: grid;
-  grid-template-columns: minmax(420px, 0.95fr) minmax(520px, 1.05fr);
-  align-items: start;
-  gap: 0;
-  min-height: 100vh;
-  padding: 0;
-  background: #ffffff;
 }
 
 body[data-view="control-flow"] #next-action-panel {
@@ -326,12 +398,7 @@ body[data-view="control-flow"] #mermaid-controls {
   display: none !important;
 }
 
-body[data-view="atomic"] .app-shell {
-  grid-template-columns: 1fr;
-}
-
 body[data-view="atomic"] .sidebar,
-body[data-view="atomic"] .header,
 body[data-view="atomic"] #objective-panel,
 body[data-view="atomic"] #interrogation-panel,
 body[data-view="atomic"] #execution-panel,
@@ -345,18 +412,21 @@ body[data-view="atomic"] #mermaid-panel {
   display: none !important;
 }
 
-body[data-view="atomic"] .content {
-  display: grid;
-  grid-template-columns: minmax(420px, 0.95fr) minmax(520px, 1.05fr);
-  align-items: start;
-  gap: 0;
-  min-height: 100vh;
-  padding: 0;
+body[data-view="atomic"] .header {
+  display: flex !important;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  grid-column: 1 / -1;
+  padding: 0.9rem 1.25rem 0.25rem;
+  border: none;
   background: #ffffff;
 }
 
 body[data-view="atomic"] #next-action-panel {
   display: block !important;
+  grid-column: 1;
+  grid-row: 2;
   min-height: 100vh;
   border-radius: 0;
   border: none;
@@ -368,6 +438,8 @@ body[data-view="atomic"] #next-action-panel {
 
 body[data-view="atomic"] #content-grid {
   display: block;
+  grid-column: 2;
+  grid-row: 2;
   width: 100%;
   margin: 0;
 }
@@ -400,9 +472,7 @@ body[data-view="harness"] #execution-panel { display: none !important; }
 body[data-view="harness"] #supervisor-panel { display: none !important; }
 body[data-view="harness"] #atomic-panel { display: none !important; }
 body[data-view="harness"] #cli-panel { display: none !important; }
-body[data-view="harness"] .content { max-width: 100%; width: 100%; margin: 0; padding: 0; }
 body[data-view="harness"] .grid { display: block; padding: 0; gap: 0; max-width: 100%; width: 100%; }
-body[data-view="harness"] .app-shell { display: block; }
 
 body[data-view="harness"] #harness-dashboard {
   display: grid !important;
@@ -634,6 +704,103 @@ body[data-view="atomic"] #objective-banner {
   background: #ffffff;
 }
 
+body[data-view="promotion-review"] .sidebar,
+body[data-view="promotion-review"] #objective-panel,
+body[data-view="promotion-review"] #interrogation-panel,
+body[data-view="promotion-review"] #execution-panel,
+body[data-view="promotion-review"] #mermaid-panel,
+body[data-view="promotion-review"] #supervisor-panel,
+body[data-view="promotion-review"] #atomic-panel,
+body[data-view="promotion-review"] #cli-panel,
+body[data-view="promotion-review"] #step-back,
+body[data-view="promotion-review"] #step-expand,
+body[data-view="promotion-review"] #next-action-saved {
+  display: none !important;
+}
+
+body[data-view="promotion-review"] #next-action-panel,
+body[data-view="promotion-review"] #promotion-review-panel {
+  display: block;
+}
+
+body[data-view="promotion-review"] .header {
+  display: flex !important;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  grid-column: 1 / -1;
+  padding: 0.9rem 1.25rem 0.25rem;
+  border: none;
+  background: #ffffff;
+}
+
+body[data-view="promotion-review"] #next-action-panel {
+  grid-column: 1;
+  grid-row: 2;
+  border-radius: 0;
+  border: none;
+  box-shadow: none;
+  margin: 0;
+  padding: 1.25rem;
+  background: #ffffff;
+}
+
+body[data-view="promotion-review"] #content-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1rem;
+  grid-column: 2;
+  grid-row: 2;
+  width: 100%;
+  margin: 0;
+  align-items: start;
+}
+
+body[data-view="promotion-review"] #promotion-review-panel {
+  grid-column: 2;
+  grid-row: 1;
+  width: 100%;
+  max-width: none;
+  border-radius: 0;
+  border: none;
+  box-shadow: none;
+  margin: 0;
+  padding: 1.25rem;
+  background: #fffdf8;
+}
+
+body[data-view="promotion-review"] #promotion-review-rounds-panel {
+  display: block !important;
+  grid-column: 1 / -1;
+  grid-row: 3;
+  width: 100%;
+  max-width: none;
+  border-radius: 0;
+  border: none;
+  box-shadow: none;
+  margin: 0;
+  padding: 1.25rem;
+  background: #fffdf8;
+}
+
+body[data-view="promotion-review"] .expectation-grid,
+body[data-view="promotion-review"] #proposal-actions,
+body[data-view="promotion-review"] #conversation-primary-actions,
+body[data-view="promotion-review"] #inline-output-panel {
+  display: none !important;
+}
+
+body[data-view="promotion-review"] #next-action-title,
+body[data-view="promotion-review"] #next-action-body {
+  display: none !important;
+}
+
+body[data-view="promotion-review"] .conversation-transcript,
+body[data-view="promotion-review"] .conversation-form {
+  background: #ffffff;
+  color: var(--ink);
+}
+
 body[data-view="atomic"] .atomic-objective-picker,
 body[data-view="control-flow"] .atomic-objective-picker {
   display: block;
@@ -779,6 +946,341 @@ body[data-view="atomic"] .conversation-form {
   font-size: 0.82rem;
   color: var(--muted);
   margin-bottom: 0.75rem;
+}
+
+.view-nav {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin: 0.75rem 0 0;
+}
+
+.view-nav-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.45rem 0.75rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.7);
+  color: var(--ink);
+  text-decoration: none;
+  font-size: 0.85rem;
+}
+
+.view-nav-link.active {
+  background: #fff1e5;
+  border-color: #d8b08e;
+  color: #8a461e;
+}
+
+.promotion-grid {
+  display: grid;
+  gap: 1rem;
+}
+
+.promotion-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.8rem;
+}
+
+.promotion-summary-card,
+.promotion-packet,
+.promotion-failed-task {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.84);
+  padding: 0.85rem 1rem;
+}
+
+.promotion-summary-card .label,
+.promotion-packet .label,
+.promotion-failed-task .label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.promotion-summary-card .value {
+  margin-top: 0.35rem;
+  font-size: 1.2rem;
+  font-weight: 700;
+}
+
+.promotion-section-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.75rem;
+  margin: 0.2rem 0 0.75rem;
+}
+
+.promotion-section-title h4 {
+  margin: 0;
+}
+
+.promotion-packet-list,
+.promotion-failed-list {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.promotion-round-list {
+  display: grid;
+  gap: 1rem;
+}
+
+.promotion-round {
+  display: grid;
+  gap: 0.85rem;
+  padding: 0.9rem 1rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.74);
+}
+
+.promotion-round-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.65rem;
+}
+
+.promotion-latest-round {
+  display: grid;
+  gap: 0.8rem;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.92), rgba(251,246,238,0.92));
+  margin-bottom: 0.95rem;
+}
+
+.promotion-latest-round h4 {
+  margin: 0;
+}
+
+.promotion-state-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.95rem 1rem;
+  border-radius: 16px;
+  border: 2px solid var(--accent);
+  background: linear-gradient(135deg, rgba(201, 117, 53, 0.14), rgba(255, 246, 234, 0.92));
+}
+
+.promotion-state-banner.status-complete {
+  border-color: var(--ok);
+  background: linear-gradient(135deg, rgba(46, 127, 84, 0.14), rgba(245, 253, 248, 0.94));
+}
+
+.promotion-state-banner.status-failed {
+  border-color: var(--danger);
+  background: linear-gradient(135deg, rgba(184, 84, 80, 0.14), rgba(255, 245, 244, 0.94));
+}
+
+.promotion-state-banner-icon {
+  width: 2.4rem;
+  height: 2.4rem;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+  color: white;
+  background: var(--accent);
+  flex: 0 0 auto;
+}
+
+.promotion-state-banner.status-complete .promotion-state-banner-icon {
+  background: var(--ok);
+}
+
+.promotion-state-banner.status-failed .promotion-state-banner-icon {
+  background: var(--danger);
+}
+
+.promotion-state-banner-copy {
+  display: grid;
+  gap: 0.18rem;
+}
+
+.promotion-state-banner-copy strong {
+  font-size: 1rem;
+}
+
+.promotion-reviewer-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.promotion-report-card {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0.95rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.88);
+  margin-bottom: 0.95rem;
+}
+
+.promotion-report-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 0.75rem;
+}
+
+.promotion-report-card-cell {
+  display: grid;
+  gap: 0.35rem;
+  justify-items: center;
+  align-content: start;
+  min-height: 118px;
+  padding: 0.8rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: #fbf6ee;
+  text-align: center;
+  cursor: pointer;
+}
+
+.promotion-report-card-cell .emoji {
+  font-size: 2rem;
+  line-height: 1;
+}
+
+.promotion-report-card-cell .name {
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.promotion-report-card-cell .sub {
+  font-size: 0.76rem;
+  color: var(--muted);
+}
+
+.promotion-report-card-cell.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(201, 117, 53, 0.12);
+}
+
+.promotion-report-card-detail {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(255,255,255,0.94);
+  padding: 0.9rem 1rem;
+}
+
+.promotion-round-stat {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(251, 246, 238, 0.92);
+  padding: 0.65rem 0.75rem;
+}
+
+.promotion-round-stat .label {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.promotion-round-stat .value {
+  margin-top: 0.22rem;
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.promotion-round-stat .value.status-complete {
+  color: var(--ok);
+}
+
+.promotion-round-stat .value.status-running {
+  color: var(--accent);
+}
+
+.promotion-round-stat .value.status-failed {
+  color: var(--danger);
+}
+
+.promotion-packet-meta,
+.promotion-failed-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin: 0.45rem 0 0.6rem;
+}
+
+.promotion-packet-summary,
+.promotion-failed-body {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.92rem;
+  line-height: 1.45;
+  background: #fbf6ee;
+  border-radius: 12px;
+  padding: 0.75rem;
+}
+
+.promotion-json-block {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.82rem;
+  background: #fbf6ee;
+  border-radius: 12px;
+  padding: 0.75rem;
+}
+
+.promotion-packet-summary {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+.promotion-packet-title {
+  margin-top: 0.2rem;
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+.promotion-verdict-pill {
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-width: 2px;
+  font-size: 0.84rem;
+  padding: 0.32rem 0.62rem;
+}
+
+.promotion-opinion-pill {
+  font-weight: 700;
+}
+
+.promotion-packet-evidence {
+  margin: 0.55rem 0 0;
+  padding-left: 1rem;
+  color: var(--muted);
+}
+
+.promotion-packet-evidence li {
+  margin: 0.15rem 0;
+  font-size: 0.86rem;
+}
+
+.promotion-packet-issues {
+  margin: 0.6rem 0 0;
+  padding-left: 1rem;
+}
+
+.promotion-packet-issues li {
+  margin: 0.2rem 0;
 }
 
 .atomic-list {
@@ -1640,6 +2142,7 @@ const state = {
   localNotices: [],
   view: document.body.dataset.view || 'default',
   atomicTab: 'all',
+  manualViewOverride: sessionStorage.getItem('accruvia.ui.manualViewOverride') || '',
 };
 
 function preferredProjectFromList(projects) {
@@ -1739,10 +2242,18 @@ const runList = document.getElementById('run-list');
 const workspaceTitle = document.getElementById('workspace-title');
 const workspaceSummary = document.getElementById('workspace-summary');
 const workspaceStatus = document.getElementById('workspace-status');
+const viewNav = document.getElementById('view-nav');
 const diagramShell = document.getElementById('diagram-shell');
 const outputTabs = document.getElementById('output-tabs');
 const outputBody = document.getElementById('output-body');
 const pageError = document.getElementById('page-error');
+const promotionReviewPanel = document.getElementById('promotion-review-panel');
+const promotionReviewTitle = document.getElementById('promotion-review-title');
+const promotionReviewSummary = document.getElementById('promotion-review-summary');
+const promotionReviewMeta = document.getElementById('promotion-review-meta');
+const promotionReviewContent = document.getElementById('promotion-review-content');
+const promotionReviewRoundsPanel = document.getElementById('promotion-review-rounds-panel');
+const promotionReviewRoundsContent = document.getElementById('promotion-review-rounds-content');
 let activeConversationController = null;
 let selectedDiagramElement = null;
 
@@ -1900,12 +2411,44 @@ function setProjectId(value) {
 }
 
 function setObjectiveId(value) {
+  if (state.objectiveId && value && state.objectiveId !== value) {
+    state.manualViewOverride = '';
+    sessionStorage.removeItem('accruvia.ui.manualViewOverride');
+  }
   state.objectiveId = value;
   if (value) {
     localStorage.setItem('accruvia.ui.objectiveId', value);
   } else {
     localStorage.removeItem('accruvia.ui.objectiveId');
   }
+}
+
+function currentRecommendedView() {
+  const objective = currentObjective();
+  if (!objective) return '';
+  return objective.recommended_view || '';
+}
+
+function shouldAutoFollowRecommendedView() {
+  const recommended = currentRecommendedView();
+  if (!recommended || !['atomic', 'promotion-review'].includes(recommended)) return false;
+  if (!['atomic', 'promotion-review'].includes(state.view)) return false;
+  if (!state.manualViewOverride) return true;
+  return state.manualViewOverride === recommended;
+}
+
+function maybeFollowRecommendedView() {
+  const recommended = currentRecommendedView();
+  if (!recommended || recommended === state.view) return;
+  if (!shouldAutoFollowRecommendedView()) return;
+  const params = new URLSearchParams();
+  if (state.projectId) params.set('project_id', state.projectId);
+  if (state.objectiveId) params.set('objective_id', state.objectiveId);
+  const suffix = params.toString() ? `?${params.toString()}` : '';
+  const target = recommended === 'promotion-review'
+    ? `/promotion-review${suffix}`
+    : `/atomic${suffix}`;
+  window.location.assign(target);
 }
 
 function setExpandAll(value) {
@@ -2457,6 +3000,7 @@ function renderObjectives() {
   renderExecutionPanel();
   renderAtomicUnits();
   renderSupervisorStatus();
+  renderPromotionReview();
   applyFocusMode(selected);
 }
 
@@ -2665,6 +3209,7 @@ function renderAtomicUnits() {
     return;
   }
   const generation = objective.atomic_generation || { status: 'idle', unit_count: 0 };
+  const review = objective.promotion_review || { waived_failed_count: 0, unresolved_failed_count: 0 };
   const linkedTasks = Array.isArray(objective.atomic_units) ? objective.atomic_units : [];
   const publishedCount = linkedTasks.filter((task) => task.published_unit !== false).length;
   const extraTaskCount = Math.max(0, linkedTasks.length - publishedCount);
@@ -2690,7 +3235,11 @@ function renderAtomicUnits() {
     const tasksPending = linkedTasks.filter((t) => t.status === 'pending').length;
     const allDone = tasksPending === 0 && tasksActive === 0;
     if (allDone && linkedTasks.length > 0) {
-      atomicGenerationStatus.textContent = `All ${linkedTasks.length} task(s) finished. ${tasksDone} completed, ${tasksFailed} failed.`;
+      if (review.unresolved_failed_count === 0 && review.waived_failed_count > 0) {
+        atomicGenerationStatus.textContent = `Execution finished. ${tasksDone} completed, ${review.waived_failed_count} historical failure(s) waived during review.`;
+      } else {
+        atomicGenerationStatus.textContent = `All ${linkedTasks.length} task(s) finished. ${tasksDone} completed, ${tasksFailed} failed.`;
+      }
     } else if (linkedTasks.length > 0) {
       const decompositionSummary = extraTaskCount > 0
         ? `${publishedCount} tasks split from Mermaid v${generation.diagram_version}, plus ${extraTaskCount} follow-on task(s).`
@@ -2715,9 +3264,14 @@ function renderAtomicUnits() {
     effectiveStatus = 'status-running';
     effectiveLabel = 'Executing';
   } else if (generation.status === 'completed' && linkedTasks.length > 0) {
-    const allPassed = linkedTasks.every((t) => t.status === 'completed');
-    effectiveStatus = allPassed ? 'status-complete' : 'status-failed';
-    effectiveLabel = allPassed ? 'All tasks done' : 'Tasks finished with failures';
+    if (review.unresolved_failed_count === 0 && review.waived_failed_count > 0) {
+      effectiveStatus = 'status-complete';
+      effectiveLabel = 'Resolved after review';
+    } else {
+      const allPassed = linkedTasks.every((t) => t.status === 'completed');
+      effectiveStatus = allPassed ? 'status-complete' : 'status-failed';
+      effectiveLabel = allPassed ? 'All tasks done' : 'Tasks finished with failures';
+    }
   } else if (generation.status === 'running') {
     effectiveStatus = 'status-running';
     effectiveLabel = phase ? `Splitting: ${phase}` : 'Splitting into tasks';
@@ -2730,22 +3284,28 @@ function renderAtomicUnits() {
   }
   const liveClass = effectiveStatus === 'status-running' ? ' live' : '';
   pills.push(`<span class="pill ${effectiveStatus}${liveClass}">${escapeHtml(effectiveLabel)}</span>`);
-  if (generation.refinement_round) {
+  if (generation.status === 'running' && generation.refinement_round) {
     pills.push(`<span class="pill">Round ${generation.refinement_round}</span>`);
   }
   if (linkedTasks.length) {
     const taskLabel = extraTaskCount > 0 ? 'live task(s)' : 'task(s)';
     pills.push(`<span class="pill">${linkedTasks.length} ${taskLabel}</span>`);
   }
-  if (generation.critique_accepted === true) {
+  if (generation.status === 'running' && generation.critique_accepted === true) {
     pills.push(`<span class="pill status-complete">Critique: passed</span>`);
-  } else if (generation.critique_accepted === false) {
+  } else if (generation.status === 'running' && generation.critique_accepted === false) {
     pills.push(`<span class="pill status-running">Critique: needs work</span>`);
   }
-  if (generation.coverage_complete === true) {
+  if (generation.status === 'running' && generation.coverage_complete === true) {
     pills.push(`<span class="pill status-complete">Coverage: complete</span>`);
-  } else if (generation.coverage_complete === false) {
+  } else if (generation.status === 'running' && generation.coverage_complete === false) {
     pills.push(`<span class="pill status-running">Coverage: gaps found</span>`);
+  }
+  if (review.waived_failed_count > 0) {
+    pills.push(`<span class="pill status-complete">${review.waived_failed_count} waived failure(s)</span>`);
+  }
+  if (review.unresolved_failed_count > 0) {
+    pills.push(`<span class="pill status-failed">${review.unresolved_failed_count} blocking failure(s)</span>`);
   }
   if (generation.last_activity_at) {
     const roundTag = generation.refinement_round ? ` (round ${generation.refinement_round})` : '';
@@ -2881,6 +3441,7 @@ function renderSupervisorStatus() {
   // Scope counts to current objective
   const objective = currentObjective();
   const objTasks = Array.isArray(objective?.atomic_units) ? objective.atomic_units : [];
+  const review = objective?.promotion_review || {};
   const objCounts = { completed: 0, active: 0, failed: 0, pending: 0 };
   for (const t of objTasks) {
     const s = t.status || 'pending';
@@ -2902,7 +3463,9 @@ function renderSupervisorStatus() {
     }
   }
   if (statusEl) {
-    if (supervisor.state === 'stopping') {
+    if (objective?.status === 'resolved' && objCounts.active === 0 && objCounts.pending === 0) {
+      statusEl.textContent = 'Execution is finished for this objective. Promotion review is the next step.';
+    } else if (supervisor.state === 'stopping') {
       statusEl.textContent = 'Stopping harness... waiting for current worker to finish.';
     } else if (supervisor.state === 'running' || supervisor.state === 'starting') {
       const dots = '.'.repeat((Math.floor(Date.now() / 500) % 3) + 1);
@@ -2925,9 +3488,21 @@ function renderSupervisorStatus() {
   }
   if (metaEl) {
     const pills = [];
-    const stateClass = isRunning ? 'status-running' : supervisor.state === 'finished' ? 'status-complete' : supervisor.state === 'error' ? 'status-failed' : 'status-idle';
-    const liveClass = isRunning ? ' live' : '';
-    pills.push(`<span class="pill ${stateClass}${liveClass}">${escapeHtml(supervisor.state || 'idle')}</span>`);
+    if (objective?.status === 'resolved' && objCounts.active === 0 && objCounts.pending === 0) {
+      pills.push('<span class="pill status-complete">Objective resolved</span>');
+      if ((review.unresolved_failed_count || 0) > 0) {
+        pills.push(`<span class="pill status-failed">${review.unresolved_failed_count} blocker(s)</span>`);
+      } else if ((review.waived_failed_count || 0) > 0) {
+        pills.push(`<span class="pill status-complete">${review.waived_failed_count} waived failure(s)</span>`);
+      }
+      if (review.ready) {
+        pills.push('<span class="pill status-complete">Promotion review ready</span>');
+      }
+    } else {
+      const stateClass = isRunning ? 'status-running' : supervisor.state === 'finished' ? 'status-complete' : supervisor.state === 'error' ? 'status-failed' : 'status-idle';
+      const liveClass = isRunning ? ' live' : '';
+      pills.push(`<span class="pill ${stateClass}${liveClass}">${escapeHtml(supervisor.state || 'idle')}</span>`);
+    }
     if (objTotal) {
       pills.push(`<span class="pill">${objCounts.completed}/${objTotal} done</span>`);
     }
@@ -2940,6 +3515,386 @@ function renderSupervisorStatus() {
     }
     metaEl.innerHTML = pills.join('');
   }
+}
+
+function renderPromotionReview() {
+  if (!promotionReviewPanel || !promotionReviewTitle || !promotionReviewSummary || !promotionReviewMeta || !promotionReviewContent || !promotionReviewRoundsPanel || !promotionReviewRoundsContent) return;
+  const objective = currentObjective();
+  if (!objective) {
+    promotionReviewPanel.hidden = state.view !== 'promotion-review';
+    promotionReviewRoundsPanel.hidden = state.view !== 'promotion-review';
+    promotionReviewTitle.textContent = 'Promotion review';
+    promotionReviewSummary.textContent = 'Select an objective to inspect promotion readiness and recorded reviews.';
+    promotionReviewMeta.innerHTML = '';
+    promotionReviewContent.innerHTML = '<div class="empty">No objective selected.</div>';
+    promotionReviewRoundsContent.innerHTML = '';
+    return;
+  }
+  const review = objective.promotion_review || {};
+  const counts = review.task_counts || {};
+  const rounds = Array.isArray(review.review_rounds) ? review.review_rounds : [];
+  const latestRound = rounds[0] || null;
+  const latestGradedRound = rounds.find((round) => (round.packet_count || 0) > 0) || null;
+  const packets = Array.isArray(review.review_packets) ? review.review_packets : [];
+  const failedTasks = Array.isArray(review.failed_tasks) ? review.failed_tasks : [];
+  const reviewState = review.objective_review_state || {};
+  const verdictCounts = (latestRound && latestRound.verdict_counts) || review.verdict_counts || {};
+  function humanizeDimension(value) {
+    const raw = String(value || '').trim();
+    return raw ? raw.replaceAll('_', ' ') : 'dimension review';
+  }
+  function humanizeReviewer(value, dimension) {
+    const raw = String(value || '').trim().toLowerCase();
+    const aliases = {
+      arch: 'Architecture reviewer',
+      ops: 'DevOps reviewer',
+      arbiter: 'Atomicity reviewer',
+      qa: 'QA reviewer',
+      security: 'Security reviewer',
+    };
+    if (aliases[raw]) return aliases[raw];
+    if (raw.endsWith(' agent')) return raw[0].toUpperCase() + raw.slice(1);
+    if (raw) return raw.split(/\s+/).map((part) => part ? part[0].toUpperCase() + part.slice(1) : '').join(' ');
+    return `${humanizeDimension(dimension)} reviewer`;
+  }
+  function verdictLabel(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return 'Unknown';
+    if (raw === 'remediation_required') return 'Remediation';
+    return raw.replaceAll('_', ' ');
+  }
+  function progressLabel(value) {
+    const raw = String(value || '').trim();
+    if (!raw || raw === 'not_applicable') return '';
+    if (raw === 'still_blocking') return 'Still blocking';
+    if (raw === 'new_concern') return 'New concern';
+    return raw.replaceAll('_', ' ');
+  }
+  promotionReviewPanel.hidden = state.view !== 'promotion-review';
+  promotionReviewRoundsPanel.hidden = state.view !== 'promotion-review';
+  promotionReviewTitle.textContent = `Promotion review for ${objective.title}`;
+  const reviewHasStarted = rounds.length > 0;
+  if (reviewState.status === 'running') {
+    promotionReviewSummary.textContent = `Automatic objective promotion review round ${latestRound?.round_number || ''} is running. Reviewer packets will appear here as each agent finishes.`;
+  } else if (!reviewHasStarted) {
+    promotionReviewSummary.textContent = 'Promotion review has not started yet. No agent review packets are recorded yet. Use the harness output panel on the left to ask questions while the harness prepares review work.';
+  } else {
+    promotionReviewSummary.textContent = review.next_action || 'Review promotion packets, blockers, and waivers before promoting this objective.';
+  }
+  const pills = [];
+  if (latestRound) {
+    const roundStateLabel =
+      latestRound.status === 'remediating' ? 'Back in Atomic' :
+      latestRound.status === 'ready_for_rerun' ? 'Ready for re-review' :
+      latestRound.status === 'running' ? 'Review running' :
+      latestRound.status === 'passed' ? 'Round passed' :
+      latestRound.status === 'failed' ? 'Review failed' :
+      latestRound.status === 'needs_remediation' ? 'Remediation needed' :
+      'Review active';
+    pills.push(`<span class="pill ${latestRound.status === 'passed' ? 'status-complete' : latestRound.status === 'failed' || latestRound.status === 'needs_remediation' ? 'status-failed' : 'status-running'}">${escapeHtml(roundStateLabel)}</span>`);
+    const reviewerPills = (Array.isArray(latestRound.packets) ? latestRound.packets : []).map((packet) => {
+      const verdict = String(packet.verdict || '').trim();
+      const reviewer = humanizeReviewer(packet.reviewer, packet.dimension);
+      const klass = verdict === 'pass' ? 'status-complete' : verdict === 'remediation_required' ? 'status-failed' : 'status-running';
+      return `<span class="pill promotion-verdict-pill ${klass}">${escapeHtml(`${reviewer}: ${verdictLabel(verdict)}`)}</span>`;
+    });
+    promotionReviewMeta.innerHTML = `
+      <div class="promotion-reviewer-strip">
+        ${pills.join('')}
+        ${reviewerPills.join('')}
+      </div>
+    `;
+  } else {
+    if (reviewState.status === 'running') {
+      pills.push('<span class="pill status-running live">Automatic review running</span>');
+    } else if (review.phase === 'promotion_review_pending' && review.ready) {
+      pills.push('<span class="pill status-running">Ready for next review round</span>');
+    } else if (review.review_clear) {
+      pills.push('<span class="pill status-complete">Promotion review passed</span>');
+    } else {
+      pills.push(`<span class="pill ${review.ready ? 'status-complete' : 'status-running'}">${review.ready ? 'Packets generated' : 'Needs review'}</span>`);
+    }
+    promotionReviewMeta.innerHTML = pills.join('');
+  }
+  if (latestGradedRound && !state.selectedPromotionReportKey) {
+    const firstPacket = Array.isArray(latestGradedRound.packets) ? latestGradedRound.packets[0] : null;
+    if (firstPacket) {
+      state.selectedPromotionReportKey = `${latestGradedRound.review_id || latestGradedRound.round_number}:${firstPacket.dimension || humanizeReviewer(firstPacket.reviewer, firstPacket.dimension)}`;
+    }
+  }
+  const summaryCards = `
+    <div class="promotion-summary-grid">
+      <div class="promotion-summary-card"><div class="label">Review rounds</div><div class="value">${rounds.length || 0}</div></div>
+      <div class="promotion-summary-card"><div class="label">Review packets</div><div class="value">${review.objective_review_packet_count || 0}</div></div>
+      <div class="promotion-summary-card"><div class="label">Concerns</div><div class="value">${verdictCounts.concern || 0}</div></div>
+      <div class="promotion-summary-card"><div class="label">Waived failures</div><div class="value">${review.waived_failed_count || 0}</div></div>
+    </div>
+  `;
+  const renderPacket = (packet) => {
+    const latest = packet.latest || {};
+    const isObjectivePacket = packet.source === 'objective_review';
+    const details = latest.details || {};
+    const validators = Array.isArray(details.validators) ? details.validators : [];
+    const affirmation = details.affirmation || {};
+    const issues = isObjectivePacket
+      ? (Array.isArray(packet.findings) ? packet.findings.map((finding) => ({ summary: finding })) : [])
+      : validators.flatMap((validator) => Array.isArray(validator.issues) ? validator.issues : []);
+    const status = isObjectivePacket ? (packet.verdict || 'unknown') : (latest.status || 'unknown');
+    const rationale = isObjectivePacket ? (packet.summary || 'No review rationale recorded.') : (affirmation.rationale || latest.summary || 'No review rationale recorded.');
+    const title = isObjectivePacket
+      ? humanizeDimension(packet.dimension || 'dimension review')
+      : (packet.task_title || packet.task_id || 'Promotion review');
+    const reviewerLabel = isObjectivePacket ? humanizeReviewer(packet.reviewer, packet.dimension) : '';
+    const subStatus = isObjectivePacket ? '' : `Task status: ${packet.task_status || 'unknown'}`;
+    const recordedAt = isObjectivePacket ? packet.created_at : latest.created_at;
+    const evidence = Array.isArray(packet.evidence) ? packet.evidence : [];
+    const backend = packet.backend || affirmation.backend || '';
+    const progressStatus = String(packet.progress_status || '').trim();
+    return `
+      <article class="promotion-packet">
+        <div class="promotion-packet-title">${escapeHtml(title)}</div>
+        <div class="promotion-packet-meta">
+          <span class="pill promotion-verdict-pill ${status === 'approved' || status === 'pass' ? 'status-complete' : status === 'rejected' || status === 'remediation_required' ? 'status-failed' : 'status-running'}">${escapeHtml(verdictLabel(status))}</span>
+          ${reviewerLabel ? `<span class="pill promotion-opinion-pill">${escapeHtml(reviewerLabel)}</span>` : ''}
+          ${progressLabel(progressStatus) ? `<span class="pill promotion-opinion-pill ${progressStatus === 'resolved' ? 'status-complete' : progressStatus === 'improving' ? 'status-running' : progressStatus === 'still_blocking' || progressStatus === 'new_concern' ? 'status-failed' : ''}">${escapeHtml(progressLabel(progressStatus))}</span>` : ''}
+          ${subStatus ? `<span class="pill">${escapeHtml(subStatus)}</span>` : ''}
+          ${recordedAt ? `<span class="pill">Recorded ${escapeHtml(formatRelativeTime(recordedAt))}</span>` : ''}
+        </div>
+        <div class="promotion-packet-summary">${escapeHtml(rationale)}</div>
+        ${backend ? `<div class="hint">Model: ${escapeHtml(backend)}</div>` : ''}
+        ${issues.length ? `<ul class="promotion-packet-issues">${issues.map((issue) => `<li>${escapeHtml(issue.summary || issue.code || 'Review issue')}</li>`).join('')}</ul>` : '<div class="hint">No validator issues recorded on the latest packet.</div>'}
+        ${evidence.length ? `<ul class="promotion-packet-evidence">${evidence.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>` : ''}
+      </article>
+    `;
+  };
+  const roundHtml = rounds.length ? rounds.map((round) => {
+    const roundVerdicts = round.verdict_counts || {};
+    const remediationCounts = round.remediation_counts || {};
+    const roundPills = [];
+    if (round.status === 'passed') {
+      roundPills.push('<span class="pill status-complete">Passed</span>');
+    } else if (round.status === 'running') {
+      roundPills.push('<span class="pill status-running live">Running</span>');
+    } else if (round.status === 'remediating') {
+      roundPills.push('<span class="pill status-running">Back in Atomic</span>');
+    } else if (round.status === 'ready_for_rerun') {
+      roundPills.push('<span class="pill status-running">Ready for re-review</span>');
+    } else if (round.status === 'needs_remediation') {
+      roundPills.push('<span class="pill status-failed">Remediation needed</span>');
+    } else if (round.status === 'failed') {
+      roundPills.push('<span class="pill status-failed">Review failed</span>');
+    }
+    if ((roundVerdicts.pass || 0) > 0) roundPills.push(`<span class="pill status-complete">${roundVerdicts.pass} pass</span>`);
+    if ((roundVerdicts.concern || 0) > 0) roundPills.push(`<span class="pill status-running">${roundVerdicts.concern} concern</span>`);
+    if ((roundVerdicts.remediation_required || 0) > 0) roundPills.push(`<span class="pill status-failed">${roundVerdicts.remediation_required} remediation</span>`);
+    if ((remediationCounts.total || 0) > 0) {
+      roundPills.push(`<span class="pill">${remediationCounts.total} remediation task(s)</span>`);
+    }
+    const openRemediationCount = (remediationCounts.active || 0) + (remediationCounts.pending || 0);
+    const packetList = Array.isArray(round.packets) ? round.packets : [];
+    const remediationList = Array.isArray(round.remediation_tasks) ? round.remediation_tasks : [];
+    const summaryStats = [
+      { label: 'Round status', value: round.status === 'remediating' ? 'Back in Atomic' : round.status === 'ready_for_rerun' ? 'Ready for re-review' : round.status === 'needs_remediation' ? 'Remediation needed' : round.status === 'running' ? 'Review running' : round.status === 'passed' ? 'Passed' : round.status === 'failed' ? 'Review failed' : round.status },
+      { label: 'Pass', value: String(roundVerdicts.pass || 0), tone: 'status-complete' },
+      { label: 'Concern', value: String(roundVerdicts.concern || 0), tone: (roundVerdicts.concern || 0) > 0 ? 'status-running' : '' },
+      { label: 'Remediation tasks', value: String(remediationCounts.total || 0) },
+      { label: 'Open', value: String(openRemediationCount), tone: openRemediationCount > 0 ? 'status-running' : '' },
+    ];
+    if ((remediationCounts.completed || 0) > 0 || (remediationCounts.total || 0) > 0) {
+      summaryStats.push({ label: 'Done', value: String(remediationCounts.completed || 0), tone: (remediationCounts.completed || 0) > 0 ? 'status-complete' : '' });
+    }
+    const remediationHtml = remediationList.length ? `
+      <div class="promotion-round-remediation">
+        <div class="label">Remediation tasks</div>
+        <ul class="promotion-packet-issues">
+          ${remediationList.map((task) => `<li>${escapeHtml(task.title || task.id || 'Task')} <span class="hint">(${escapeHtml(task.status || 'unknown')})</span></li>`).join('')}
+        </ul>
+      </div>
+    ` : '';
+    return `
+      <section class="promotion-round">
+        <div class="promotion-section-title">
+          <h4>Round ${escapeHtml(String(round.round_number || '?'))}</h4>
+          <span class="hint">${round.last_activity_at ? `Last activity ${escapeHtml(formatRelativeTime(round.last_activity_at))}` : ''}</span>
+        </div>
+        <div class="promotion-packet-meta promotion-round-meta">${roundPills.join('')}</div>
+        <div class="promotion-round-summary">
+          ${summaryStats.map((item) => `
+            <div class="promotion-round-stat">
+              <div class="label">${escapeHtml(item.label || '')}</div>
+              <div class="value ${escapeHtml(item.tone || '')}">${escapeHtml(item.value || '')}</div>
+            </div>
+          `).join('')}
+        </div>
+        <div class="promotion-packet-list">
+          ${packetList.map((packet) => renderPacket(packet)).join('')}
+        </div>
+        ${remediationHtml}
+      </section>
+    `;
+  }).join('') : '<div class="empty">No promotion review packets recorded yet.</div>';
+  const latestRoundHero = latestRound ? `
+    <section class="promotion-latest-round">
+      <div class="promotion-section-title">
+        <h4>Current promotion round: Round ${escapeHtml(String(latestRound.round_number || '?'))}</h4>
+        <span class="hint">${latestRound.last_activity_at ? `Last activity ${escapeHtml(formatRelativeTime(latestRound.last_activity_at))}` : ''}</span>
+      </div>
+      <div class="promotion-state-banner ${latestRound.status === 'passed' ? 'status-complete' : latestRound.status === 'failed' || latestRound.status === 'needs_remediation' ? 'status-failed' : ''}">
+        <div class="promotion-state-banner-icon">${
+          latestRound.status === 'remediating' ? 'A' :
+          latestRound.status === 'ready_for_rerun' ? 'R' :
+          latestRound.status === 'running' ? 'P' :
+          latestRound.status === 'passed' ? 'Q' :
+          '!'
+        }</div>
+        <div class="promotion-state-banner-copy">
+          <strong>${
+            latestRound.status === 'remediating' ? 'Atomic is running remediation work' :
+            latestRound.status === 'ready_for_rerun' ? 'Ready for the next promotion review round' :
+            latestRound.status === 'running' ? 'Promotion review is actively running' :
+            latestRound.status === 'passed' ? 'This round passed cleanly' :
+            latestRound.status === 'failed' ? 'This review round failed' :
+            'This round still needs remediation'
+          }</strong>
+          <span>${
+            latestRound.status === 'remediating' ? 'The harness is back in Atomic right now, working reviewer feedback before the next round.' :
+            latestRound.status === 'ready_for_rerun' ? 'All remediation tasks from this round are done. The harness should re-review next.' :
+            latestRound.status === 'running' ? 'Reviewer packets will appear here as the board finishes its judgments.' :
+            latestRound.status === 'passed' ? 'No reviewer concerns remain for this round.' :
+            'Reviewer concerns still require action.'
+          }</span>
+        </div>
+      </div>
+      <div class="promotion-round-summary">
+        <div class="promotion-round-stat"><div class="label">Pass</div><div class="value status-complete">${escapeHtml(String((latestRound.verdict_counts || {}).pass || 0))}</div></div>
+        <div class="promotion-round-stat"><div class="label">Concern</div><div class="value ${((latestRound.verdict_counts || {}).concern || 0) > 0 ? 'status-running' : ''}">${escapeHtml(String((latestRound.verdict_counts || {}).concern || 0))}</div></div>
+        <div class="promotion-round-stat"><div class="label">Remediation Tasks</div><div class="value">${escapeHtml(String((latestRound.remediation_counts || {}).total || 0))}</div></div>
+        <div class="promotion-round-stat"><div class="label">Open</div><div class="value ${((((latestRound.remediation_counts || {}).active || 0) + ((latestRound.remediation_counts || {}).pending || 0)) > 0) ? 'status-running' : ''}">${escapeHtml(String(((latestRound.remediation_counts || {}).active || 0) + ((latestRound.remediation_counts || {}).pending || 0)))}</div></div>
+        <div class="promotion-round-stat"><div class="label">Done</div><div class="value ${((latestRound.remediation_counts || {}).completed || 0) > 0 ? 'status-complete' : ''}">${escapeHtml(String((latestRound.remediation_counts || {}).completed || 0))}</div></div>
+      </div>
+    </section>
+  ` : '';
+  function verdictEmoji(verdict) {
+    const raw = String(verdict || '').trim();
+    if (raw === 'pass') return '✅';
+    if (raw === 'concern') return '🚩';
+    if (raw === 'remediation_required') return '❌';
+    return '•';
+  }
+  const selectedReportKey = state.selectedPromotionReportKey || '';
+  const reportCardHtml = latestGradedRound ? `
+    <section class="promotion-report-card">
+      <div class="promotion-section-title">
+        <h4>Round ${escapeHtml(String(latestGradedRound.round_number || '?'))} Report Card</h4>
+        <span class="hint">${latestRound && latestRound !== latestGradedRound ? 'Latest graded round while the current round is still gathering reviewer packets.' : 'Latest graded round.'}</span>
+      </div>
+      <div class="promotion-report-card-grid">
+        ${(Array.isArray(latestGradedRound.packets) ? latestGradedRound.packets : []).map((packet) => {
+          const reviewer = humanizeReviewer(packet.reviewer, packet.dimension);
+          const verdict = String(packet.verdict || '').trim();
+          const progress = progressLabel(packet.progress_status || '');
+          const reportKey = `${latestGradedRound.review_id || latestGradedRound.round_number}:${packet.dimension || reviewer}`;
+          const title = [
+            `${reviewer}`,
+            `Dimension: ${humanizeDimension(packet.dimension || '')}`,
+            `Verdict: ${verdictLabel(verdict)}`,
+            progress ? `Progress: ${progress}` : '',
+            packet.summary ? `Summary: ${packet.summary}` : '',
+          ].filter(Boolean).join('\n');
+          return `
+            <button type="button" class="promotion-report-card-cell ${selectedReportKey === reportKey ? 'active' : ''}" data-report-key="${escapeHtml(reportKey)}" title="${escapeHtml(title)}">
+              <div class="emoji">${escapeHtml(verdictEmoji(verdict))}</div>
+              <div class="name">${escapeHtml(reviewer)}</div>
+              <div class="sub">${escapeHtml(humanizeDimension(packet.dimension || ''))}</div>
+              ${progress ? `<div class="sub">${escapeHtml(progress)}</div>` : ''}
+            </button>
+          `;
+        }).join('')}
+      </div>
+      ${(() => {
+        const packetList = Array.isArray(latestGradedRound.packets) ? latestGradedRound.packets : [];
+        const selectedPacket = packetList.find((packet) => `${latestGradedRound.review_id || latestGradedRound.round_number}:${packet.dimension || humanizeReviewer(packet.reviewer, packet.dimension)}` === selectedReportKey) || packetList[0];
+        if (!selectedPacket) return '';
+        const reviewer = humanizeReviewer(selectedPacket.reviewer, selectedPacket.dimension);
+        const progress = progressLabel(selectedPacket.progress_status || '');
+        return `
+          <div class="promotion-report-card-detail">
+            <div class="promotion-section-title">
+              <h4>${escapeHtml(reviewer)}</h4>
+              <span class="hint">${escapeHtml(humanizeDimension(selectedPacket.dimension || ''))}</span>
+            </div>
+            <div class="promotion-packet-meta">
+              <span class="pill promotion-verdict-pill ${selectedPacket.verdict === 'pass' ? 'status-complete' : selectedPacket.verdict === 'remediation_required' ? 'status-failed' : 'status-running'}">${escapeHtml(verdictEmoji(selectedPacket.verdict || ''))}</span>
+              ${progress ? `<span class="pill ${selectedPacket.progress_status === 'resolved' ? 'status-complete' : selectedPacket.progress_status === 'improving' ? 'status-running' : 'status-failed'}">${escapeHtml(progress)}</span>` : ''}
+            </div>
+            <div class="promotion-packet-summary">${escapeHtml(selectedPacket.summary || 'No summary recorded.')}</div>
+            ${(Array.isArray(selectedPacket.findings) && selectedPacket.findings.length)
+              ? `<ul class="promotion-packet-issues">${selectedPacket.findings.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>`
+              : ''}
+            ${(Array.isArray(selectedPacket.evidence) && selectedPacket.evidence.length)
+              ? `<ul class="promotion-packet-evidence">${selectedPacket.evidence.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>`
+              : ''}
+          </div>
+        `;
+      })()}
+    </section>
+  ` : '';
+  const taskPacketHtml = packets.filter((packet) => packet.source !== 'objective_review').length
+    ? `
+      <section>
+        <div class="promotion-section-title">
+          <h4>Task-level promotion packets</h4>
+          <span class="hint">Affirmation summaries captured on individual task promotions.</span>
+        </div>
+        <div class="promotion-packet-list">${packets.filter((packet) => packet.source !== 'objective_review').map((packet) => renderPacket(packet)).join('')}</div>
+      </section>
+    `
+    : '';
+  const failedHtml = failedTasks.length ? failedTasks.map((task) => {
+    const disposition = task.disposition || {};
+    const waiver = task.waiver || {};
+    const effective = task.effective_status || 'blocking';
+    return `
+      <article class="promotion-failed-task">
+        <div class="label">Failed task</div>
+        <div class="value">${escapeHtml(task.title || task.task_id || 'Failed task')}</div>
+        <div class="promotion-failed-meta">
+          <span class="pill ${effective === 'waived' ? 'status-complete' : 'status-failed'}">${escapeHtml(effective)}</span>
+          ${disposition.kind ? `<span class="pill">Disposition: ${escapeHtml(disposition.kind)}</span>` : ''}
+          ${waiver.created_at ? `<span class="pill">Resolved ${escapeHtml(formatRelativeTime(waiver.created_at))}</span>` : ''}
+        </div>
+        <div class="promotion-failed-body">${escapeHtml(waiver.rationale || task.objective || 'No failure rationale recorded.')}</div>
+      </article>
+    `;
+  }).join('') : '<div class="empty">No failed tasks are currently recorded for this objective.</div>';
+  promotionReviewContent.innerHTML = `
+    ${latestRoundHero}
+    ${reportCardHtml}
+    ${summaryCards}
+    ${taskPacketHtml}
+  `;
+  promotionReviewRoundsContent.innerHTML = `
+    <section>
+      <div class="promotion-section-title">
+        <h4>Objective review rounds</h4>
+        <span class="hint">Each automatic promotion-review round is grouped separately so you can compare findings before and after remediation.</span>
+      </div>
+      <div class="promotion-round-list">${roundHtml}</div>
+    </section>
+    <section>
+      <div class="promotion-section-title">
+        <h4>Failed task dispositions</h4>
+        <span class="hint">Historical failures stay visible here even when waived.</span>
+      </div>
+      <div class="promotion-failed-list">${failedHtml}</div>
+    </section>
+  `;
+  promotionReviewContent.querySelectorAll('[data-report-key]').forEach((element) => {
+    element.addEventListener('click', () => {
+      state.selectedPromotionReportKey = element.getAttribute('data-report-key') || '';
+      renderPromotionReview();
+    });
+  });
 }
 
 function renderInterrogationReview(objective) {
@@ -3071,7 +4026,34 @@ function renderWorkspaceChrome() {
   workspaceSummary.textContent = objective
     ? (objective.summary || 'No objective summary recorded.')
     : (workspace.project.description || 'No project summary recorded.');
-  workspaceStatus.textContent = `${workspace.loop_status.status} · queue ${workspace.loop_status.queue_depth}`;
+  const queueDepth = Number(workspace.loop_status.queue_depth || 0);
+  if (state.view === 'atomic' || state.view === 'promotion-review') {
+    if (queueDepth > 0) {
+      workspaceStatus.textContent = `Other project work: ${queueDepth} queued`;
+    } else {
+      workspaceStatus.textContent = `No other project work queued`;
+    }
+  } else {
+    workspaceStatus.textContent = `${workspace.loop_status.status} · queue ${queueDepth}`;
+  }
+  renderViewNav();
+}
+
+function renderViewNav() {
+  if (!viewNav) return;
+  const params = new URLSearchParams();
+  if (state.projectId) params.set('project_id', state.projectId);
+  if (state.objectiveId) params.set('objective_id', state.objectiveId);
+  const suffix = params.toString() ? `?${params.toString()}` : '';
+  const links = [
+    { key: 'control-flow', href: `/workspace${suffix}`, label: 'Control Flow' },
+    { key: 'atomic', href: `/atomic${suffix}`, label: 'Atomic' },
+    { key: 'promotion-review', href: `/promotion-review${suffix}`, label: 'Promotion Review' },
+    { key: 'harness', href: '/harness', label: 'Dashboard' },
+  ];
+  viewNav.innerHTML = links.map((link) => (
+    `<a class="view-nav-link ${state.view === link.key ? 'active' : ''}" data-view-key="${link.key}" href="${link.href}">${escapeHtml(link.label)}</a>`
+  )).join('');
 }
 
 async function loadProjects() {
@@ -3115,6 +4097,8 @@ async function loadWorkspace() {
   renderTasks();
   renderRuns();
   renderExecutionPanel();
+  renderPromotionReview();
+  maybeFollowRecommendedView();
   await renderDiagram();
   await loadRunOutput();
 }
@@ -3571,6 +4555,22 @@ if (sidebarToggle) {
   });
 }
 
+if (viewNav) {
+  viewNav.addEventListener('click', (event) => {
+    const link = event.target.closest('[data-view-key]');
+    if (!link) return;
+    const targetView = link.dataset.viewKey || '';
+    const recommended = currentRecommendedView();
+    if (targetView && recommended && targetView !== recommended) {
+      state.manualViewOverride = targetView;
+      sessionStorage.setItem('accruvia.ui.manualViewOverride', targetView);
+    } else {
+      state.manualViewOverride = '';
+      sessionStorage.removeItem('accruvia.ui.manualViewOverride');
+    }
+  });
+}
+
 if (stepBack) {
   stepBack.addEventListener('click', () => {
     const objective = currentObjective();
@@ -3883,7 +4883,7 @@ _FULL_UI_HTML = """
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/app.css">
   </head>
-  <body data-view="default">
+  <body data-view="default" data-layout="standard">
     <div id="app-shell" class="app-shell">
       <aside class="sidebar">
         <button id="sidebar-toggle" class="sidebar-toggle" type="button">
@@ -3925,6 +4925,7 @@ _FULL_UI_HTML = """
           <div>
             <h2 id="workspace-title">Harness project</h2>
             <p id="workspace-summary"></p>
+            <nav id="view-nav" class="view-nav"></nav>
           </div>
           <div id="workspace-status" class="status-chip">idle</div>
         </div>
@@ -4106,6 +5107,12 @@ _FULL_UI_HTML = """
             <div id="atomic-generation-meta" class="atomic-generation-meta"></div>
             <div id="atomic-list" class="atomic-list"></div>
           </section>
+          <section id="promotion-review-panel" class="panel" hidden>
+            <h3 id="promotion-review-title">Promotion review</h3>
+            <p id="promotion-review-summary" class="hint">Select an objective to inspect promotion readiness and recorded reviews.</p>
+            <div id="promotion-review-meta" class="atomic-generation-meta"></div>
+            <div id="promotion-review-content" class="promotion-grid"></div>
+          </section>
           <section id="cli-panel" class="panel">
             <h3>CLI Output</h3>
             <p class="hint">Readable text artifacts from the selected run directory.</p>
@@ -4122,6 +5129,9 @@ _FULL_UI_HTML = """
             </div>
           </section>
         </div>
+        <section id="promotion-review-rounds-panel" class="panel" hidden>
+          <div id="promotion-review-rounds-content" class="promotion-grid"></div>
+        </section>
       </main>
     </div>
     <script type="module" src="/app.js"></script>
@@ -4129,9 +5139,15 @@ _FULL_UI_HTML = """
 </html>
 """
 
-_INDEX_HTML = _FULL_UI_HTML.replace('data-view="default"', 'data-view="control-flow"', 1)
-_ATOMIC_HTML = _FULL_UI_HTML.replace('data-view="default"', 'data-view="atomic"', 1)
-_HARNESS_HTML = _FULL_UI_HTML.replace('data-view="default"', 'data-view="harness"', 1)
+def _render_view_html(view: str, layout: str) -> str:
+    html = _FULL_UI_HTML.replace('data-view="default"', f'data-view="{view}"', 1)
+    return html.replace('data-layout="standard"', f'data-layout="{layout}"', 1)
+
+
+_INDEX_HTML = _render_view_html("control-flow", "split-workspace")
+_ATOMIC_HTML = _render_view_html("atomic", "split-workspace")
+_PROMOTION_REVIEW_HTML = _render_view_html("promotion-review", "split-workspace")
+_HARNESS_HTML = _render_view_html("harness", "dashboard")
 
 
 @dataclass(slots=True)
@@ -4150,6 +5166,7 @@ class HarnessUIDataService:
         self.task_service = TaskService(self.store)
         self.memory_provider = LocalContextMemoryProvider(self.store)
         self.auto_resume_atomic_generation = not bool(getattr(ctx, "is_test", False))
+        self.auto_resume_objective_review = not bool(getattr(ctx, "is_test", False))
 
     def list_projects(self) -> dict[str, object]:
         projects = []
@@ -4173,17 +5190,22 @@ class HarnessUIDataService:
         if self.auto_resume_atomic_generation:
             for objective in objectives:
                 self._maybe_resume_atomic_generation(objective.id)
+        if self.auto_resume_objective_review:
+            for objective in objectives:
+                self._maybe_resume_objective_review(objective.id)
         objectives = self.store.list_objectives(project.id)
         tasks = self.store.list_tasks(project.id)
         task_payload = []
         latest_runs_by_task: dict[str, list[Any]] = {}
         for task in tasks:
             runs = self.store.list_runs(task.id)
+            promotions = self.store.list_promotions(task.id)
             latest_runs_by_task[task.id] = runs
             task_payload.append(
                 {
                     **serialize_dataclass(task),
                     "runs": [serialize_dataclass(run) for run in runs],
+                    "promotions": [serialize_dataclass(promotion) for promotion in promotions],
                 }
             )
         objective_payload = []
@@ -4215,6 +5237,12 @@ class HarnessUIDataService:
                     "linked_task_count": len(linked_tasks),
                     "atomic_generation": atomic_generation,
                     "atomic_units": self._atomic_units_for_objective(objective.id, linked_tasks, atomic_generation),
+                    "promotion_review": self._promotion_review_for_objective(objective.id, linked_tasks),
+                    "recommended_view": (
+                        "promotion-review"
+                        if objective.status == ObjectiveStatus.RESOLVED
+                        else "atomic"
+                    ),
                     "proposed_first_task": self.proposed_first_task(objective.id)
                     if gate.ready and not linked_tasks
                     else None,
@@ -4683,6 +5711,380 @@ class HarnessUIDataService:
         if linked_tasks:
             return
         self.queue_atomic_generation(objective_id, async_mode=not bool(getattr(self.ctx, "is_test", False)))
+
+    def queue_objective_review(self, objective_id: str, *, async_mode: bool = True) -> dict[str, object]:
+        objective = self.store.get_objective(objective_id)
+        if objective is None:
+            raise ValueError(f"Unknown objective: {objective_id}")
+        current = self._objective_review_state(objective_id)
+        if current["status"] == "running" and self._objective_review_is_stale(current, objective_id):
+            self._mark_objective_review_interrupted(objective, current)
+            current = self._objective_review_state(objective_id)
+        if current["status"] == "running":
+            return {"objective_review_state": current}
+        review_summary = self._promotion_review_for_objective(objective_id, [task for task in self.store.list_tasks(objective.project_id) if task.objective_id == objective_id])
+        if not review_summary["ready"]:
+            return {"objective_review_state": current}
+        if not bool(review_summary.get("can_start_new_round", False)):
+            return {"objective_review_state": current}
+        review_id = new_id("objective_review")
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="objective_review_started",
+                project_id=objective.project_id,
+                objective_id=objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Started automatic objective promotion review.",
+                metadata={"review_id": review_id},
+            )
+        )
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="action_receipt",
+                project_id=objective.project_id,
+                objective_id=objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Action receipt: Starting automatic objective promotion review.",
+                metadata={"kind": "objective_review", "status": "started", "review_id": review_id},
+            )
+        )
+
+        def worker() -> None:
+            self._run_objective_review(objective.id, review_id)
+
+        if async_mode:
+            _OBJECTIVE_REVIEW.start(objective.id, worker)
+        else:
+            worker()
+        return {"objective_review_state": self._objective_review_state(objective.id)}
+
+    def _objective_review_is_stale(self, review_state: dict[str, object], objective_id: str = "") -> bool:
+        if review_state.get("status") != "running":
+            return False
+        if objective_id and objective_id in _OBJECTIVE_REVIEW._running:
+            return False
+        last_activity_at = str(review_state.get("last_activity_at") or "")
+        if not last_activity_at:
+            return False
+        try:
+            last_activity = _dt.datetime.fromisoformat(last_activity_at)
+        except ValueError:
+            return False
+        age_seconds = (_dt.datetime.now(_dt.timezone.utc) - last_activity).total_seconds()
+        return age_seconds > 300
+
+    def _mark_objective_review_interrupted(self, objective: Objective, review_state: dict[str, object]) -> None:
+        review_id = str(review_state.get("review_id") or "")
+        if not review_id:
+            return
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="objective_review_failed",
+                project_id=objective.project_id,
+                objective_id=objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Objective promotion review was interrupted before reviewer packets were recorded. The harness can restart the round.",
+                metadata={"review_id": review_id, "interrupted": True},
+            )
+        )
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="action_receipt",
+                project_id=objective.project_id,
+                objective_id=objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Action receipt: Objective promotion review was interrupted and is eligible for restart.",
+                metadata={"kind": "objective_review", "status": "interrupted", "review_id": review_id},
+            )
+        )
+
+    def _objective_review_state(self, objective_id: str) -> dict[str, object]:
+        starts = self.store.list_context_records(objective_id=objective_id, record_type="objective_review_started")
+        if not starts:
+            return {"status": "idle", "review_id": "", "started_at": "", "completed_at": "", "failed_at": "", "last_activity_at": ""}
+        start = starts[-1]
+        review_id = str(start.metadata.get("review_id") or start.id)
+        completed = next(
+            (
+                record
+                for record in reversed(self.store.list_context_records(objective_id=objective_id, record_type="objective_review_completed"))
+                if str(record.metadata.get("review_id") or "") == review_id
+            ),
+            None,
+        )
+        failed = next(
+            (
+                record
+                for record in reversed(self.store.list_context_records(objective_id=objective_id, record_type="objective_review_failed"))
+                if str(record.metadata.get("review_id") or "") == review_id
+            ),
+            None,
+        )
+        packets = [
+            record
+            for record in self.store.list_context_records(objective_id=objective_id, record_type="objective_review_packet")
+            if str(record.metadata.get("review_id") or "") == review_id
+        ]
+        status = "running"
+        if failed is not None:
+            status = "failed"
+        elif completed is not None:
+            status = "completed"
+        related = [start.created_at]
+        related.extend(record.created_at for record in packets)
+        if completed is not None:
+            related.append(completed.created_at)
+        if failed is not None:
+            related.append(failed.created_at)
+        return {
+            "status": status,
+            "review_id": review_id,
+            "started_at": start.created_at.isoformat(),
+            "completed_at": completed.created_at.isoformat() if completed is not None else "",
+            "failed_at": failed.created_at.isoformat() if failed is not None else "",
+            "last_activity_at": max(related).isoformat() if related else "",
+            "packet_count": len(packets),
+            "error": failed.content if failed is not None else "",
+        }
+
+    def _maybe_resume_objective_review(self, objective_id: str) -> None:
+        objective = self.store.get_objective(objective_id)
+        if objective is None:
+            return
+        linked_tasks = [task for task in self.store.list_tasks(objective.project_id) if task.objective_id == objective_id]
+        review_summary = self._promotion_review_for_objective(objective_id, linked_tasks)
+        review_state = self._objective_review_state(objective_id)
+        if review_state.get("status") == "running" and self._objective_review_is_stale(review_state, objective_id):
+            self._mark_objective_review_interrupted(objective, review_state)
+            review_summary = self._promotion_review_for_objective(objective_id, linked_tasks)
+            review_state = self._objective_review_state(objective_id)
+        latest_round = (review_summary.get("review_rounds") or [None])[0]
+        latest_round_status = str(latest_round.get("status") or "") if isinstance(latest_round, dict) else ""
+        if objective.status != ObjectiveStatus.RESOLVED and latest_round_status not in {"ready_for_rerun", "failed"}:
+            return
+        if (
+            isinstance(latest_round, dict)
+            and bool(latest_round.get("needs_remediation"))
+            and latest_round.get("review_id")
+            and int((latest_round.get("remediation_counts") or {}).get("active", 0) or 0) == 0
+            and int((latest_round.get("remediation_counts") or {}).get("pending", 0) or 0) == 0
+            and int((latest_round.get("remediation_counts") or {}).get("total", 0) or 0) == 0
+        ):
+            packets = [
+                {
+                    "reviewer": str(packet.get("reviewer") or ""),
+                    "dimension": str(packet.get("dimension") or ""),
+                    "verdict": str(packet.get("verdict") or ""),
+                    "summary": str(packet.get("summary") or ""),
+                    "findings": list(packet.get("findings") or []),
+                }
+                for packet in list(latest_round.get("packets") or [])
+            ]
+            self._create_objective_review_remediation_tasks(objective, str(latest_round.get("review_id") or ""), packets)
+            return
+        if not review_summary["ready"]:
+            return
+        if review_state["status"] == "running" and objective_id in _OBJECTIVE_REVIEW._running:
+            return
+        if not bool(review_summary.get("can_start_new_round", False)):
+            return
+        self.queue_objective_review(objective_id, async_mode=not bool(getattr(self.ctx, "is_test", False)))
+
+    def _run_objective_review(self, objective_id: str, review_id: str) -> None:
+        objective = self.store.get_objective(objective_id)
+        if objective is None:
+            return
+        try:
+            packets = self._generate_objective_review_packets(objective_id, review_id)
+            for packet in packets:
+                self.store.create_context_record(
+                    ContextRecord(
+                        id=new_id("context"),
+                        record_type="objective_review_packet",
+                        project_id=objective.project_id,
+                        objective_id=objective.id,
+                        visibility="operator_visible",
+                        author_type="system",
+                        content=str(packet["summary"]),
+                        metadata={
+                            "review_id": review_id,
+                            "reviewer": packet["reviewer"],
+                            "dimension": packet["dimension"],
+                            "verdict": packet["verdict"],
+                            "progress_status": packet.get("progress_status"),
+                            "severity": packet.get("severity"),
+                            "owner_scope": packet.get("owner_scope"),
+                            "findings": packet["findings"],
+                            "evidence": packet["evidence"],
+                            "closure_criteria": packet.get("closure_criteria"),
+                            "evidence_required": packet.get("evidence_required"),
+                            "repeat_reason": packet.get("repeat_reason"),
+                            "backend": packet.get("backend"),
+                            "prompt_path": packet.get("prompt_path"),
+                            "response_path": packet.get("response_path"),
+                        },
+                    )
+                )
+            self.store.create_context_record(
+                ContextRecord(
+                    id=new_id("context"),
+                    record_type="objective_review_completed",
+                    project_id=objective.project_id,
+                    objective_id=objective.id,
+                    visibility="operator_visible",
+                    author_type="system",
+                    content=f"Completed automatic objective review with {len(packets)} reviewer packet(s).",
+                    metadata={"review_id": review_id, "packet_count": len(packets)},
+                )
+            )
+            self.store.create_context_record(
+                ContextRecord(
+                    id=new_id("context"),
+                    record_type="action_receipt",
+                    project_id=objective.project_id,
+                    objective_id=objective.id,
+                    visibility="operator_visible",
+                    author_type="system",
+                    content=f"Action receipt: Objective promotion review generated {len(packets)} reviewer packet(s).",
+                    metadata={"kind": "objective_review", "status": "completed", "review_id": review_id, "packet_count": len(packets)},
+                )
+            )
+            created_task_ids = self._create_objective_review_remediation_tasks(objective, review_id, packets)
+            if created_task_ids:
+                self.store.create_context_record(
+                    ContextRecord(
+                        id=new_id("context"),
+                        record_type="action_receipt",
+                        project_id=objective.project_id,
+                        objective_id=objective.id,
+                        visibility="operator_visible",
+                        author_type="system",
+                        content=f"Action receipt: Objective review created {len(created_task_ids)} remediation task(s) and returned the objective to Atomic.",
+                        metadata={
+                            "kind": "objective_review",
+                            "status": "remediation_created",
+                            "review_id": review_id,
+                            "task_ids": created_task_ids,
+                        },
+                    )
+                )
+        except Exception as exc:
+            self.store.create_context_record(
+                ContextRecord(
+                    id=new_id("context"),
+                    record_type="objective_review_failed",
+                    project_id=objective.project_id,
+                    objective_id=objective.id,
+                    visibility="operator_visible",
+                    author_type="system",
+                    content=f"Automatic objective review failed: {exc}",
+                    metadata={"review_id": review_id},
+                )
+            )
+
+    def _generate_objective_review_packets(self, objective_id: str, review_id: str) -> list[dict[str, object]]:
+        objective = self.store.get_objective(objective_id)
+        if objective is None:
+            return []
+        linked_tasks = [task for task in self.store.list_tasks(objective.project_id) if task.objective_id == objective_id]
+        objective_payload = self._promotion_review_for_objective(objective_id, linked_tasks)
+        interrogation_service = getattr(self.ctx, "interrogation_service", None)
+        llm_router = getattr(interrogation_service, "llm_router", None)
+        if llm_router is not None and getattr(llm_router, "executors", {}):
+            prompt = self._build_objective_review_prompt(objective, objective_payload, linked_tasks)
+            run_dir = self.workspace_root / "ui_promotion_review" / objective.id / review_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+            task = Task(
+                id=new_id("objective_review_task"),
+                project_id=objective.project_id,
+                title=f"Generate objective review packets for {objective.title}",
+                objective="Review the completed objective from multiple promotion dimensions.",
+                strategy="objective_review",
+                status=TaskStatus.COMPLETED,
+            )
+            run = Run(
+                id=new_id("objective_review_run"),
+                task_id=task.id,
+                status=RunStatus.COMPLETED,
+                attempt=1,
+                summary=f"Objective review for {objective.id}",
+            )
+            try:
+                result, backend = llm_router.execute(LLMInvocation(task=task, run=run, prompt=prompt, run_dir=run_dir))
+                parsed = self._parse_objective_review_response(result.response_text)
+                if parsed:
+                    for packet in parsed:
+                        packet["backend"] = backend
+                        packet["prompt_path"] = str(result.prompt_path)
+                        packet["response_path"] = str(result.response_path)
+                    return parsed
+            except LLMExecutionError:
+                pass
+        return self._deterministic_objective_review_packets(objective_payload)
+
+    def _create_objective_review_remediation_tasks(
+        self,
+        objective: Objective,
+        review_id: str,
+        packets: list[dict[str, object]],
+    ) -> list[str]:
+        linked_tasks = [task for task in self.store.list_tasks(objective.project_id) if task.objective_id == objective.id]
+        existing_dimensions = set()
+        for task in linked_tasks:
+            metadata = task.external_ref_metadata if isinstance(task.external_ref_metadata, dict) else {}
+            remediation = metadata.get("objective_review_remediation") if isinstance(metadata.get("objective_review_remediation"), dict) else None
+            if remediation and str(remediation.get("review_id") or "") == review_id:
+                existing_dimensions.add(str(remediation.get("dimension") or ""))
+        created: list[str] = []
+        for packet in packets:
+            verdict = str(packet.get("verdict") or "").strip()
+            dimension = str(packet.get("dimension") or "").strip()
+            if verdict not in {"concern", "remediation_required"} or not dimension or dimension in existing_dimensions:
+                continue
+            findings = [str(item).strip() for item in list(packet.get("findings") or []) if str(item).strip()]
+            summary = str(packet.get("summary") or "").strip()
+            title = f"Address {dimension.replace('_', ' ')} review findings"
+            objective_text = summary or "Address the objective review findings and keep the work bounded to the same objective."
+            if findings:
+                objective_text += "\n" + "\n".join(f"- {item}" for item in findings)
+            task = self.task_service.create_task_with_policy(
+                project_id=objective.project_id,
+                objective_id=objective.id,
+                title=title,
+                objective=objective_text,
+                priority=objective.priority,
+                parent_task_id=None,
+                source_run_id=None,
+                external_ref_type="objective_review",
+                external_ref_id=f"{objective.id}:{review_id}:{dimension}",
+                external_ref_metadata={
+                    "objective_review_remediation": {
+                        "review_id": review_id,
+                        "dimension": dimension,
+                        "reviewer": str(packet.get("reviewer") or ""),
+                        "verdict": verdict,
+                    }
+                },
+                validation_profile="generic",
+                validation_mode="default_focused",
+                scope={},
+                strategy="objective_review_remediation",
+                max_attempts=3,
+                required_artifacts=["plan", "report"],
+            )
+            created.append(task.id)
+            existing_dimensions.add(dimension)
+        if created:
+            self.store.update_objective_phase(objective.id)
+        return created
 
     def _run_atomic_generation(self, objective_id: str, generation_id: str, diagram_version: int) -> None:
         objective = self.store.get_objective(objective_id)
@@ -6217,6 +7619,221 @@ class HarnessUIDataService:
                 }
         return None
 
+    def _build_objective_review_prompt(
+        self,
+        objective: Objective,
+        objective_payload: dict[str, object],
+        linked_tasks: list[Task],
+    ) -> str:
+        intent_model = self.store.latest_intent_model(objective.id)
+        tasks_payload = [
+            {
+                "title": task.title,
+                "status": task.status.value,
+                "objective": task.objective,
+                "strategy": task.strategy,
+                "metadata": task.external_ref_metadata,
+            }
+            for task in linked_tasks
+        ]
+        prior_rounds = []
+        for round_row in list(objective_payload.get("review_rounds") or [])[:3]:
+            if not isinstance(round_row, dict):
+                continue
+            prior_rounds.append(
+                {
+                    "round_number": round_row.get("round_number"),
+                    "status": round_row.get("status"),
+                    "verdict_counts": round_row.get("verdict_counts"),
+                    "remediation_counts": round_row.get("remediation_counts"),
+                    "packets": [
+                        {
+                            "dimension": packet.get("dimension"),
+                            "verdict": packet.get("verdict"),
+                            "progress_status": packet.get("progress_status"),
+                            "summary": packet.get("summary"),
+                        }
+                        for packet in list(round_row.get("packets") or [])
+                    ],
+                }
+            )
+        return (
+            "You are the objective-level promotion review board for the accruvia harness.\n"
+            "Review the objective as a whole after execution completed.\n"
+            "You may be reviewing a later round after remediation from prior rounds.\n"
+            "Judge progress against previous rounds instead of repeating the same concern blindly.\n"
+            "Do not treat an actively running review/remediation cycle as proof of failure on its own.\n"
+            "If the current lifecycle is still in progress, distinguish missing implementation from missing final evidence.\n"
+            "Return JSON only with keys: summary, packets.\n"
+            "packets must be an array. Each packet must contain reviewer, dimension, verdict, progress_status, severity, owner_scope, summary, findings, evidence, closure_criteria, evidence_required.\n"
+            "reviewer: short reviewer name\n"
+            "dimension: one of intent_fidelity, unit_test_coverage, integration_e2e_coverage, security, devops, atomic_fidelity, code_structure\n"
+            "verdict: one of pass, concern, remediation_required\n"
+            "progress_status: one of new_concern, still_blocking, improving, resolved, not_applicable\n"
+            "severity: one of low, medium, high\n"
+            "owner_scope: short concrete owner scope such as objective review orchestration, integration tests, promotion apply-back, ui workflow\n"
+            "summary: short paragraph\n"
+            "findings: array of short strings\n"
+            "evidence: array of short strings\n"
+            "closure_criteria: REQUIRED for concern and remediation_required. Must be concrete and measurable.\n"
+            "evidence_required: REQUIRED for concern and remediation_required. Must name the artifact or proof required to clear the finding.\n"
+            "repeat_reason: REQUIRED when verdict is concern or remediation_required and progress_status is improving, still_blocking, or resolved.\n"
+            "Reject vague language. Do not say 'improve testing' or 'more evidence' without a measurable closure target.\n\n"
+            f"Objective title: {objective.title}\n"
+            f"Objective summary: {objective.summary}\n"
+            f"Objective status: {objective.status.value}\n"
+            f"Intent summary: {intent_model.intent_summary if intent_model else ''}\n"
+            f"Success definition: {intent_model.success_definition if intent_model else ''}\n"
+            f"Objective review summary: {json.dumps(objective_payload, indent=2, sort_keys=True)}\n"
+            f"Previous review rounds: {json.dumps(prior_rounds, indent=2, sort_keys=True)}\n"
+            f"Linked tasks: {json.dumps(tasks_payload, indent=2, sort_keys=True)}\n"
+        )
+
+    def _parse_objective_review_response(self, text: str) -> list[dict[str, object]] | None:
+        stripped = text.strip()
+        candidates = [stripped]
+        fenced = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", stripped, flags=re.DOTALL)
+        candidates.extend(fenced)
+        for candidate in candidates:
+            try:
+                payload = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            packets = payload.get("packets")
+            if not isinstance(packets, list):
+                continue
+            parsed: list[dict[str, object]] = []
+            for item in packets:
+                if not isinstance(item, dict):
+                    continue
+                validated = self._validate_objective_review_packet(item)
+                if validated is not None:
+                    parsed.append(validated)
+            if parsed:
+                return parsed
+        return None
+
+    def _validate_objective_review_packet(self, item: dict[str, object]) -> dict[str, object] | None:
+        reviewer = str(item.get("reviewer") or "").strip()
+        dimension = str(item.get("dimension") or "").strip()
+        verdict = str(item.get("verdict") or "").strip()
+        progress_status = str(item.get("progress_status") or "not_applicable").strip() or "not_applicable"
+        summary = str(item.get("summary") or "").strip()
+        findings = [str(v).strip() for v in list(item.get("findings") or []) if str(v).strip()]
+        evidence = [str(v).strip() for v in list(item.get("evidence") or []) if str(v).strip()]
+        severity = str(item.get("severity") or "").strip().lower()
+        owner_scope = str(item.get("owner_scope") or "").strip()
+        closure_criteria = str(item.get("closure_criteria") or "").strip()
+        evidence_required = str(item.get("evidence_required") or "").strip()
+        repeat_reason = str(item.get("repeat_reason") or "").strip()
+        if not reviewer or not summary:
+            return None
+        if dimension not in _OBJECTIVE_REVIEW_DIMENSIONS:
+            return None
+        if verdict not in _OBJECTIVE_REVIEW_VERDICTS:
+            return None
+        if progress_status not in _OBJECTIVE_REVIEW_PROGRESS:
+            return None
+        if verdict == "pass":
+            return {
+                "reviewer": reviewer,
+                "dimension": dimension,
+                "verdict": verdict,
+                "progress_status": progress_status,
+                "severity": "",
+                "owner_scope": "",
+                "summary": summary,
+                "findings": findings,
+                "evidence": evidence,
+                "closure_criteria": "",
+                "evidence_required": "",
+                "repeat_reason": repeat_reason,
+            }
+        if severity not in _OBJECTIVE_REVIEW_SEVERITIES:
+            return None
+        if not owner_scope or not closure_criteria or not evidence_required:
+            return None
+        if progress_status in {"improving", "still_blocking", "resolved"} and not repeat_reason:
+            return None
+        if not findings or not evidence:
+            return None
+        lowered_closure = closure_criteria.lower()
+        lowered_evidence_required = evidence_required.lower()
+        if not any(
+            marker in lowered_closure
+            for marker in ("must", "shows", "show", "recorded", "exists", "complete", "passes", "pass", "zero", "all ", "at least", "no ")
+        ):
+            return None
+        if any(phrase in lowered_closure for phrase in _OBJECTIVE_REVIEW_VAGUE_PHRASES):
+            return None
+        if any(phrase in lowered_evidence_required for phrase in ("more evidence", "stronger evidence", "better tests", "improve")):
+            return None
+        return {
+            "reviewer": reviewer,
+            "dimension": dimension,
+            "verdict": verdict,
+            "progress_status": progress_status,
+            "severity": severity,
+            "owner_scope": owner_scope,
+            "summary": summary,
+            "findings": findings,
+            "evidence": evidence,
+            "closure_criteria": closure_criteria,
+            "evidence_required": evidence_required,
+            "repeat_reason": repeat_reason,
+        }
+
+    def _deterministic_objective_review_packets(self, objective_payload: dict[str, object]) -> list[dict[str, object]]:
+        counts = objective_payload.get("task_counts", {}) if isinstance(objective_payload, dict) else {}
+        failed = int(counts.get("failed", 0) or 0)
+        waived = int(objective_payload.get("waived_failed_count", 0) or 0)
+        unresolved = int(objective_payload.get("unresolved_failed_count", 0) or 0)
+        packets = [
+            {
+                "reviewer": "Intent agent",
+                "dimension": "intent_fidelity",
+                "verdict": "pass" if unresolved == 0 else "concern",
+                "progress_status": "not_applicable",
+                "severity": "" if unresolved == 0 else "medium",
+                "owner_scope": "" if unresolved == 0 else "failed task governance",
+                "summary": "Execution completed and the objective reached a resolved state. Review the linked task outcomes against the original intent before promotion.",
+                "findings": [] if unresolved == 0 else ["There are unresolved failed tasks that still need explicit disposition."],
+                "evidence": [f"Completed tasks: {int(counts.get('completed', 0) or 0)}", f"Unresolved failed tasks: {unresolved}"],
+                "closure_criteria": "" if unresolved == 0 else "All failed tasks for the objective must be explicitly waived, superseded, or resolved so unresolved failed task count is zero.",
+                "evidence_required": "" if unresolved == 0 else "Objective summary shows zero unresolved failed tasks and records explicit failed-task dispositions.",
+                "repeat_reason": "",
+            },
+            {
+                "reviewer": "QA agent",
+                "dimension": "unit_test_coverage",
+                "verdict": "concern",
+                "progress_status": "new_concern",
+                "severity": "medium",
+                "owner_scope": "objective review evidence",
+                "summary": "Unit and integration evidence should be reviewed from the completed task reports before promotion.",
+                "findings": ["Objective-level QA packets are not yet derived from report artifacts."],
+                "evidence": [f"Historical failed tasks: {failed}", f"Waived failed tasks: {waived}"],
+                "closure_criteria": "Objective review packets must cite concrete unit-test or integration-test evidence from completed task artifacts for the QA dimensions.",
+                "evidence_required": "A recorded review packet that references completed-task test artifacts and concludes QA pass or resolved concern status.",
+                "repeat_reason": "",
+            },
+            {
+                "reviewer": "Structure agent",
+                "dimension": "code_structure",
+                "verdict": "concern" if waived else "pass",
+                "progress_status": "new_concern" if waived else "not_applicable",
+                "severity": "medium" if waived else "",
+                "owner_scope": "code structure" if waived else "",
+                "summary": "Historical control-plane failures were waived, so code structure should be reviewed carefully before promotion.",
+                "findings": ["Waived control-plane failures deserve a human review pass."] if waived else [],
+                "evidence": [f"Waived failed tasks: {waived}"],
+                "closure_criteria": "Historical failed tasks must be superseded or waived with rationale so fragmented partial work is not left unresolved." if waived else "",
+                "evidence_required": "Failed-task records show explicit superseding or waiver rationale for every historical failure." if waived else "",
+                "repeat_reason": "",
+            },
+        ]
+        return packets
+
     def _build_ui_responder_prompt(
         self,
         *,
@@ -6670,6 +8287,259 @@ class HarnessUIDataService:
             )
             next_order += 1
         return sorted(units, key=lambda item: (int(item["order"]), str(item["title"])))
+
+    def _promotion_review_for_objective(
+        self,
+        objective_id: str,
+        linked_tasks: list[Task],
+    ) -> dict[str, object]:
+        objective_review_state = self._objective_review_state(objective_id)
+        promotions_by_task = {
+            task.id: [serialize_dataclass(promotion) for promotion in self.store.list_promotions(task.id)]
+            for task in linked_tasks
+        }
+        tasks_by_id = {task.id: task for task in linked_tasks}
+        objective_records = self.store.list_context_records(objective_id=objective_id)
+        review_start_records = [record for record in objective_records if record.record_type == "objective_review_started"]
+        review_completed_records = [record for record in objective_records if record.record_type == "objective_review_completed"]
+        review_failed_records = [record for record in objective_records if record.record_type == "objective_review_failed"]
+        review_packet_records = [record for record in objective_records if record.record_type == "objective_review_packet"]
+        waivers_by_task: dict[str, dict[str, object]] = {}
+        for record in objective_records:
+            if record.record_type != "failed_task_waived":
+                continue
+            task_id = str(record.metadata.get("task_id") or "")
+            if not task_id:
+                continue
+            waivers_by_task[task_id] = {
+                "record_id": record.id,
+                "rationale": record.content,
+                "created_at": record.created_at.isoformat(),
+                "disposition": record.metadata.get("disposition"),
+            }
+        counts = {"completed": 0, "active": 0, "pending": 0, "failed": 0}
+        for task in linked_tasks:
+            status = task.status.value
+            if status in counts:
+                counts[status] += 1
+        failed_entries: list[dict[str, object]] = []
+        unresolved_failed_count = 0
+        waived_failed_count = 0
+        for task in linked_tasks:
+            if task.status.value != "failed":
+                continue
+            waiver = waivers_by_task.get(task.id)
+            metadata = task.external_ref_metadata if isinstance(task.external_ref_metadata, dict) else {}
+            disposition = metadata.get("failed_task_disposition") if isinstance(metadata.get("failed_task_disposition"), dict) else None
+            effective_status = "waived" if waiver or (disposition and str(disposition.get("kind") or "") == "waive_obsolete") else "blocking"
+            if effective_status == "waived":
+                waived_failed_count += 1
+            else:
+                unresolved_failed_count += 1
+            failed_entries.append(
+                {
+                    "task_id": task.id,
+                    "title": task.title,
+                    "objective": task.objective,
+                    "status": task.status.value,
+                    "effective_status": effective_status,
+                    "disposition": disposition,
+                    "waiver": waiver,
+                }
+            )
+        review_packets: list[dict[str, object]] = []
+        for task in linked_tasks:
+            promotions = promotions_by_task.get(task.id) or []
+            if not promotions:
+                continue
+            latest = promotions[-1]
+            validators = latest.get("details", {}).get("validators", []) if isinstance(latest.get("details"), dict) else []
+            issues = [
+                issue
+                for validator in validators if isinstance(validator, dict)
+                for issue in validator.get("issues", [])
+                if isinstance(issue, dict)
+            ]
+            review_packets.append(
+                {
+                    "source": "task_promotion",
+                    "task_id": task.id,
+                    "task_title": task.title,
+                    "task_status": task.status.value,
+                    "latest": latest,
+                    "all": promotions,
+                    "issue_count": len(issues),
+                }
+            )
+        ready = counts["active"] == 0 and counts["pending"] == 0 and unresolved_failed_count == 0
+        remediation_tasks_by_review: dict[str, list[Task]] = {}
+        for task in linked_tasks:
+            metadata = task.external_ref_metadata if isinstance(task.external_ref_metadata, dict) else {}
+            remediation = metadata.get("objective_review_remediation") if isinstance(metadata.get("objective_review_remediation"), dict) else None
+            review_id = str(remediation.get("review_id") or "") if remediation else ""
+            if not review_id:
+                continue
+            remediation_tasks_by_review.setdefault(review_id, []).append(task)
+        round_rows: list[dict[str, object]] = []
+        start_order = sorted(review_start_records, key=lambda record: record.created_at)
+        for idx, start in enumerate(start_order, start=1):
+            review_id = str(start.metadata.get("review_id") or start.id)
+            packets = [
+                {
+                    "source": "objective_review",
+                    "review_id": review_id,
+                    "reviewer": str(record.metadata.get("reviewer") or ""),
+                    "dimension": str(record.metadata.get("dimension") or ""),
+                    "verdict": str(record.metadata.get("verdict") or ""),
+                    "progress_status": str(record.metadata.get("progress_status") or "not_applicable"),
+                    "severity": str(record.metadata.get("severity") or ""),
+                    "owner_scope": str(record.metadata.get("owner_scope") or ""),
+                    "summary": record.content,
+                    "findings": list(record.metadata.get("findings") or []),
+                    "evidence": list(record.metadata.get("evidence") or []),
+                    "closure_criteria": str(record.metadata.get("closure_criteria") or ""),
+                    "evidence_required": str(record.metadata.get("evidence_required") or ""),
+                    "repeat_reason": str(record.metadata.get("repeat_reason") or ""),
+                    "backend": record.metadata.get("backend"),
+                    "created_at": record.created_at.isoformat(),
+                }
+                for record in review_packet_records
+                if str(record.metadata.get("review_id") or "") == review_id
+            ]
+            completed = next(
+                (record for record in reversed(review_completed_records) if str(record.metadata.get("review_id") or "") == review_id),
+                None,
+            )
+            failed = next(
+                (record for record in reversed(review_failed_records) if str(record.metadata.get("review_id") or "") == review_id),
+                None,
+            )
+            verdict_counts = {"pass": 0, "concern": 0, "remediation_required": 0}
+            for packet in packets:
+                verdict = str(packet.get("verdict") or "")
+                if verdict in verdict_counts:
+                    verdict_counts[verdict] += 1
+            remediation_tasks = remediation_tasks_by_review.get(review_id, [])
+            remediation_counts = {"total": len(remediation_tasks), "completed": 0, "active": 0, "pending": 0, "failed": 0}
+            for task in remediation_tasks:
+                if task.status.value in remediation_counts:
+                    remediation_counts[task.status.value] += 1
+            needs_remediation = verdict_counts["concern"] > 0 or verdict_counts["remediation_required"] > 0
+            status = "running"
+            if failed is not None:
+                status = "failed"
+            elif completed is not None:
+                if needs_remediation:
+                    if remediation_counts["active"] > 0 or remediation_counts["pending"] > 0:
+                        status = "remediating"
+                    elif remediation_counts["total"] > 0:
+                        status = "ready_for_rerun"
+                    else:
+                        status = "needs_remediation"
+                else:
+                    status = "passed"
+            round_activity = [start.created_at]
+            round_activity.extend(record.created_at for record in review_packet_records if str(record.metadata.get("review_id") or "") == review_id)
+            if completed is not None:
+                round_activity.append(completed.created_at)
+            if failed is not None:
+                round_activity.append(failed.created_at)
+            round_rows.append(
+                {
+                    "review_id": review_id,
+                    "round_number": idx,
+                    "status": status,
+                    "started_at": start.created_at.isoformat(),
+                    "completed_at": completed.created_at.isoformat() if completed is not None else "",
+                    "failed_at": failed.created_at.isoformat() if failed is not None else "",
+                    "last_activity_at": max(round_activity).isoformat() if round_activity else "",
+                    "packet_count": len(packets),
+                    "verdict_counts": verdict_counts,
+                    "packets": sorted(
+                        packets,
+                        key=lambda item: (str(item.get("created_at") or ""), str(item.get("dimension") or "")),
+                        reverse=True,
+                    ),
+                    "remediation_counts": remediation_counts,
+                    "remediation_tasks": [
+                        {"id": task.id, "title": task.title, "status": task.status.value}
+                        for task in sorted(remediation_tasks, key=lambda item: item.created_at)
+                    ],
+                    "needs_remediation": needs_remediation,
+                }
+            )
+        review_rounds = sorted(round_rows, key=lambda item: int(item.get("round_number") or 0), reverse=True)
+        latest_round = review_rounds[0] if review_rounds else None
+        objective_review_packets = list(latest_round.get("packets") or []) if isinstance(latest_round, dict) else []
+        all_review_packets = objective_review_packets + review_packets
+        all_review_packets.sort(
+            key=lambda item: (
+                str(
+                    item.get("created_at")
+                    or (item.get("latest") or {}).get("created_at")
+                    or ""
+                ),
+                str(item.get("task_title") or item.get("reviewer") or ""),
+            ),
+            reverse=True,
+        )
+        verdict_counts = {"pass": 0, "concern": 0, "remediation_required": 0}
+        for packet in objective_review_packets:
+            verdict = str(packet.get("verdict") or "").strip()
+            if verdict in verdict_counts:
+                verdict_counts[verdict] += 1
+        latest_round_status = str(latest_round.get("status") or "") if isinstance(latest_round, dict) else ""
+        can_start_new_round = bool(ready) and (
+            latest_round is None
+            or latest_round_status in {"ready_for_rerun", "failed"}
+            or (
+                latest_round_status == "passed"
+                and bool(latest_round.get("completed_at"))
+                and objective_review_state.get("review_id") != str(latest_round.get("review_id") or "")
+            )
+        )
+        review_clear = ready and bool(latest_round) and verdict_counts["concern"] == 0 and verdict_counts["remediation_required"] == 0
+        phase = "promotion_review_pending" if ready and not latest_round else "promotion_review_active" if latest_round else "execution"
+        if counts["active"] > 0 or counts["pending"] > 0:
+            next_action = "Review findings were turned into remediation tasks. Continue in Atomic while the harness works through them."
+            phase = "execution"
+        elif unresolved_failed_count:
+            next_action = "Resolve or disposition the remaining failed tasks before promotion can proceed."
+            phase = "remediation_required"
+        elif verdict_counts["remediation_required"] > 0 or verdict_counts["concern"] > 0:
+            concern_total = verdict_counts["remediation_required"] + verdict_counts["concern"]
+            if latest_round_status == "ready_for_rerun":
+                next_action = f"Remediation from promotion review round {latest_round.get('round_number')} is complete. The harness should start the next review round now."
+                phase = "promotion_review_pending"
+            else:
+                next_action = f"Promotion review found {concern_total} issue(s). Route remediation back into Atomic before promoting."
+                phase = "remediation_required"
+        elif latest_round_status == "running":
+            next_action = f"Promotion review round {latest_round.get('round_number')} is running. Reviewer packets will appear as each agent finishes."
+            phase = "promotion_review_active"
+        elif latest_round:
+            next_action = "Review the latest promotion packets and LLM affirmation details, then decide whether to promote the objective."
+        else:
+            next_action = "Execution is complete and no blockers remain. Automatic promotion review should begin next."
+        recommended_view = "promotion-review" if ready and phase != "execution" else "atomic"
+        return {
+            "ready": ready,
+            "review_clear": review_clear,
+            "phase": phase,
+            "recommended_view": recommended_view,
+            "objective_review_state": objective_review_state,
+            "verdict_counts": verdict_counts,
+            "task_counts": counts,
+            "waived_failed_count": waived_failed_count,
+            "unresolved_failed_count": unresolved_failed_count,
+            "review_packet_count": len(all_review_packets),
+            "objective_review_packet_count": sum(int((round_row.get("packet_count") or 0)) for round_row in review_rounds),
+            "review_rounds": review_rounds,
+            "can_start_new_round": can_start_new_round,
+            "review_packets": all_review_packets,
+            "failed_tasks": failed_entries,
+            "next_action": next_action,
+        }
 
     def _build_responder_context_packet(
         self,
@@ -7186,6 +9056,9 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
         if parsed.path == "/atomic":
             self._send_html(_ATOMIC_HTML)
             return
+        if parsed.path == "/promotion-review":
+            self._send_html(_PROMOTION_REVIEW_HTML)
+            return
         if parsed.path == "/workspace":
             self._send_html(_FULL_UI_HTML)
             return
@@ -7519,8 +9392,13 @@ def start_ui_server(ctx, *, host: str, port: int, open_browser: bool, project_re
         while not _stop_change_detector.wait(timeout=3):
             try:
                 tasks = data_service.store.list_tasks()
+                records = data_service.store.list_context_records()
+                recent_records = records[-20:]
                 sig = ";".join(
                     f"{t.id}:{t.status.value}:{t.updated_at.isoformat()}" for t in tasks
+                )
+                sig += "|ctx:" + ";".join(
+                    f"{r.id}:{r.record_type}:{r.created_at.isoformat()}" for r in recent_records
                 )
                 if last_signature is not None and sig != last_signature:
                     event_bus.publish("workspace-changed")
@@ -7557,6 +9435,7 @@ def _auto_start_supervisors(data_service: HarnessUIDataService, ctx) -> None:
         for objective in data_service.store.list_objectives(project.id):
             try:
                 data_service._maybe_resume_atomic_generation(objective.id)
+                data_service._maybe_resume_objective_review(objective.id)
             except Exception:
                 pass
         # Start supervisor if there's work to do
