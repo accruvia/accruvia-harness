@@ -450,6 +450,20 @@ class PromotionService:
             )
         return PromotionReviewResult(promotion=promotion, follow_on_task_id=follow_on_task_id)
 
+    def decompose_review_findings_to_atomic_tasks(
+        self,
+        *,
+        parent_task_id: str,
+        source_run_id: str,
+        findings: list[dict[str, object]],
+    ) -> list[str]:
+        created = self.task_service.create_tasks_from_review_findings(
+            parent_task_id=parent_task_id,
+            source_run_id=source_run_id,
+            findings=findings,
+        )
+        return [task.id for task in created]
+
     def _select_run(self, task_id: str, run_id: str | None):
         if run_id is not None:
             run = self.store.get_run(run_id)

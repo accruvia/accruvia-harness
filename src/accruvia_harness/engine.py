@@ -218,6 +218,7 @@ class HarnessEngine:
         external_ref_type: str | None,
         external_ref_id: str | None,
         objective_id: str | None = None,
+        external_ref_metadata: dict[str, object] | None = None,
         validation_profile: str = "generic",
         validation_mode: str | None = None,
         scope: dict[str, object] | None = None,
@@ -236,6 +237,7 @@ class HarnessEngine:
             source_run_id=source_run_id,
             external_ref_type=external_ref_type,
             external_ref_id=external_ref_id,
+            external_ref_metadata=external_ref_metadata,
             validation_profile=validation_profile,
             validation_mode=validation_mode,
             scope=scope,
@@ -506,6 +508,7 @@ class HarnessEngine:
         strategy: str | None = None,
         max_attempts: int | None = None,
         required_artifacts: list[str] | None = None,
+        external_ref_metadata_overrides: dict[str, object] | None = None,
     ):
         return self.tasks.create_follow_on_task(
             parent_task_id=parent_task_id,
@@ -516,6 +519,7 @@ class HarnessEngine:
             strategy=strategy,
             max_attempts=max_attempts,
             required_artifacts=required_artifacts,
+            external_ref_metadata_overrides=external_ref_metadata_overrides,
         )
 
     def review_promotion(

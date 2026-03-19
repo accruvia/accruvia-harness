@@ -15,9 +15,12 @@ from accruvia_harness.domain import (
     MermaidArtifact,
     MermaidStatus,
     Objective,
+    ObjectiveStatus,
     Project,
     PromotionMode,
     RepoProvider,
+    Run,
+    RunStatus,
     TaskStatus,
     WorkspacePolicy,
     new_id,
@@ -27,6 +30,7 @@ from accruvia_harness.llm import build_llm_router
 from accruvia_harness.policy import DecideResult, WorkResult
 from accruvia_harness.services.promotion_service import PromotionService
 from accruvia_harness.services.repository_promotion_service import RepositoryPromotionService
+from accruvia_harness.services.objective_promotion_service import ObjectivePromotionService
 from accruvia_harness.project_adapters import ProjectAdapterRegistry
 from accruvia_harness.workers import LocalArtifactWorker
 from accruvia_harness.store import SQLiteHarnessStore
@@ -1011,6 +1015,308 @@ class HarnessEngineTests(unittest.TestCase):
         self.assertEqual(task.id, follow_on.parent_task_id)
         self.assertEqual(run.id, follow_on.source_run_id)
         self.assertEqual("463", follow_on.external_ref_id)
+
+    def test_create_follow_on_task_accepts_traceability_metadata_for_objective_remediation(self) -> None:
+        objective = Objective(
+            id=new_id("objective"),
+            project_id=self.project_id,
+            title="Promotion review",
+            summary="Track remediation under the same objective",
+        )
+        self.store.create_objective(objective)
+        task = self.engine.create_task_with_policy(
+            project_id=self.project_id,
+            objective_id=objective.id,
+            title="Parent task",
+            objective="Generate follow-on work",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type="gitlab_issue",
+            external_ref_id="463",
+            external_ref_metadata={"labels": ["bug"]},
+            strategy="baseline",
+            max_attempts=2,
+            required_artifacts=["plan", "report"],
+        )
+        run = Run(
+            id=new_id("run"),
+            task_id=task.id,
+            status=RunStatus.COMPLETED,
+            attempt=1,
+            summary="Synthetic parent run for follow-on lineage testing.",
+        )
+        self.store.create_run(run)
+
+        follow_on = self.engine.create_follow_on_task(
+            parent_task_id=task.id,
+            source_run_id=run.id,
+            title="Review remediation task",
+            objective="Attach review traceability metadata",
+            external_ref_metadata_overrides={
+                "promotion_remediation": {
+                    "finding_ids": ["finding_123"],
+                    "review_round_id": "review_round_001",
+                    "dimension_name": "security",
+                }
+            },
+        )
+
+        self.assertEqual(task.objective_id, follow_on.objective_id)
+        self.assertEqual(task.id, follow_on.parent_task_id)
+        self.assertEqual(run.id, follow_on.source_run_id)
+        self.assertEqual("463", follow_on.external_ref_id)
+        self.assertEqual(["bug"], follow_on.external_ref_metadata["labels"])
+        self.assertEqual(
+            {
+                "finding_ids": ["finding_123"],
+                "review_round_id": "review_round_001",
+                "dimension_name": "security",
+            },
+            follow_on.external_ref_metadata["promotion_remediation"],
+        )
+
+    def test_create_tasks_from_review_findings_creates_same_objective_follow_on_tasks(self) -> None:
+        objective = Objective(
+            id=new_id("objective"),
+            project_id=self.project_id,
+            title="Promotion review",
+            summary="Track remediation under the same objective",
+        )
+        self.store.create_objective(objective)
+        parent = self.engine.create_task_with_policy(
+            project_id=self.project_id,
+            objective_id=objective.id,
+            title="Parent failed task",
+            objective="Review failed-task splitability",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=2,
+            required_artifacts=["plan", "report"],
+        )
+        run = Run(id=new_id("run"), task_id=parent.id, status=RunStatus.COMPLETED, attempt=1, summary="source")
+        self.store.create_run(run)
+
+        created = self.engine.tasks.create_tasks_from_review_findings(
+            parent_task_id=parent.id,
+            source_run_id=run.id,
+            findings=[
+                {
+                    "title": "Split finding A",
+                    "objective": "Address finding A",
+                    "finding_ids": ["finding_a"],
+                    "review_round_id": "round_1",
+                    "dimension_name": "security",
+                    "summary": "Need narrower work",
+                    "remediation_hints": ["Keep it bounded"],
+                },
+                {
+                    "title": "Split finding B",
+                    "objective": "Address finding B",
+                    "finding_ids": ["finding_b"],
+                    "review_round_id": "round_1",
+                    "dimension_name": "qa",
+                },
+            ],
+        )
+
+        self.assertEqual(2, len(created))
+        self.assertTrue(all(task.objective_id == objective.id for task in created))
+        self.assertEqual(["finding_a"], created[0].external_ref_metadata["promotion_remediation"]["finding_ids"])
+        self.assertEqual("round_1", created[0].external_ref_metadata["promotion_remediation"]["review_round_id"])
+
+    def test_apply_failed_task_disposition_handles_retry_split_manual_and_waive(self) -> None:
+        objective = Objective(
+            id=new_id("objective"),
+            project_id=self.project_id,
+            title="Promotion review",
+            summary="Track failed-task handling under the same objective",
+        )
+        self.store.create_objective(objective)
+
+        retry_task = self.engine.create_task_with_policy(
+            project_id=self.project_id,
+            objective_id=objective.id,
+            title="Retry task",
+            objective="Retry path",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=2,
+            required_artifacts=["plan", "report"],
+        )
+        self.store.update_task_status(retry_task.id, TaskStatus.FAILED)
+        retry_result = self.engine.tasks.apply_failed_task_disposition(
+            task_id=retry_task.id,
+            disposition="retry_as_is",
+            rationale="Retry after narrowing metadata.",
+            attempt_metadata={"atomicity_narrowing": {"category": "policy_self_modification"}},
+        )
+        retry_after = self.store.get_task(retry_task.id)
+        self.assertEqual({"status": "pending", "task_id": retry_task.id}, retry_result)
+        self.assertEqual(TaskStatus.PENDING, retry_after.status if retry_after else None)
+        self.assertIn("atomicity_narrowing", retry_after.attempt_metadata if retry_after else {})
+
+        split_task = self.engine.create_task_with_policy(
+            project_id=self.project_id,
+            objective_id=objective.id,
+            title="Split task",
+            objective="Split path",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=2,
+            required_artifacts=["plan", "report"],
+        )
+        split_run = Run(id=new_id("run"), task_id=split_task.id, status=RunStatus.BLOCKED, attempt=1, summary="blocked")
+        self.store.create_run(split_run)
+        self.store.update_task_status(split_task.id, TaskStatus.FAILED)
+        split_result = self.engine.tasks.apply_failed_task_disposition(
+            task_id=split_task.id,
+            disposition="split_into_narrower_tasks",
+            rationale="Task is splittable.",
+            source_run_id=split_run.id,
+            findings=[{"title": "Narrow split", "objective": "Do the narrow thing", "finding_ids": ["finding_1"]}],
+        )
+        self.assertEqual("split", split_result["status"])
+        self.assertEqual(1, len(split_result["task_ids"]))
+
+        manual_task = self.engine.create_task_with_policy(
+            project_id=self.project_id,
+            objective_id=objective.id,
+            title="Manual task",
+            objective="Manual path",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=2,
+            required_artifacts=["plan", "report"],
+        )
+        manual_run = Run(id=new_id("run"), task_id=manual_task.id, status=RunStatus.BLOCKED, attempt=1, summary="blocked")
+        self.store.create_run(manual_run)
+        self.store.update_task_status(manual_task.id, TaskStatus.FAILED)
+        manual_result = self.engine.tasks.apply_failed_task_disposition(
+            task_id=manual_task.id,
+            disposition="allow_manual_operator_implementation",
+            rationale="Needs operator handling.",
+            source_run_id=manual_run.id,
+            operator_title="Manual operator follow-on",
+            operator_objective="Complete the control-plane change manually.",
+        )
+        manual_follow_on = self.store.get_task(manual_result["task_id"])
+        self.assertEqual("manual", manual_result["status"])
+        self.assertEqual("operator_ergonomics", manual_follow_on.strategy if manual_follow_on else None)
+        self.assertTrue(bool(manual_follow_on.external_ref_metadata.get("operator_owned")) if manual_follow_on else False)
+
+        waive_task = self.engine.create_task_with_policy(
+            project_id=self.project_id,
+            objective_id=objective.id,
+            title="Waive task",
+            objective="Waive path",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=2,
+            required_artifacts=["plan", "report"],
+        )
+        self.store.update_task_status(waive_task.id, TaskStatus.FAILED)
+        waive_result = self.engine.tasks.apply_failed_task_disposition(
+            task_id=waive_task.id,
+            disposition="waive_obsolete",
+            rationale="Superseded by manual implementation.",
+        )
+        waiver_records = self.store.list_context_records(objective_id=objective.id, record_type="failed_task_waived")
+        self.assertEqual({"status": "waived", "task_id": waive_task.id}, waive_result)
+        self.assertEqual(1, len(waiver_records))
+
+    def test_promotion_service_decompose_review_findings_to_atomic_tasks_returns_created_ids(self) -> None:
+        objective = Objective(
+            id=new_id("objective"),
+            project_id=self.project_id,
+            title="Promotion review",
+            summary="Track remediation under the same objective",
+        )
+        self.store.create_objective(objective)
+        parent = self.engine.create_task_with_policy(
+            project_id=self.project_id,
+            objective_id=objective.id,
+            title="Parent failed task",
+            objective="Review failed-task splitability",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=2,
+            required_artifacts=["plan", "report"],
+        )
+        run = Run(id=new_id("run"), task_id=parent.id, status=RunStatus.COMPLETED, attempt=1, summary="source")
+        self.store.create_run(run)
+        service = PromotionService(store=self.store, task_service=self.engine.tasks, workspace_root=self.engine.workspace_root)
+
+        created_ids = service.decompose_review_findings_to_atomic_tasks(
+            parent_task_id=parent.id,
+            source_run_id=run.id,
+            findings=[{"title": "Narrow split", "objective": "Do the narrow thing", "finding_ids": ["finding_1"]}],
+        )
+
+        self.assertEqual(1, len(created_ids))
+        created = self.store.get_task(created_ids[0])
+        self.assertEqual(objective.id, created.objective_id if created else None)
+
+    def test_return_objective_to_execution_loop_reopens_objective_after_remediation_tasks(self) -> None:
+        objective = Objective(
+            id=new_id("objective"),
+            project_id=self.project_id,
+            title="Promotion review",
+            summary="Return same objective to execution after remediation",
+        )
+        self.store.create_objective(objective)
+        remediation = self.engine.create_task_with_policy(
+            project_id=self.project_id,
+            objective_id=objective.id,
+            title="Remediation task",
+            objective="Resume execution",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=2,
+            required_artifacts=["plan", "report"],
+        )
+        self.store.update_task_status(remediation.id, TaskStatus.PENDING)
+        service = ObjectivePromotionService(self.store)
+
+        status = service._return_objective_to_execution_loop(
+            objective.id,
+            source_task_id=remediation.id,
+            source_run_id="run_remediation",
+        )
+
+        objective_after = self.store.get_objective(objective.id)
+        receipts = self.store.list_context_records(objective_id=objective.id, record_type="objective_execution_reentered")
+        self.assertEqual(ObjectiveStatus.PLANNING, status)
+        self.assertEqual(ObjectiveStatus.PLANNING, objective_after.status if objective_after else None)
+        self.assertEqual(1, len(receipts))
 
     def test_process_next_task_uses_and_releases_lease(self) -> None:
         task = self.engine.import_issue_task(
