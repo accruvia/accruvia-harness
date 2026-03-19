@@ -98,7 +98,13 @@ class FakeLLMRouter:
                 response_text=response_text,
                 prompt_path=prompt_path,
                 response_path=response_path,
-                diagnostics={},
+                diagnostics={
+                    "prompt_tokens": 120,
+                    "completion_tokens": 80,
+                    "total_tokens": 200,
+                    "cost_usd": 0.0123,
+                    "latency_ms": 987,
+                },
             ),
             "fake-ui-llm",
         )
@@ -120,7 +126,13 @@ class InvalidObjectiveReviewRouter(FakeLLMRouter):
                 response_text=response_text,
                 prompt_path=prompt_path,
                 response_path=response_path,
-                diagnostics={},
+                diagnostics={
+                    "prompt_tokens": 120,
+                    "completion_tokens": 80,
+                    "total_tokens": 200,
+                    "cost_usd": 0.0123,
+                    "latency_ms": 987,
+                },
             ),
             "fake-ui-llm",
         )
@@ -817,6 +829,8 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         self.assertEqual(2, review["objective_review_packet_count"])
         self.assertEqual("objective_review", review["review_packets"][0]["source"])
         self.assertIn(review["review_packets"][0]["dimension"], {"unit_test_coverage", "code_structure"})
+        self.assertEqual(200, review["review_packets"][0]["llm_usage"]["total_tokens"])
+        self.assertAlmostEqual(0.0123, review["review_packets"][0]["llm_usage"]["cost_usd"])
         self.assertEqual(1, len(review["review_rounds"]))
         self.assertEqual(1, review["review_rounds"][0]["round_number"])
         self.assertEqual("remediating", review["review_rounds"][0]["status"])
@@ -999,6 +1013,39 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         self.assertEqual("objective review evidence", qa_packet["owner_scope"])
         self.assertTrue(qa_packet["closure_criteria"])
         self.assertTrue(qa_packet["evidence_required"])
+
+    def test_validate_objective_review_packet_rejects_repeated_artifact_concern_when_completed_round_exists(self) -> None:
+        objective_payload = {
+            "review_rounds": [
+                {
+                    "completed_at": "2026-03-19T20:00:00+00:00",
+                    "packet_count": 7,
+                    "status": "ready_for_rerun",
+                    "verdict_counts": {"pass": 4, "concern": 3, "remediation_required": 0},
+                    "remediation_counts": {"total": 3, "completed": 3, "active": 0, "pending": 0, "failed": 0},
+                }
+            ]
+        }
+
+        validated = self.service._validate_objective_review_packet(
+            {
+                "reviewer": "Board reviewer",
+                "dimension": "intent_fidelity",
+                "verdict": "concern",
+                "progress_status": "improving",
+                "severity": "medium",
+                "owner_scope": "objective review orchestration",
+                "summary": "The round is improving but still lacks proof.",
+                "findings": ["The board still wants the completed round artifact."],
+                "evidence": ["The latest round just finished."],
+                "closure_criteria": "Record one completed objective review round for this objective with at least 7 persisted reviewer packets, non-zero verdict_counts, and remediation linkage.",
+                "evidence_required": "A persisted objective review artifact for round 8 or later showing packets[], verdict_counts, completed_at, and remediation linkage.",
+                "repeat_reason": "Repeated because the board still wants the completed round artifact.",
+            },
+            objective_payload=objective_payload,
+        )
+
+        self.assertIsNone(validated)
 
     def test_stale_objective_review_is_interrupted_and_restarted(self) -> None:
         fake_router = FakeLLMRouter("{}")

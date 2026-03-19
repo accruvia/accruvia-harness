@@ -1274,6 +1274,28 @@ body[data-view="atomic"] .conversation-form {
   font-size: 0.86rem;
 }
 
+.promotion-requirements {
+  display: grid;
+  gap: 0.65rem;
+  margin-top: 0.75rem;
+}
+
+.promotion-requirement-block {
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--accent);
+  border-radius: 12px;
+  background: #fffdf8;
+  padding: 0.7rem 0.8rem;
+}
+
+.promotion-requirement-body {
+  margin-top: 0.28rem;
+  font-size: 0.9rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .promotion-packet-issues {
   margin: 0.6rem 0 0;
   padding-left: 1rem;
@@ -3650,18 +3672,39 @@ function renderPromotionReview() {
     const evidence = Array.isArray(packet.evidence) ? packet.evidence : [];
     const backend = packet.backend || affirmation.backend || '';
     const progressStatus = String(packet.progress_status || '').trim();
+    const closureCriteria = String(packet.closure_criteria || '').trim();
+    const evidenceRequired = String(packet.evidence_required || '').trim();
+    const repeatReason = String(packet.repeat_reason || '').trim();
+    const ownerScope = String(packet.owner_scope || '').trim();
+    const severity = String(packet.severity || '').trim();
+    const llmUsage = packet.llm_usage && typeof packet.llm_usage === 'object' ? packet.llm_usage : {};
+    const llmUsageBits = [];
+    if ((llmUsage.total_tokens || 0) > 0) llmUsageBits.push(`${llmUsage.total_tokens} tokens`);
+    if ((llmUsage.cost_usd || 0) > 0) llmUsageBits.push(`$${Number(llmUsage.cost_usd).toFixed(4)}`);
+    if ((llmUsage.latency_ms || 0) > 0) llmUsageBits.push(`${Math.round(Number(llmUsage.latency_ms))}ms`);
     return `
       <article class="promotion-packet">
         <div class="promotion-packet-title">${escapeHtml(title)}</div>
         <div class="promotion-packet-meta">
           <span class="pill promotion-verdict-pill ${status === 'approved' || status === 'pass' ? 'status-complete' : status === 'rejected' || status === 'remediation_required' ? 'status-failed' : 'status-running'}">${escapeHtml(verdictLabel(status))}</span>
           ${reviewerLabel ? `<span class="pill promotion-opinion-pill">${escapeHtml(reviewerLabel)}</span>` : ''}
+          ${severity ? `<span class="pill promotion-opinion-pill">${escapeHtml(`Severity: ${severity}`)}</span>` : ''}
+          ${ownerScope ? `<span class="pill promotion-opinion-pill">${escapeHtml(`Scope: ${ownerScope}`)}</span>` : ''}
           ${progressLabel(progressStatus) ? `<span class="pill promotion-opinion-pill ${progressStatus === 'resolved' ? 'status-complete' : progressStatus === 'improving' ? 'status-running' : progressStatus === 'still_blocking' || progressStatus === 'new_concern' ? 'status-failed' : ''}">${escapeHtml(progressLabel(progressStatus))}</span>` : ''}
           ${subStatus ? `<span class="pill">${escapeHtml(subStatus)}</span>` : ''}
           ${recordedAt ? `<span class="pill">Recorded ${escapeHtml(formatRelativeTime(recordedAt))}</span>` : ''}
+          ${llmUsageBits.length ? `<span class="pill">${escapeHtml(llmUsageBits.join(' · '))}</span>` : ''}
         </div>
         <div class="promotion-packet-summary">${escapeHtml(rationale)}</div>
         ${backend ? `<div class="hint">Model: ${escapeHtml(backend)}</div>` : ''}
+        ${(closureCriteria || evidenceRequired)
+          ? `<div class="promotion-requirements">
+              ${closureCriteria ? `<div class="promotion-requirement-block"><div class="label">Closure criteria</div><div class="promotion-requirement-body">${escapeHtml(closureCriteria)}</div></div>` : ''}
+              ${evidenceRequired ? `<div class="promotion-requirement-block"><div class="label">Evidence required</div><div class="promotion-requirement-body">${escapeHtml(evidenceRequired)}</div></div>` : ''}
+              ${repeatReason ? `<div class="promotion-requirement-block"><div class="label">Why still open</div><div class="promotion-requirement-body">${escapeHtml(repeatReason)}</div></div>` : ''}
+            </div>`
+          : ''
+        }
         ${issues.length ? `<ul class="promotion-packet-issues">${issues.map((issue) => `<li>${escapeHtml(issue.summary || issue.code || 'Review issue')}</li>`).join('')}</ul>` : '<div class="hint">No validator issues recorded on the latest packet.</div>'}
         ${evidence.length ? `<ul class="promotion-packet-evidence">${evidence.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>` : ''}
       </article>
@@ -3817,6 +3860,11 @@ function renderPromotionReview() {
         if (!selectedPacket) return '';
         const reviewer = humanizeReviewer(selectedPacket.reviewer, selectedPacket.dimension);
         const progress = progressLabel(selectedPacket.progress_status || '');
+        const llmUsage = selectedPacket.llm_usage && typeof selectedPacket.llm_usage === 'object' ? selectedPacket.llm_usage : {};
+        const usageSummary = [];
+        if ((llmUsage.total_tokens || 0) > 0) usageSummary.push(`${llmUsage.total_tokens} tokens`);
+        if ((llmUsage.cost_usd || 0) > 0) usageSummary.push(`$${Number(llmUsage.cost_usd).toFixed(4)}`);
+        if ((llmUsage.latency_ms || 0) > 0) usageSummary.push(`${Math.round(Number(llmUsage.latency_ms))}ms`);
         return `
           <div class="promotion-report-card-detail">
             <div class="promotion-section-title">
@@ -3825,9 +3873,20 @@ function renderPromotionReview() {
             </div>
             <div class="promotion-packet-meta">
               <span class="pill promotion-verdict-pill ${selectedPacket.verdict === 'pass' ? 'status-complete' : selectedPacket.verdict === 'remediation_required' ? 'status-failed' : 'status-running'}">${escapeHtml(verdictEmoji(selectedPacket.verdict || ''))}</span>
+              ${selectedPacket.severity ? `<span class="pill promotion-opinion-pill">${escapeHtml(`Severity: ${selectedPacket.severity}`)}</span>` : ''}
+              ${selectedPacket.owner_scope ? `<span class="pill promotion-opinion-pill">${escapeHtml(`Scope: ${selectedPacket.owner_scope}`)}</span>` : ''}
               ${progress ? `<span class="pill ${selectedPacket.progress_status === 'resolved' ? 'status-complete' : selectedPacket.progress_status === 'improving' ? 'status-running' : 'status-failed'}">${escapeHtml(progress)}</span>` : ''}
+              ${usageSummary.length ? `<span class="pill">${escapeHtml(usageSummary.join(' · '))}</span>` : ''}
             </div>
             <div class="promotion-packet-summary">${escapeHtml(selectedPacket.summary || 'No summary recorded.')}</div>
+            ${(selectedPacket.closure_criteria || selectedPacket.evidence_required || selectedPacket.repeat_reason)
+              ? `<div class="promotion-requirements">
+                  ${selectedPacket.closure_criteria ? `<div class="promotion-requirement-block"><div class="label">Closure criteria</div><div class="promotion-requirement-body">${escapeHtml(selectedPacket.closure_criteria)}</div></div>` : ''}
+                  ${selectedPacket.evidence_required ? `<div class="promotion-requirement-block"><div class="label">Evidence required</div><div class="promotion-requirement-body">${escapeHtml(selectedPacket.evidence_required)}</div></div>` : ''}
+                  ${selectedPacket.repeat_reason ? `<div class="promotion-requirement-block"><div class="label">Why still open</div><div class="promotion-requirement-body">${escapeHtml(selectedPacket.repeat_reason)}</div></div>` : ''}
+                </div>`
+              : ''
+            }
             ${(Array.isArray(selectedPacket.findings) && selectedPacket.findings.length)
               ? `<ul class="promotion-packet-issues">${selectedPacket.findings.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>`
               : ''}
@@ -5927,6 +5986,7 @@ class HarnessUIDataService:
                             "closure_criteria": packet.get("closure_criteria"),
                             "evidence_required": packet.get("evidence_required"),
                             "repeat_reason": packet.get("repeat_reason"),
+                            "llm_usage": packet.get("llm_usage"),
                             "backend": packet.get("backend"),
                             "prompt_path": packet.get("prompt_path"),
                             "response_path": packet.get("response_path"),
@@ -6019,12 +6079,22 @@ class HarnessUIDataService:
             )
             try:
                 result, backend = llm_router.execute(LLMInvocation(task=task, run=run, prompt=prompt, run_dir=run_dir))
-                parsed = self._parse_objective_review_response(result.response_text)
+                parsed = self._parse_objective_review_response(result.response_text, objective_payload=objective_payload)
                 if parsed:
+                    diagnostics = result.diagnostics if isinstance(result.diagnostics, dict) else {}
+                    llm_usage = {
+                        "cost_usd": float(diagnostics.get("cost_usd", 0.0) or 0.0),
+                        "prompt_tokens": int(diagnostics.get("prompt_tokens", 0) or 0),
+                        "completion_tokens": int(diagnostics.get("completion_tokens", 0) or 0),
+                        "total_tokens": int(diagnostics.get("total_tokens", 0) or 0),
+                        "latency_ms": float(diagnostics.get("latency_ms", 0.0) or 0.0),
+                        "shared_invocation": True,
+                    }
                     for packet in parsed:
                         packet["backend"] = backend
                         packet["prompt_path"] = str(result.prompt_path)
                         packet["response_path"] = str(result.response_path)
+                        packet["llm_usage"] = llm_usage
                     return parsed
             except LLMExecutionError:
                 pass
@@ -7689,7 +7759,12 @@ class HarnessUIDataService:
             f"Linked tasks: {json.dumps(tasks_payload, indent=2, sort_keys=True)}\n"
         )
 
-    def _parse_objective_review_response(self, text: str) -> list[dict[str, object]] | None:
+    def _parse_objective_review_response(
+        self,
+        text: str,
+        *,
+        objective_payload: dict[str, object] | None = None,
+    ) -> list[dict[str, object]] | None:
         stripped = text.strip()
         candidates = [stripped]
         fenced = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", stripped, flags=re.DOTALL)
@@ -7706,14 +7781,19 @@ class HarnessUIDataService:
             for item in packets:
                 if not isinstance(item, dict):
                     continue
-                validated = self._validate_objective_review_packet(item)
+                validated = self._validate_objective_review_packet(item, objective_payload=objective_payload)
                 if validated is not None:
                     parsed.append(validated)
             if parsed:
                 return parsed
         return None
 
-    def _validate_objective_review_packet(self, item: dict[str, object]) -> dict[str, object] | None:
+    def _validate_objective_review_packet(
+        self,
+        item: dict[str, object],
+        *,
+        objective_payload: dict[str, object] | None = None,
+    ) -> dict[str, object] | None:
         reviewer = str(item.get("reviewer") or "").strip()
         dimension = str(item.get("dimension") or "").strip()
         verdict = str(item.get("verdict") or "").strip()
@@ -7768,6 +7848,13 @@ class HarnessUIDataService:
             return None
         if any(phrase in lowered_evidence_required for phrase in ("more evidence", "stronger evidence", "better tests", "improve")):
             return None
+        if (
+            objective_payload
+            and progress_status in {"improving", "still_blocking", "resolved"}
+            and self._objective_round_artifact_is_present(objective_payload)
+            and self._packet_requests_round_artifact(evidence_required, closure_criteria)
+        ):
+            return None
         return {
             "reviewer": reviewer,
             "dimension": dimension,
@@ -7782,6 +7869,42 @@ class HarnessUIDataService:
             "evidence_required": evidence_required,
             "repeat_reason": repeat_reason,
         }
+
+    def _objective_round_artifact_is_present(self, objective_payload: dict[str, object]) -> bool:
+        rounds = list(objective_payload.get("review_rounds") or [])
+        if not rounds:
+            return False
+        latest = rounds[0] if isinstance(rounds[0], dict) else {}
+        if not latest:
+            return False
+        packet_count = int(latest.get("packet_count") or 0)
+        completed_at = str(latest.get("completed_at") or "")
+        verdict_counts = latest.get("verdict_counts") if isinstance(latest.get("verdict_counts"), dict) else {}
+        remediation_counts = latest.get("remediation_counts") if isinstance(latest.get("remediation_counts"), dict) else {}
+        terminal_branch_present = (
+            str(latest.get("status") or "") == "passed"
+            or int(remediation_counts.get("total", 0) or 0) > 0
+        )
+        return bool(completed_at) and packet_count >= 7 and sum(int(verdict_counts.get(k, 0) or 0) for k in ("pass", "concern", "remediation_required")) > 0 and terminal_branch_present
+
+    def _packet_requests_round_artifact(self, evidence_required: str, closure_criteria: str) -> bool:
+        text = f"{evidence_required}\n{closure_criteria}".lower()
+        markers = (
+            "completed objective review",
+            "completed objective review run artifact",
+            "persisted objective review artifact",
+            "completed end-to-end objective review",
+            "completed objective review cycle",
+            "completed round",
+            "terminal round state",
+            "completed_at",
+            "persisted reviewer packets",
+            "review start",
+            "terminal review",
+            "review approval",
+            "remediation linkage",
+        )
+        return any(marker in text for marker in markers)
 
     def _deterministic_objective_review_packets(self, objective_payload: dict[str, object]) -> list[dict[str, object]]:
         counts = objective_payload.get("task_counts", {}) if isinstance(objective_payload, dict) else {}
@@ -7802,6 +7925,7 @@ class HarnessUIDataService:
                 "closure_criteria": "" if unresolved == 0 else "All failed tasks for the objective must be explicitly waived, superseded, or resolved so unresolved failed task count is zero.",
                 "evidence_required": "" if unresolved == 0 else "Objective summary shows zero unresolved failed tasks and records explicit failed-task dispositions.",
                 "repeat_reason": "",
+                "llm_usage": {},
             },
             {
                 "reviewer": "QA agent",
@@ -7816,6 +7940,7 @@ class HarnessUIDataService:
                 "closure_criteria": "Objective review packets must cite concrete unit-test or integration-test evidence from completed task artifacts for the QA dimensions.",
                 "evidence_required": "A recorded review packet that references completed-task test artifacts and concludes QA pass or resolved concern status.",
                 "repeat_reason": "",
+                "llm_usage": {},
             },
             {
                 "reviewer": "Structure agent",
@@ -7830,6 +7955,7 @@ class HarnessUIDataService:
                 "closure_criteria": "Historical failed tasks must be superseded or waived with rationale so fragmented partial work is not left unresolved." if waived else "",
                 "evidence_required": "Failed-task records show explicit superseding or waiver rationale for every historical failure." if waived else "",
                 "repeat_reason": "",
+                "llm_usage": {},
             },
         ]
         return packets
@@ -8400,6 +8526,7 @@ class HarnessUIDataService:
                     "closure_criteria": str(record.metadata.get("closure_criteria") or ""),
                     "evidence_required": str(record.metadata.get("evidence_required") or ""),
                     "repeat_reason": str(record.metadata.get("repeat_reason") or ""),
+                    "llm_usage": dict(record.metadata.get("llm_usage") or {}) if isinstance(record.metadata.get("llm_usage"), dict) else {},
                     "backend": record.metadata.get("backend"),
                     "created_at": record.created_at.isoformat(),
                 }
