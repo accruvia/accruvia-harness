@@ -333,17 +333,29 @@ class ProjectTaskStoreMixin:
         """
         with self.connect() as connection:
             rows = connection.execute(
-                "SELECT status FROM tasks WHERE objective_id = ?",
+                "SELECT status, external_ref_metadata_json FROM tasks WHERE objective_id = ?",
                 (objective_id,),
             ).fetchall()
             if not rows:
                 return None
-            statuses = [TaskStatus(row["status"]) for row in rows]
-            if any(s == TaskStatus.ACTIVE for s in statuses):
+            effective_statuses: list[TaskStatus] = []
+            for row in rows:
+                status = TaskStatus(row["status"])
+                metadata = json.loads(row["external_ref_metadata_json"]) if row["external_ref_metadata_json"] else {}
+                disposition = metadata.get("failed_task_disposition") if isinstance(metadata, dict) else None
+                if (
+                    status == TaskStatus.FAILED
+                    and isinstance(disposition, dict)
+                    and str(disposition.get("kind") or "").strip() == "waive_obsolete"
+                ):
+                    effective_statuses.append(TaskStatus.COMPLETED)
+                else:
+                    effective_statuses.append(status)
+            if any(s == TaskStatus.ACTIVE for s in effective_statuses):
                 phase = ObjectiveStatus.EXECUTING
-            elif all(s == TaskStatus.COMPLETED for s in statuses):
+            elif all(s == TaskStatus.COMPLETED for s in effective_statuses):
                 phase = ObjectiveStatus.RESOLVED
-            elif any(s == TaskStatus.PENDING for s in statuses):
+            elif any(s == TaskStatus.PENDING for s in effective_statuses):
                 phase = ObjectiveStatus.PLANNING
             else:
                 # All tasks failed (or mix of completed + failed) — pause

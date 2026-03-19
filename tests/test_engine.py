@@ -1245,6 +1245,39 @@ class HarnessEngineTests(unittest.TestCase):
         self.assertEqual({"status": "waived", "task_id": waive_task.id}, waive_result)
         self.assertEqual(1, len(waiver_records))
 
+    def test_waived_obsolete_failed_task_counts_as_resolved_for_objective_phase(self) -> None:
+        objective = Objective(
+            id=new_id("objective"),
+            project_id=self.project_id,
+            title="Promotion review",
+            summary="Waived obsolete failures should not block objective resolution",
+        )
+        self.store.create_objective(objective)
+        task = self.engine.create_task_with_policy(
+            project_id=self.project_id,
+            objective_id=objective.id,
+            title="Obsolete failed task",
+            objective="Obsolete path",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+        self.store.update_task_status(task.id, TaskStatus.FAILED)
+
+        self.engine.tasks.apply_failed_task_disposition(
+            task_id=task.id,
+            disposition="waive_obsolete",
+            rationale="Superseded by manual implementation.",
+        )
+
+        objective_after = self.store.get_objective(objective.id)
+        self.assertEqual(ObjectiveStatus.RESOLVED, objective_after.status if objective_after else None)
+
     def test_promotion_service_decompose_review_findings_to_atomic_tasks_returns_created_ids(self) -> None:
         objective = Objective(
             id=new_id("objective"),

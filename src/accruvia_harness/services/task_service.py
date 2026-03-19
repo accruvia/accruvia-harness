@@ -332,6 +332,7 @@ class TaskService:
                         metadata=disposition_payload,
                     )
                 )
+                self.store.update_objective_phase(task.objective_id)
             self.store.create_event(
                 Event(
                     id=new_id("event"),
