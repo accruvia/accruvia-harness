@@ -8,6 +8,7 @@ import datetime as dt
 from pathlib import Path
 from types import SimpleNamespace
 
+import accruvia_harness.ui as ui_module
 from accruvia_harness.config import HarnessConfig
 from accruvia_harness.domain import (
     Artifact,
@@ -67,6 +68,12 @@ class FakeLLMRouter:
                             "summary": "Unit coverage should be inspected before promotion.",
                             "findings": ["Review the completed task reports for test evidence."],
                             "evidence": ["64 completed tasks"],
+                            "required_artifact_type": "objective_review_packet",
+                            "artifact_schema": {
+                                "type": "objective_review_packet",
+                                "description": "Persist a QA review packet that cites concrete completed-task test artifacts.",
+                                "required_fields": ["review_id", "reviewer", "dimension", "verdict", "artifacts"],
+                            },
                             "closure_criteria": "A recorded QA review packet must cite completed-task unit-test evidence and conclude the concern is resolved or pass.",
                             "evidence_required": "An objective review packet referencing concrete completed-task test artifacts.",
                             "repeat_reason": "This concern is improving because later rounds add more test evidence, but the board still wants explicit artifact-backed QA closure.",
@@ -138,7 +145,72 @@ class InvalidObjectiveReviewRouter(FakeLLMRouter):
         )
 
 
+class ZeroUsageObjectiveReviewRouter(FakeLLMRouter):
+    def execute(self, invocation, telemetry=None):
+        self.last_prompt = invocation.prompt
+        self.prompts.append(invocation.prompt)
+        invocation.run_dir.mkdir(parents=True, exist_ok=True)
+        prompt_path = invocation.run_dir / "llm_prompt.txt"
+        response_path = invocation.run_dir / "llm_response.md"
+        response_text = json.dumps(
+            {
+                "summary": "Objective review generated.",
+                "packets": [
+                    {
+                        "reviewer": "Ops agent",
+                        "dimension": "devops",
+                        "verdict": "concern",
+                        "progress_status": "improving",
+                        "severity": "medium",
+                        "owner_scope": "telemetry",
+                        "summary": "Need one completed telemetry artifact.",
+                        "findings": ["No completed review telemetry artifact is visible."],
+                        "evidence": ["No terminal review artifact was persisted for the same review_id."],
+                        "required_artifact_type": "review_cycle_telemetry",
+                        "artifact_schema": {
+                            "type": "review_cycle_telemetry",
+                            "description": "Persist one completed review-cycle telemetry export with terminal event evidence.",
+                            "required_fields": ["review_id", "start_event", "packet_persistence_events", "terminal_event", "linked_outcome"],
+                        },
+                        "closure_criteria": "Provide one completed objective-review telemetry artifact.",
+                        "evidence_required": "A persisted telemetry export for one completed review cycle.",
+                        "repeat_reason": "Still waiting on the requested telemetry artifact.",
+                    }
+                ],
+            }
+        )
+        prompt_path.write_text(invocation.prompt, encoding="utf-8")
+        response_path.write_text(response_text, encoding="utf-8")
+        return (
+            LLMExecutionResult(
+                backend="fake-ui-llm",
+                response_text=response_text,
+                prompt_path=prompt_path,
+                response_path=response_path,
+                diagnostics={
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                    "cost_usd": 0.0,
+                    "latency_ms": 0.0,
+                },
+            ),
+            "fake-ui-llm",
+        )
+
+
 class HarnessUIDataServiceTests(unittest.TestCase):
+    def test_objective_create_view_uses_dedicated_page_form(self) -> None:
+        self.assertIn('data-view="objective-create"', ui_module._OBJECTIVE_CREATE_HTML)
+        self.assertIn('page-create-objective-form', ui_module._OBJECTIVE_CREATE_HTML)
+        self.assertIn('page-create-objective-title', ui_module._OBJECTIVE_CREATE_HTML)
+        self.assertNotIn("window.prompt('New objective title:')", ui_module._APP_JS)
+
+    def test_token_performance_view_exists(self) -> None:
+        self.assertIn('data-view="token-performance"', ui_module._TOKEN_PERFORMANCE_HTML)
+        self.assertIn('token-performance-content', ui_module._TOKEN_PERFORMANCE_HTML)
+        self.assertIn('/token-performance', ui_module._APP_JS)
+
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
@@ -834,11 +906,110 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         self.assertEqual(1, len(review["review_rounds"]))
         self.assertEqual(1, review["review_rounds"][0]["round_number"])
         self.assertEqual("remediating", review["review_rounds"][0]["status"])
+        qa_packet = next(packet for packet in review["review_rounds"][0]["packets"] if packet["dimension"] == "unit_test_coverage")
+        self.assertEqual("objective_review_packet", qa_packet["required_artifact_type"])
+        self.assertEqual("objective_review_packet", qa_packet["evidence_contract"]["required_artifact_type"])
+        self.assertTrue(review["review_rounds"][0]["review_cycle_artifact"]["record_id"])
         remediation_tasks = [
             task for task in payload["tasks"]
             if task["objective_id"] == self.objective.id and task["strategy"] == "objective_review_remediation"
         ]
         self.assertEqual(1, len(remediation_tasks))
+        self.assertIn("Produce the required review evidence artifact `objective_review_packet`", remediation_tasks[0]["objective"])
+
+    def test_queue_objective_review_marks_usage_unreported_when_backend_returns_zero_usage(self) -> None:
+        fake_router = ZeroUsageObjectiveReviewRouter("{}")
+        self.ctx.interrogation_service = SimpleNamespace(llm_router=fake_router)
+        self.service = HarnessUIDataService(self.ctx)
+        completed_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            title="Review-ready task",
+            objective="Execution is complete",
+            status=TaskStatus.COMPLETED,
+        )
+        self.store.create_task(completed_task)
+        self.store.update_objective_status(self.objective.id, ObjectiveStatus.RESOLVED)
+
+        self.service.queue_objective_review(self.objective.id, async_mode=False)
+        payload = self.service.project_workspace(self.project.id)
+        objective_payload = next(item for item in payload["objectives"] if item["id"] == self.objective.id)
+        packet = objective_payload["promotion_review"]["review_rounds"][0]["packets"][0]
+        self.assertFalse(packet["llm_usage_reported"])
+        self.assertEqual("unreported", packet["llm_usage_source"])
+
+    def test_project_workspace_infers_historical_zero_usage_packets_are_unreported(self) -> None:
+        review_id = new_id("objective_review")
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="objective_review_started",
+                project_id=self.project.id,
+                objective_id=self.objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Started review.",
+                metadata={"review_id": review_id},
+            )
+        )
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="objective_review_packet",
+                project_id=self.project.id,
+                objective_id=self.objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Historical packet.",
+                metadata={
+                    "review_id": review_id,
+                    "reviewer": "Ops agent",
+                    "dimension": "devops",
+                    "verdict": "concern",
+                    "progress_status": "improving",
+                    "severity": "medium",
+                    "owner_scope": "telemetry",
+                    "findings": ["Need one completed telemetry artifact."],
+                    "evidence": ["Packet persistence exists but usage was not reported."],
+                    "required_artifact_type": "review_cycle_telemetry",
+                    "artifact_schema": {
+                        "type": "review_cycle_telemetry",
+                        "description": "Persist one completed review-cycle telemetry export with terminal event evidence.",
+                        "required_fields": ["review_id", "start_event", "packet_persistence_events", "terminal_event", "linked_outcome"],
+                    },
+                    "closure_criteria": "Persist one completed objective-review telemetry artifact.",
+                    "evidence_required": "A telemetry export for one completed review cycle.",
+                    "repeat_reason": "Still waiting on the requested telemetry artifact.",
+                    "llm_usage": {
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "total_tokens": 0,
+                        "cost_usd": 0.0,
+                        "latency_ms": 0.0,
+                        "shared_invocation": True,
+                    },
+                },
+            )
+        )
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="objective_review_completed",
+                project_id=self.project.id,
+                objective_id=self.objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Completed review.",
+                metadata={"review_id": review_id, "packet_count": 1},
+            )
+        )
+
+        payload = self.service.project_workspace(self.project.id)
+        objective_payload = next(item for item in payload["objectives"] if item["id"] == self.objective.id)
+        packet = objective_payload["promotion_review"]["review_rounds"][0]["packets"][0]
+        self.assertFalse(packet["llm_usage_reported"])
+        self.assertEqual("unreported", packet["llm_usage_source"])
 
     def test_project_workspace_groups_objective_review_packets_by_round(self) -> None:
         fake_router = FakeLLMRouter("{}")
@@ -868,6 +1039,7 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         self.assertEqual(1, latest_round["verdict_counts"]["pass"])
         self.assertEqual(1, latest_round["remediation_counts"]["total"])
         self.assertEqual("improving", latest_round["packets"][-1]["progress_status"])
+        self.assertTrue(latest_round["review_cycle_artifact"]["record_id"])
 
     def test_objective_review_auto_starts_next_round_after_remediation_completes(self) -> None:
         fake_router = FakeLLMRouter("{}")
@@ -903,6 +1075,55 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         self.assertEqual(2, review["review_rounds"][0]["round_number"])
         self.assertEqual("objective_review", review["review_rounds"][0]["packets"][0]["source"])
         self.assertEqual(4, review["objective_review_packet_count"])
+
+    def test_completed_remediation_persists_worker_response_record(self) -> None:
+        fake_router = FakeLLMRouter("{}")
+        self.ctx.interrogation_service = SimpleNamespace(llm_router=fake_router)
+        self.service = HarnessUIDataService(self.ctx)
+        completed_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            title="Review-ready task",
+            objective="Execution is complete",
+            status=TaskStatus.COMPLETED,
+        )
+        self.store.create_task(completed_task)
+        self.store.update_objective_status(self.objective.id, ObjectiveStatus.RESOLVED)
+
+        self.service.queue_objective_review(self.objective.id, async_mode=False)
+        remediation_task = next(
+            task for task in self.store.list_tasks(self.project.id)
+            if task.objective_id == self.objective.id and task.strategy == "objective_review_remediation"
+        )
+        remediation_run = Run(
+            id=new_id("run"),
+            task_id=remediation_task.id,
+            status=RunStatus.COMPLETED,
+            attempt=1,
+            summary="Produced the requested review packet artifact.",
+        )
+        self.store.create_run(remediation_run)
+        artifact = Artifact(
+            id=new_id("artifact"),
+            run_id=remediation_run.id,
+            kind="objective_review_packet",
+            path=str(self.workspace_root / "review-packet.json"),
+            summary="Objective QA review packet",
+        )
+        self.store.create_artifact(artifact)
+        self.store.update_task_status(remediation_task.id, TaskStatus.COMPLETED)
+        self.store.update_objective_status(self.objective.id, ObjectiveStatus.PLANNING)
+
+        self.service._maybe_resume_objective_review(self.objective.id)
+
+        response_records = self.store.list_context_records(
+            objective_id=self.objective.id,
+            record_type="objective_review_worker_response",
+        )
+        self.assertEqual(1, len(response_records))
+        self.assertEqual("objective_review_packet", response_records[0].metadata["required_artifact_type"])
+        self.assertEqual(str(artifact.id), response_records[0].metadata["record_id"])
 
     def test_objective_review_prompt_includes_prior_round_context(self) -> None:
         fake_router = FakeLLMRouter("{}")
@@ -950,6 +1171,12 @@ class HarnessUIDataServiceTests(unittest.TestCase):
                         "summary": "Testing should improve before promotion.",
                         "findings": ["Need more testing."],
                         "evidence": ["Current tests are not enough."],
+                        "required_artifact_type": "objective_review_packet",
+                        "artifact_schema": {
+                            "type": "objective_review_packet",
+                            "description": "Persist a QA review packet with concrete test evidence.",
+                            "required_fields": ["review_id", "reviewer", "dimension", "verdict", "artifacts"],
+                        },
                         "closure_criteria": "Improve testing before promotion.",
                         "evidence_required": "More evidence.",
                         "repeat_reason": "This is still improving.",
@@ -978,6 +1205,12 @@ class HarnessUIDataServiceTests(unittest.TestCase):
                             "summary": "Testing should improve before promotion.",
                             "findings": ["Need more testing."],
                             "evidence": ["Current tests are not enough."],
+                            "required_artifact_type": "objective_review_packet",
+                            "artifact_schema": {
+                                "type": "objective_review_packet",
+                                "description": "Persist a QA review packet with concrete test evidence.",
+                                "required_fields": ["review_id", "reviewer", "dimension", "verdict", "artifacts"],
+                            },
                             "closure_criteria": "Improve testing before promotion.",
                             "evidence_required": "More evidence.",
                             "repeat_reason": "This is still improving.",
@@ -1038,6 +1271,12 @@ class HarnessUIDataServiceTests(unittest.TestCase):
                 "summary": "The round is improving but still lacks proof.",
                 "findings": ["The board still wants the completed round artifact."],
                 "evidence": ["The latest round just finished."],
+                "required_artifact_type": "review_cycle_artifact",
+                "artifact_schema": {
+                    "type": "review_cycle_artifact",
+                    "description": "Persist a completed objective review cycle artifact with terminal event evidence.",
+                    "required_fields": ["review_id", "start_event", "packet_persistence_events", "terminal_event", "linked_outcome"],
+                },
                 "closure_criteria": "Record one completed objective review round for this objective with at least 7 persisted reviewer packets, non-zero verdict_counts, and remediation linkage.",
                 "evidence_required": "A persisted objective review artifact for round 8 or later showing packets[], verdict_counts, completed_at, and remediation linkage.",
                 "repeat_reason": "Repeated because the board still wants the completed round artifact.",

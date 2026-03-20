@@ -15,8 +15,8 @@ class ValidationService:
         self.workspace_root = workspace_root
         self.telemetry = telemetry
 
-    def validate(self, task: Task, run: Run, work_result: WorkResult, workspace_path: Path) -> dict[str, object]:
-        """Run compile+test on candidate. Returns updated report dict with validation results."""
+    def validate(self, task: Task, run: Run, work_result: WorkResult, workspace_path: Path) -> WorkResult:
+        """Run compile+test on candidate and return an updated WorkResult."""
         run_dir = self.workspace_root / "runs" / run.id
         run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -48,4 +48,21 @@ class ValidationService:
                 report = {}
 
         report["validation_exit_code"] = exit_code
-        return report
+        diagnostics = dict(work_result.diagnostics or {})
+        diagnostics.update(
+            {
+                "worker_outcome": str(report.get("worker_outcome") or work_result.outcome),
+                "compile_check": report.get("compile_check"),
+                "test_check": report.get("test_check"),
+                "validation_elapsed_seconds": report.get("validation_elapsed_seconds"),
+                "failure_category": report.get("failure_category") or diagnostics.get("failure_category"),
+                "failure_message": report.get("failure_message") or diagnostics.get("failure_message"),
+            }
+        )
+        outcome = str(report.get("worker_outcome") or work_result.outcome or "success")
+        return WorkResult(
+            summary=work_result.summary,
+            artifacts=list(work_result.artifacts),
+            outcome=outcome,
+            diagnostics=diagnostics,
+        )

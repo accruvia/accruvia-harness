@@ -111,6 +111,26 @@ make init
 make test-fast
 ```
 
+Pre-release import safety:
+
+- when running Python directly from the repo, force `src` to the front of import resolution
+- use `PYTHONPATH=src ...`, `./bin/pytest-src ...`, or the `make` targets in this repo
+- this is a temporary guard until packaging/release flow is stable enough to remove it
+
+Why this is explicit right now:
+
+- generated run workspaces under `.accruvia-harness/workspace/...` can otherwise shadow repo code
+- stale imports are expensive to debug and can make tests exercise the wrong source tree
+
+Examples:
+
+```bash
+make test
+make test-pytest ARGS='-q tests/test_ui.py -q'
+./bin/pytest-src -q tests/test_ui.py -q
+PYTHONPATH=src python3 -m pytest -q tests/test_ui.py -q
+```
+
 Run the onboarding flow once per harness home:
 
 ```bash

@@ -130,6 +130,9 @@ _OBJECTIVE_REVIEW_PROGRESS = frozenset(
     {"new_concern", "still_blocking", "improving", "resolved", "not_applicable"}
 )
 _OBJECTIVE_REVIEW_SEVERITIES = frozenset({"low", "medium", "high"})
+_OBJECTIVE_REVIEW_REBUTTAL_OUTCOMES = frozenset(
+    {"accepted", "wrong_artifact_type", "artifact_incomplete", "missing_terminal_event", "evidence_not_found"}
+)
 _OBJECTIVE_REVIEW_VAGUE_PHRASES = (
     "improve",
     "better",
@@ -801,8 +804,96 @@ body[data-view="promotion-review"] .conversation-form {
   color: var(--ink);
 }
 
+body[data-view="objective-create"] .sidebar,
+body[data-view="objective-create"] #next-action-panel,
+body[data-view="objective-create"] #objective-panel,
+body[data-view="objective-create"] #interrogation-panel,
+body[data-view="objective-create"] #mermaid-panel,
+body[data-view="objective-create"] #execution-panel,
+body[data-view="objective-create"] #supervisor-panel,
+body[data-view="objective-create"] #atomic-panel,
+body[data-view="objective-create"] #promotion-review-panel,
+body[data-view="objective-create"] #promotion-review-rounds-panel,
+body[data-view="objective-create"] #cli-panel {
+  display: none !important;
+}
+
+body[data-view="objective-create"] .header {
+  display: flex !important;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.25rem 0.25rem;
+  background: #ffffff;
+  border: none;
+}
+
+body[data-view="objective-create"] #content-grid {
+  display: block;
+  width: 100%;
+  margin: 0;
+}
+
+body[data-view="objective-create"] #new-objective-panel {
+  display: block !important;
+  width: min(860px, 100%);
+  margin: 0 auto;
+  border: none;
+  box-shadow: none;
+  border-radius: 0;
+  padding: 1.5rem 1.25rem 2rem;
+  background: #ffffff;
+}
+
+body[data-view="objective-create"] .header-actions {
+  display: none;
+}
+
+body[data-view="token-performance"] .sidebar,
+body[data-view="token-performance"] #next-action-panel,
+body[data-view="token-performance"] #objective-panel,
+body[data-view="token-performance"] #interrogation-panel,
+body[data-view="token-performance"] #mermaid-panel,
+body[data-view="token-performance"] #execution-panel,
+body[data-view="token-performance"] #supervisor-panel,
+body[data-view="token-performance"] #atomic-panel,
+body[data-view="token-performance"] #promotion-review-panel,
+body[data-view="token-performance"] #promotion-review-rounds-panel,
+body[data-view="token-performance"] #cli-panel,
+body[data-view="token-performance"] #new-objective-panel {
+  display: none !important;
+}
+
+body[data-view="token-performance"] .header {
+  display: flex !important;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.25rem 0.25rem;
+  background: #ffffff;
+  border: none;
+}
+
+body[data-view="token-performance"] #content-grid {
+  display: block;
+  width: 100%;
+  margin: 0;
+}
+
+body[data-view="token-performance"] #token-performance-panel {
+  display: block !important;
+  width: min(1280px, 100%);
+  margin: 0 auto;
+  border: none;
+  box-shadow: none;
+  border-radius: 0;
+  padding: 1.25rem;
+  background: #ffffff;
+}
+
 body[data-view="atomic"] .atomic-objective-picker,
-body[data-view="control-flow"] .atomic-objective-picker {
+body[data-view="control-flow"] .atomic-objective-picker,
+body[data-view="promotion-review"] .atomic-objective-picker {
   display: block;
 }
 
@@ -838,6 +929,162 @@ body[data-view="atomic"] .conversation-form {
   color: var(--muted);
   font-size: 0.9rem;
   margin-bottom: 0.85rem;
+}
+
+.objective-create-shell {
+  display: grid;
+  gap: 1rem;
+}
+
+.objective-create-hero {
+  display: grid;
+  gap: 0.45rem;
+  padding: 1rem 1.1rem;
+  border: 1px solid var(--line);
+  border-radius: 1rem;
+  background: linear-gradient(135deg, #fffdf8 0%, #f8f1e4 100%);
+}
+
+.objective-create-hero h3 {
+  margin: 0;
+  font-size: 1.35rem;
+}
+
+.objective-create-hero p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.objective-create-form {
+  display: grid;
+  gap: 1rem;
+}
+
+.objective-create-form .field-grid {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.objective-create-form label {
+  display: grid;
+  gap: 0.4rem;
+  font-size: 0.9rem;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.objective-create-form input,
+.objective-create-form textarea,
+.objective-create-form select {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 0.85rem;
+  padding: 0.7rem 0.8rem;
+  font: inherit;
+  background: #fff;
+  color: var(--ink);
+}
+
+.objective-create-form textarea {
+  min-height: 10rem;
+  resize: vertical;
+}
+
+.objective-create-actions {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.objective-create-cancel {
+  color: var(--muted);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.token-performance-shell {
+  display: grid;
+  gap: 1rem;
+}
+
+.token-performance-hero {
+  display: grid;
+  gap: 0.35rem;
+  padding: 1rem 1.1rem;
+  border: 1px solid var(--line);
+  border-radius: 1rem;
+  background: linear-gradient(135deg, #fffdf8 0%, #f3ede2 100%);
+}
+
+.token-performance-hero h3 {
+  margin: 0;
+  font-size: 1.35rem;
+}
+
+.token-performance-hero p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.token-performance-grid {
+  display: grid;
+  gap: 1rem;
+}
+
+.token-performance-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.8rem;
+}
+
+.token-performance-card,
+.token-performance-table,
+.token-performance-note {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.88);
+  padding: 0.9rem 1rem;
+}
+
+.token-performance-card .label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.token-performance-card .value {
+  margin-top: 0.35rem;
+  font-size: 1.2rem;
+  font-weight: 700;
+}
+
+.token-performance-table h4,
+.token-performance-note h4 {
+  margin: 0 0 0.75rem 0;
+}
+
+.token-performance-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.token-performance-table th,
+.token-performance-table td {
+  text-align: left;
+  padding: 0.55rem 0.45rem;
+  border-top: 1px solid var(--line);
+  vertical-align: top;
+}
+
+.token-performance-table thead th {
+  border-top: none;
+  color: var(--muted);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
 }
 
 .atomic-generation-meta .pill {
@@ -953,6 +1200,32 @@ body[data-view="atomic"] .conversation-form {
   gap: 0.5rem;
   flex-wrap: wrap;
   margin: 0.75rem 0 0;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin-top: 0.75rem;
+}
+
+.header-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.45rem 0.85rem;
+  border-radius: 999px;
+  border: 1px solid #d8b08e;
+  background: #fff1e5;
+  color: #8a461e;
+  font-size: 0.85rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.header-button:hover {
+  background: #ffe8d7;
 }
 
 .view-nav-link {
@@ -2254,6 +2527,10 @@ const mermaidControls = document.getElementById('mermaid-controls');
 const createObjectiveForm = document.getElementById('create-objective-form');
 const createObjectiveTitle = document.getElementById('create-objective-title');
 const createObjectiveSummary = document.getElementById('create-objective-summary');
+const pageCreateObjectiveForm = document.getElementById('page-create-objective-form');
+const pageCreateObjectiveProject = document.getElementById('page-create-objective-project');
+const pageCreateObjectiveTitle = document.getElementById('page-create-objective-title');
+const pageCreateObjectiveSummary = document.getElementById('page-create-objective-summary');
 const intentSummary = document.getElementById('intent-summary');
 const successDefinition = document.getElementById('success-definition');
 const nonNegotiables = document.getElementById('non-negotiables');
@@ -2265,6 +2542,7 @@ const workspaceTitle = document.getElementById('workspace-title');
 const workspaceSummary = document.getElementById('workspace-summary');
 const workspaceStatus = document.getElementById('workspace-status');
 const viewNav = document.getElementById('view-nav');
+const headerCreateObjective = document.getElementById('header-create-objective');
 const diagramShell = document.getElementById('diagram-shell');
 const outputTabs = document.getElementById('output-tabs');
 const outputBody = document.getElementById('output-body');
@@ -2276,6 +2554,9 @@ const promotionReviewMeta = document.getElementById('promotion-review-meta');
 const promotionReviewContent = document.getElementById('promotion-review-content');
 const promotionReviewRoundsPanel = document.getElementById('promotion-review-rounds-panel');
 const promotionReviewRoundsContent = document.getElementById('promotion-review-rounds-content');
+const newObjectivePanel = document.getElementById('new-objective-panel');
+const tokenPerformancePanel = document.getElementById('token-performance-panel');
+const tokenPerformanceContent = document.getElementById('token-performance-content');
 let activeConversationController = null;
 let selectedDiagramElement = null;
 
@@ -2879,7 +3160,7 @@ function anchorFromElement(element) {
 }
 
 function renderProjects() {
-  const selectors = [projectSelect, bannerProjectSelect].filter(Boolean);
+  const selectors = [projectSelect, bannerProjectSelect, pageCreateObjectiveProject].filter(Boolean);
   for (const selector of selectors) {
     selector.innerHTML = '';
     for (const project of state.projects) {
@@ -2890,6 +3171,195 @@ function renderProjects() {
       selector.appendChild(option);
     }
   }
+}
+
+function renderObjectiveCreatePage() {
+  if (!newObjectivePanel) return;
+  newObjectivePanel.hidden = state.view !== 'objective-create';
+  if (state.view !== 'objective-create') return;
+  if (pageCreateObjectiveProject && state.projectId) {
+    pageCreateObjectiveProject.value = state.projectId;
+  }
+  const cancelLink = document.querySelector('.objective-create-cancel');
+  if (cancelLink instanceof HTMLAnchorElement) {
+    const params = new URLSearchParams();
+    if (state.projectId) params.set('project_id', state.projectId);
+    const suffix = params.toString() ? `?${params.toString()}` : '';
+    cancelLink.href = `/workspace${suffix}`;
+  }
+}
+
+function renderTokenPerformancePage() {
+  if (!tokenPerformancePanel || !tokenPerformanceContent) return;
+  tokenPerformancePanel.hidden = state.view !== 'token-performance';
+  if (state.view !== 'token-performance') return;
+  const workspace = state.workspace;
+  if (!workspace) {
+    tokenPerformanceContent.innerHTML = '<div class="empty">No workspace loaded.</div>';
+    return;
+  }
+  const objectiveRows = [];
+  const reviewerRows = new Map();
+  const roundRows = [];
+  const totals = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cost_usd: 0, latency_ms: 0, packet_count: 0, round_count: 0, reported_packet_count: 0, unreported_packet_count: 0 };
+  function addUsage(target, usage, packetCount = 0, roundCount = 0) {
+    target.prompt_tokens += Number(usage.prompt_tokens || 0);
+    target.completion_tokens += Number(usage.completion_tokens || 0);
+    target.total_tokens += Number(usage.total_tokens || 0);
+    target.cost_usd += Number(usage.cost_usd || 0);
+    target.latency_ms += Number(usage.latency_ms || 0);
+    target.packet_count += packetCount;
+    target.round_count += roundCount;
+    target.reported_packet_count += Number(usage.reported_packet_count || 0);
+    target.unreported_packet_count += Number(usage.unreported_packet_count || 0);
+  }
+  function summarizePackets(packetList) {
+    const usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cost_usd: 0, latency_ms: 0, reported_packet_count: 0, unreported_packet_count: 0 };
+    for (const packet of Array.isArray(packetList) ? packetList : []) {
+      const llmUsage = packet?.llm_usage && typeof packet.llm_usage === 'object' ? packet.llm_usage : {};
+      const reported = packet?.llm_usage_reported !== false;
+      if (reported) {
+        usage.prompt_tokens += Number(llmUsage.prompt_tokens || 0);
+        usage.completion_tokens += Number(llmUsage.completion_tokens || 0);
+        usage.total_tokens += Number(llmUsage.total_tokens || 0);
+        usage.cost_usd += Number(llmUsage.cost_usd || 0);
+        usage.latency_ms += Number(llmUsage.latency_ms || 0);
+        usage.reported_packet_count += 1;
+      } else {
+        usage.unreported_packet_count += 1;
+        usage.latency_ms += Number(llmUsage.latency_ms || 0);
+      }
+    }
+    return usage;
+  }
+  function fmtTokens(value) {
+    return Number(value || 0).toLocaleString();
+  }
+  function fmtCost(value) {
+    return `$${Number(value || 0).toFixed(4)}`;
+  }
+  function fmtLatency(value) {
+    const ms = Number(value || 0);
+    return ms > 0 ? `${Math.round(ms)}ms` : '0ms';
+  }
+  for (const objective of workspace.objectives || []) {
+    const review = objective.promotion_review || {};
+    const rounds = Array.isArray(review.review_rounds) ? review.review_rounds : [];
+    if (!rounds.length) continue;
+    const objectiveUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cost_usd: 0, latency_ms: 0, packet_count: 0, round_count: 0 };
+    for (const round of rounds) {
+      const packets = Array.isArray(round.packets) ? round.packets : [];
+      const roundUsage = summarizePackets(packets);
+      addUsage(objectiveUsage, roundUsage, packets.length, 1);
+      addUsage(totals, roundUsage, packets.length, 1);
+      roundRows.push({
+        objective_title: objective.title,
+        round_number: round.round_number,
+        status: round.status,
+        packet_count: packets.length,
+        usage: roundUsage,
+      });
+      for (const packet of packets) {
+        const reviewer = String(packet.reviewer || packet.dimension || 'unknown');
+        const key = reviewer;
+        const current = reviewerRows.get(key) || { reviewer, prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cost_usd: 0, latency_ms: 0, packet_count: 0, reported_packet_count: 0, unreported_packet_count: 0 };
+        const llmUsage = packet.llm_usage && typeof packet.llm_usage === 'object' ? packet.llm_usage : {};
+        if (packet.llm_usage_reported === false) {
+          current.unreported_packet_count += 1;
+          current.latency_ms += Number(llmUsage.latency_ms || 0);
+        } else {
+          current.prompt_tokens += Number(llmUsage.prompt_tokens || 0);
+          current.completion_tokens += Number(llmUsage.completion_tokens || 0);
+          current.total_tokens += Number(llmUsage.total_tokens || 0);
+          current.cost_usd += Number(llmUsage.cost_usd || 0);
+          current.latency_ms += Number(llmUsage.latency_ms || 0);
+          current.reported_packet_count += 1;
+        }
+        current.packet_count += 1;
+        reviewerRows.set(key, current);
+      }
+    }
+    objectiveRows.push({
+      title: objective.title,
+      round_count: objectiveUsage.round_count,
+      packet_count: objectiveUsage.packet_count,
+      usage: objectiveUsage,
+    });
+  }
+  objectiveRows.sort((left, right) => right.usage.total_tokens - left.usage.total_tokens);
+  roundRows.sort((left, right) => right.usage.total_tokens - left.usage.total_tokens);
+  const reviewerList = Array.from(reviewerRows.values()).sort((left, right) => right.total_tokens - left.total_tokens);
+  const avgTokensPerRound = totals.round_count ? Math.round(totals.total_tokens / totals.round_count) : 0;
+  const avgCostPerRound = totals.round_count ? totals.cost_usd / totals.round_count : 0;
+  const avgTokensPerPacket = totals.packet_count ? Math.round(totals.total_tokens / totals.packet_count) : 0;
+  const objectiveTable = objectiveRows.length
+    ? `
+      <table>
+        <thead><tr><th>Objective</th><th>Rounds</th><th>Packets</th><th>Tokens</th><th>Cost</th><th>Latency</th></tr></thead>
+        <tbody>
+          ${objectiveRows.map((row) => `<tr><td>${escapeHtml(row.title)}</td><td>${row.round_count}</td><td>${row.packet_count}</td><td>${row.usage.reported_packet_count ? fmtTokens(row.usage.total_tokens) : 'Not reported'}</td><td>${row.usage.reported_packet_count ? fmtCost(row.usage.cost_usd) : 'Not reported'}</td><td>${fmtLatency(row.usage.latency_ms)}</td></tr>`).join('')}
+        </tbody>
+      </table>
+    `
+    : '<div class="empty">No review token usage has been recorded yet.</div>';
+  const reviewerTable = reviewerList.length
+    ? `
+      <table>
+        <thead><tr><th>Reviewer</th><th>Packets</th><th>Tokens</th><th>Cost</th><th>Latency</th></tr></thead>
+        <tbody>
+          ${reviewerList.map((row) => `<tr><td>${escapeHtml(row.reviewer)}</td><td>${row.packet_count}</td><td>${row.reported_packet_count ? fmtTokens(row.total_tokens) : 'Not reported'}</td><td>${row.reported_packet_count ? fmtCost(row.cost_usd) : 'Not reported'}</td><td>${fmtLatency(row.latency_ms)}</td></tr>`).join('')}
+        </tbody>
+      </table>
+    `
+    : '<div class="empty">No reviewer usage has been recorded yet.</div>';
+  const roundTable = roundRows.length
+    ? `
+      <table>
+        <thead><tr><th>Objective</th><th>Round</th><th>Status</th><th>Packets</th><th>Tokens</th><th>Cost</th></tr></thead>
+        <tbody>
+          ${roundRows.slice(0, 20).map((row) => `<tr><td>${escapeHtml(row.objective_title)}</td><td>${escapeHtml(String(row.round_number || '?'))}</td><td>${escapeHtml(String(row.status || 'unknown'))}</td><td>${row.packet_count}</td><td>${row.usage.reported_packet_count ? fmtTokens(row.usage.total_tokens) : 'Not reported'}</td><td>${row.usage.reported_packet_count ? fmtCost(row.usage.cost_usd) : 'Not reported'}</td></tr>`).join('')}
+        </tbody>
+      </table>
+    `
+    : '<div class="empty">No round usage has been recorded yet.</div>';
+  tokenPerformanceContent.innerHTML = `
+    <div class="token-performance-shell">
+      <div class="token-performance-hero">
+        <h3>Token performance</h3>
+        <p>Track promotion-review token usage by objective, round, and reviewer so you can see where the board is spending time and money.</p>
+      </div>
+      <div class="token-performance-summary">
+        <div class="token-performance-card"><div class="label">Total tokens</div><div class="value">${fmtTokens(totals.total_tokens)}</div></div>
+        <div class="token-performance-card"><div class="label">Total cost</div><div class="value">${fmtCost(totals.cost_usd)}</div></div>
+        <div class="token-performance-card"><div class="label">Review packets</div><div class="value">${fmtTokens(totals.packet_count)}</div></div>
+        <div class="token-performance-card"><div class="label">Review rounds</div><div class="value">${fmtTokens(totals.round_count)}</div></div>
+        <div class="token-performance-card"><div class="label">Reported packets</div><div class="value">${fmtTokens(totals.reported_packet_count)}</div></div>
+        <div class="token-performance-card"><div class="label">Unreported packets</div><div class="value">${fmtTokens(totals.unreported_packet_count)}</div></div>
+        <div class="token-performance-card"><div class="label">Avg tokens / round</div><div class="value">${fmtTokens(avgTokensPerRound)}</div></div>
+        <div class="token-performance-card"><div class="label">Avg cost / round</div><div class="value">${fmtCost(avgCostPerRound)}</div></div>
+        <div class="token-performance-card"><div class="label">Avg tokens / packet</div><div class="value">${fmtTokens(avgTokensPerPacket)}</div></div>
+        <div class="token-performance-card"><div class="label">Total latency</div><div class="value">${fmtLatency(totals.latency_ms)}</div></div>
+      </div>
+      <div class="token-performance-grid">
+        <section class="token-performance-table">
+          <h4>By objective</h4>
+          ${objectiveTable}
+        </section>
+        <section class="token-performance-table">
+          <h4>By reviewer</h4>
+          ${reviewerTable}
+        </section>
+        <section class="token-performance-table">
+          <h4>Top review rounds</h4>
+          ${roundTable}
+        </section>
+        <section class="token-performance-note">
+          <h4>What belongs here next</h4>
+          <p class="hint">This first pass uses objective-review packet usage because that telemetry is already persisted. The next useful additions are workflow-type splits, prompt-vs-completion ratios, interrupted/wasted rounds, and tokens per cleared concern.</p>
+        </section>
+      </div>
+    </div>
+  `;
 }
 
 function renderObjectives() {
@@ -3592,6 +4062,25 @@ function renderPromotionReview() {
     if (raw === 'new_concern') return 'New concern';
     return raw.replaceAll('_', ' ');
   }
+  function aggregateUsage(packetList) {
+    const usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cost_usd: 0, latency_ms: 0 };
+    for (const packet of Array.isArray(packetList) ? packetList : []) {
+      const llmUsage = packet?.llm_usage && typeof packet.llm_usage === 'object' ? packet.llm_usage : {};
+      usage.prompt_tokens += Number(llmUsage.prompt_tokens || 0);
+      usage.completion_tokens += Number(llmUsage.completion_tokens || 0);
+      usage.total_tokens += Number(llmUsage.total_tokens || 0);
+      usage.cost_usd += Number(llmUsage.cost_usd || 0);
+      usage.latency_ms += Number(llmUsage.latency_ms || 0);
+    }
+    return usage;
+  }
+  function usageBits(usage) {
+    const bits = [];
+    if ((usage.total_tokens || 0) > 0) bits.push(`${usage.total_tokens} tokens`);
+    if ((usage.cost_usd || 0) > 0) bits.push(`$${Number(usage.cost_usd).toFixed(4)}`);
+    if ((usage.latency_ms || 0) > 0) bits.push(`${Math.round(Number(usage.latency_ms))}ms`);
+    return bits;
+  }
   promotionReviewPanel.hidden = state.view !== 'promotion-review';
   promotionReviewRoundsPanel.hidden = state.view !== 'promotion-review';
   promotionReviewTitle.textContent = `Promotion review for ${objective.title}`;
@@ -3644,12 +4133,14 @@ function renderPromotionReview() {
       state.selectedPromotionReportKey = `${latestGradedRound.review_id || latestGradedRound.round_number}:${firstPacket.dimension || humanizeReviewer(firstPacket.reviewer, firstPacket.dimension)}`;
     }
   }
+  const latestUsage = aggregateUsage(Array.isArray(latestRound?.packets) ? latestRound.packets : []);
   const summaryCards = `
     <div class="promotion-summary-grid">
       <div class="promotion-summary-card"><div class="label">Review rounds</div><div class="value">${rounds.length || 0}</div></div>
       <div class="promotion-summary-card"><div class="label">Review packets</div><div class="value">${review.objective_review_packet_count || 0}</div></div>
       <div class="promotion-summary-card"><div class="label">Concerns</div><div class="value">${verdictCounts.concern || 0}</div></div>
       <div class="promotion-summary-card"><div class="label">Waived failures</div><div class="value">${review.waived_failed_count || 0}</div></div>
+      <div class="promotion-summary-card"><div class="label">Latest round usage</div><div class="value" style="font-size:1rem">${escapeHtml(usageBits(latestUsage).join(' · ') || 'No LLM usage yet')}</div></div>
     </div>
   `;
   const renderPacket = (packet) => {
@@ -3678,10 +4169,8 @@ function renderPromotionReview() {
     const ownerScope = String(packet.owner_scope || '').trim();
     const severity = String(packet.severity || '').trim();
     const llmUsage = packet.llm_usage && typeof packet.llm_usage === 'object' ? packet.llm_usage : {};
-    const llmUsageBits = [];
-    if ((llmUsage.total_tokens || 0) > 0) llmUsageBits.push(`${llmUsage.total_tokens} tokens`);
-    if ((llmUsage.cost_usd || 0) > 0) llmUsageBits.push(`$${Number(llmUsage.cost_usd).toFixed(4)}`);
-    if ((llmUsage.latency_ms || 0) > 0) llmUsageBits.push(`${Math.round(Number(llmUsage.latency_ms))}ms`);
+    const llmUsageBits = usageBits(llmUsage);
+    const usageReported = packet.llm_usage_reported !== false;
     return `
       <article class="promotion-packet">
         <div class="promotion-packet-title">${escapeHtml(title)}</div>
@@ -3693,7 +4182,7 @@ function renderPromotionReview() {
           ${progressLabel(progressStatus) ? `<span class="pill promotion-opinion-pill ${progressStatus === 'resolved' ? 'status-complete' : progressStatus === 'improving' ? 'status-running' : progressStatus === 'still_blocking' || progressStatus === 'new_concern' ? 'status-failed' : ''}">${escapeHtml(progressLabel(progressStatus))}</span>` : ''}
           ${subStatus ? `<span class="pill">${escapeHtml(subStatus)}</span>` : ''}
           ${recordedAt ? `<span class="pill">Recorded ${escapeHtml(formatRelativeTime(recordedAt))}</span>` : ''}
-          ${llmUsageBits.length ? `<span class="pill">${escapeHtml(llmUsageBits.join(' · '))}</span>` : ''}
+          ${llmUsageBits.length ? `<span class="pill">${escapeHtml(llmUsageBits.join(' · '))}</span>` : (!usageReported ? `<span class="pill status-idle">Usage not reported</span>` : '')}
         </div>
         <div class="promotion-packet-summary">${escapeHtml(rationale)}</div>
         ${backend ? `<div class="hint">Model: ${escapeHtml(backend)}</div>` : ''}
@@ -3736,12 +4225,14 @@ function renderPromotionReview() {
     const openRemediationCount = (remediationCounts.active || 0) + (remediationCounts.pending || 0);
     const packetList = Array.isArray(round.packets) ? round.packets : [];
     const remediationList = Array.isArray(round.remediation_tasks) ? round.remediation_tasks : [];
+    const roundUsage = aggregateUsage(packetList);
     const summaryStats = [
       { label: 'Round status', value: round.status === 'remediating' ? 'Back in Atomic' : round.status === 'ready_for_rerun' ? 'Ready for re-review' : round.status === 'needs_remediation' ? 'Remediation needed' : round.status === 'running' ? 'Review running' : round.status === 'passed' ? 'Passed' : round.status === 'failed' ? 'Review failed' : round.status },
       { label: 'Pass', value: String(roundVerdicts.pass || 0), tone: 'status-complete' },
       { label: 'Concern', value: String(roundVerdicts.concern || 0), tone: (roundVerdicts.concern || 0) > 0 ? 'status-running' : '' },
       { label: 'Remediation tasks', value: String(remediationCounts.total || 0) },
       { label: 'Open', value: String(openRemediationCount), tone: openRemediationCount > 0 ? 'status-running' : '' },
+      { label: 'LLM usage', value: usageBits(roundUsage).join(' · ') || 'Not recorded' },
     ];
     if ((remediationCounts.completed || 0) > 0 || (remediationCounts.total || 0) > 0) {
       summaryStats.push({ label: 'Done', value: String(remediationCounts.completed || 0), tone: (remediationCounts.completed || 0) > 0 ? 'status-complete' : '' });
@@ -3758,7 +4249,7 @@ function renderPromotionReview() {
       <section class="promotion-round">
         <div class="promotion-section-title">
           <h4>Round ${escapeHtml(String(round.round_number || '?'))}</h4>
-          <span class="hint">${round.last_activity_at ? `Last activity ${escapeHtml(formatRelativeTime(round.last_activity_at))}` : ''}</span>
+        <span class="pill last-activity-pill" data-timestamp="${escapeHtml(round.last_activity_at || '')}">${round.last_activity_at ? `Last activity ${escapeHtml(formatRelativeTime(round.last_activity_at))}` : ''}</span>
         </div>
         <div class="promotion-packet-meta promotion-round-meta">${roundPills.join('')}</div>
         <div class="promotion-round-summary">
@@ -3780,7 +4271,7 @@ function renderPromotionReview() {
     <section class="promotion-latest-round">
       <div class="promotion-section-title">
         <h4>Current promotion round: Round ${escapeHtml(String(latestRound.round_number || '?'))}</h4>
-        <span class="hint">${latestRound.last_activity_at ? `Last activity ${escapeHtml(formatRelativeTime(latestRound.last_activity_at))}` : ''}</span>
+        <span class="pill last-activity-pill" data-timestamp="${escapeHtml(latestRound.last_activity_at || '')}">${latestRound.last_activity_at ? `Last activity ${escapeHtml(formatRelativeTime(latestRound.last_activity_at))}` : ''}</span>
       </div>
       <div class="promotion-state-banner ${latestRound.status === 'passed' ? 'status-complete' : latestRound.status === 'failed' || latestRound.status === 'needs_remediation' ? 'status-failed' : ''}">
         <div class="promotion-state-banner-icon">${
@@ -3814,6 +4305,7 @@ function renderPromotionReview() {
         <div class="promotion-round-stat"><div class="label">Remediation Tasks</div><div class="value">${escapeHtml(String((latestRound.remediation_counts || {}).total || 0))}</div></div>
         <div class="promotion-round-stat"><div class="label">Open</div><div class="value ${((((latestRound.remediation_counts || {}).active || 0) + ((latestRound.remediation_counts || {}).pending || 0)) > 0) ? 'status-running' : ''}">${escapeHtml(String(((latestRound.remediation_counts || {}).active || 0) + ((latestRound.remediation_counts || {}).pending || 0)))}</div></div>
         <div class="promotion-round-stat"><div class="label">Done</div><div class="value ${((latestRound.remediation_counts || {}).completed || 0) > 0 ? 'status-complete' : ''}">${escapeHtml(String((latestRound.remediation_counts || {}).completed || 0))}</div></div>
+        <div class="promotion-round-stat"><div class="label">LLM usage</div><div class="value">${escapeHtml(usageBits(latestUsage).join(' · ') || 'Not recorded')}</div></div>
       </div>
     </section>
   ` : '';
@@ -3861,10 +4353,8 @@ function renderPromotionReview() {
         const reviewer = humanizeReviewer(selectedPacket.reviewer, selectedPacket.dimension);
         const progress = progressLabel(selectedPacket.progress_status || '');
         const llmUsage = selectedPacket.llm_usage && typeof selectedPacket.llm_usage === 'object' ? selectedPacket.llm_usage : {};
-        const usageSummary = [];
-        if ((llmUsage.total_tokens || 0) > 0) usageSummary.push(`${llmUsage.total_tokens} tokens`);
-        if ((llmUsage.cost_usd || 0) > 0) usageSummary.push(`$${Number(llmUsage.cost_usd).toFixed(4)}`);
-        if ((llmUsage.latency_ms || 0) > 0) usageSummary.push(`${Math.round(Number(llmUsage.latency_ms))}ms`);
+        const usageSummary = usageBits(llmUsage);
+        const usageReported = selectedPacket.llm_usage_reported !== false;
         return `
           <div class="promotion-report-card-detail">
             <div class="promotion-section-title">
@@ -3876,7 +4366,7 @@ function renderPromotionReview() {
               ${selectedPacket.severity ? `<span class="pill promotion-opinion-pill">${escapeHtml(`Severity: ${selectedPacket.severity}`)}</span>` : ''}
               ${selectedPacket.owner_scope ? `<span class="pill promotion-opinion-pill">${escapeHtml(`Scope: ${selectedPacket.owner_scope}`)}</span>` : ''}
               ${progress ? `<span class="pill ${selectedPacket.progress_status === 'resolved' ? 'status-complete' : selectedPacket.progress_status === 'improving' ? 'status-running' : 'status-failed'}">${escapeHtml(progress)}</span>` : ''}
-              ${usageSummary.length ? `<span class="pill">${escapeHtml(usageSummary.join(' · '))}</span>` : ''}
+              ${usageSummary.length ? `<span class="pill">${escapeHtml(usageSummary.join(' · '))}</span>` : (!usageReported ? `<span class="pill status-idle">Usage not reported</span>` : '')}
             </div>
             <div class="promotion-packet-summary">${escapeHtml(selectedPacket.summary || 'No summary recorded.')}</div>
             ${(selectedPacket.closure_criteria || selectedPacket.evidence_required || selectedPacket.repeat_reason)
@@ -4081,10 +4571,18 @@ function renderWorkspaceChrome() {
   const workspace = state.workspace;
   if (!workspace) return;
   const objective = currentObjective();
-  workspaceTitle.textContent = objective ? objective.title : workspace.project.name;
-  workspaceSummary.textContent = objective
-    ? (objective.summary || 'No objective summary recorded.')
-    : (workspace.project.description || 'No project summary recorded.');
+  if (state.view === 'objective-create') {
+    workspaceTitle.textContent = 'Create a new objective';
+    workspaceSummary.textContent = 'Start a new durable workstream with a dedicated title and optional summary.';
+  } else if (state.view === 'token-performance') {
+    workspaceTitle.textContent = 'Token performance';
+    workspaceSummary.textContent = 'Review LLM usage across promotion-review rounds, objectives, and reviewers.';
+  } else {
+    workspaceTitle.textContent = objective ? objective.title : workspace.project.name;
+    workspaceSummary.textContent = objective
+      ? (objective.summary || 'No objective summary recorded.')
+      : (workspace.project.description || 'No project summary recorded.');
+  }
   const queueDepth = Number(workspace.loop_status.queue_depth || 0);
   if (state.view === 'atomic' || state.view === 'promotion-review') {
     if (queueDepth > 0) {
@@ -4092,6 +4590,14 @@ function renderWorkspaceChrome() {
     } else {
       workspaceStatus.textContent = `No other project work queued`;
     }
+  } else if (state.view === 'objective-create') {
+    workspaceStatus.textContent = state.projectId
+      ? `Creating in ${workspace.project.name}`
+      : 'Select a project';
+  } else if (state.view === 'token-performance') {
+    workspaceStatus.textContent = state.projectId
+      ? `Usage in ${workspace.project.name}`
+      : 'Select a project';
   } else {
     workspaceStatus.textContent = `${workspace.loop_status.status} · queue ${queueDepth}`;
   }
@@ -4108,11 +4614,19 @@ function renderViewNav() {
     { key: 'control-flow', href: `/workspace${suffix}`, label: 'Control Flow' },
     { key: 'atomic', href: `/atomic${suffix}`, label: 'Atomic' },
     { key: 'promotion-review', href: `/promotion-review${suffix}`, label: 'Promotion Review' },
+    { key: 'token-performance', href: `/token-performance${suffix}`, label: 'Token Performance' },
     { key: 'harness', href: '/harness', label: 'Dashboard' },
   ];
   viewNav.innerHTML = links.map((link) => (
     `<a class="view-nav-link ${state.view === link.key ? 'active' : ''}" data-view-key="${link.key}" href="${link.href}">${escapeHtml(link.label)}</a>`
   )).join('');
+}
+
+function objectiveCreateHref() {
+  const params = new URLSearchParams();
+  if (state.projectId) params.set('project_id', state.projectId);
+  const suffix = params.toString() ? `?${params.toString()}` : '';
+  return `/objectives/new${suffix}`;
 }
 
 async function loadProjects() {
@@ -4153,6 +4667,8 @@ async function loadWorkspace() {
     : pickDefaultRun(state.workspace);
   renderObjectives();
   renderWorkspaceChrome();
+  renderObjectiveCreatePage();
+  renderTokenPerformancePage();
   renderTasks();
   renderRuns();
   renderExecutionPanel();
@@ -4208,25 +4724,69 @@ async function handleExecutionPrimaryAction() {
 if (createObjectiveForm) {
   createObjectiveForm.addEventListener('submit', async (event) => {
     event.preventDefault();
-    if (!state.projectId) return;
-    const title = createObjectiveTitle.value.trim();
-    if (!title) return;
-    try {
-      clearError();
-      const payload = await api(`/api/projects/${encodeURIComponent(state.projectId)}/objectives`, {
-        method: 'POST',
-        body: JSON.stringify({
-          title,
-          summary: createObjectiveSummary.value.trim(),
-        }),
-      });
-      createObjectiveTitle.value = '';
-      createObjectiveSummary.value = '';
-      setObjectiveId(payload.objective.id);
-      await loadWorkspace();
-    } catch (error) {
-      showError(error.message || 'Unable to create objective');
+    await submitObjectiveCreate(createObjectiveTitle.value.trim(), createObjectiveSummary.value.trim());
+  });
+}
+
+async function submitObjectiveCreate(title, summary) {
+  if (!state.projectId) {
+    showError('Select a project before creating an objective.');
+    return;
+  }
+  if (!title) {
+    showError('Enter an objective title before creating it.');
+    return;
+  }
+  try {
+    clearError();
+    const payload = await api(`/api/projects/${encodeURIComponent(state.projectId)}/objectives`, {
+      method: 'POST',
+      body: JSON.stringify({
+        title,
+        summary,
+      }),
+    });
+    createObjectiveTitle.value = '';
+    createObjectiveSummary.value = '';
+    if (pageCreateObjectiveTitle) pageCreateObjectiveTitle.value = '';
+    if (pageCreateObjectiveSummary) pageCreateObjectiveSummary.value = '';
+    setObjectiveId(payload.objective.id);
+    await loadWorkspace();
+    const params = new URLSearchParams();
+    if (state.projectId) params.set('project_id', state.projectId);
+    if (payload.objective?.id) params.set('objective_id', payload.objective.id);
+    window.location.assign(`/workspace?${params.toString()}`);
+  } catch (error) {
+    showError(error.message || 'Unable to create objective');
+  }
+}
+
+if (headerCreateObjective) {
+  headerCreateObjective.addEventListener('click', () => {
+    if (!state.projectId) {
+      showError('Select a project before creating an objective.');
+      return;
     }
+    window.location.assign(objectiveCreateHref());
+  });
+}
+
+if (pageCreateObjectiveForm) {
+  pageCreateObjectiveForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const selectedProjectId = pageCreateObjectiveProject?.value || state.projectId;
+    const title = pageCreateObjectiveTitle?.value.trim() || '';
+    const summary = pageCreateObjectiveSummary?.value.trim() || '';
+    if (!selectedProjectId) {
+      showError('Select a project before creating an objective.');
+      return;
+    }
+    if (!title) {
+      showError('Enter an objective title before creating it.');
+      return;
+    }
+    setProjectId(selectedProjectId);
+    await submitObjectiveCreate(title, summary);
   });
 }
 
@@ -4985,6 +5545,9 @@ _FULL_UI_HTML = """
             <h2 id="workspace-title">Harness project</h2>
             <p id="workspace-summary"></p>
             <nav id="view-nav" class="view-nav"></nav>
+            <div class="header-actions">
+              <button id="header-create-objective" class="header-button" type="button">New Objective</button>
+            </div>
           </div>
           <div id="workspace-status" class="status-chip">idle</div>
         </div>
@@ -5067,6 +5630,37 @@ _FULL_UI_HTML = """
           </div>
         </section>
         <div id="content-grid" class="grid">
+          <section id="new-objective-panel" class="panel" hidden>
+            <div class="objective-create-shell">
+              <div class="objective-create-hero">
+                <h3>New objective</h3>
+                <p>Create a new durable workstream instead of filling a popup intake. You can add intent and tighten the control flow immediately after creation.</p>
+              </div>
+              <form id="page-create-objective-form" class="objective-create-form">
+                <div class="field-grid">
+                  <label>
+                    Project
+                    <select id="page-create-objective-project"></select>
+                  </label>
+                  <label>
+                    Objective title
+                    <input id="page-create-objective-title" type="text" placeholder="Context Management">
+                  </label>
+                  <label>
+                    Summary
+                    <textarea id="page-create-objective-summary" placeholder="Centralize context assembly, keep context rich for now, and add observability so later trimming is evidence-based."></textarea>
+                  </label>
+                </div>
+                <div class="objective-create-actions">
+                  <button type="submit">Create objective</button>
+                  <a class="objective-create-cancel" href="/workspace">Cancel</a>
+                </div>
+              </form>
+            </div>
+          </section>
+          <section id="token-performance-panel" class="panel" hidden>
+            <div id="token-performance-content"></div>
+          </section>
           <section id="objective-panel" class="panel">
             <h3 id="objective-title">Current objective</h3>
             <p id="objective-summary" class="hint">No objective selected.</p>
@@ -5206,6 +5800,8 @@ def _render_view_html(view: str, layout: str) -> str:
 _INDEX_HTML = _render_view_html("control-flow", "split-workspace")
 _ATOMIC_HTML = _render_view_html("atomic", "split-workspace")
 _PROMOTION_REVIEW_HTML = _render_view_html("promotion-review", "split-workspace")
+_OBJECTIVE_CREATE_HTML = _render_view_html("objective-create", "full-review")
+_TOKEN_PERFORMANCE_HTML = _render_view_html("token-performance", "full-review")
 _HARNESS_HTML = _render_view_html("harness", "dashboard")
 
 
@@ -5949,6 +6545,8 @@ class HarnessUIDataService:
             ]
             self._create_objective_review_remediation_tasks(objective, str(latest_round.get("review_id") or ""), packets)
             return
+        if isinstance(latest_round, dict) and latest_round.get("review_id"):
+            self._record_objective_review_worker_responses(objective, latest_round)
         if not review_summary["ready"]:
             return
         if review_state["status"] == "running" and objective_id in _OBJECTIVE_REVIEW._running:
@@ -5962,49 +6560,59 @@ class HarnessUIDataService:
         if objective is None:
             return
         try:
+            linked_tasks = [task for task in self.store.list_tasks(objective.project_id) if task.objective_id == objective.id]
+            previous_review = self._promotion_review_for_objective(objective_id, linked_tasks)
             packets = self._generate_objective_review_packets(objective_id, review_id)
+            packet_record_ids: list[str] = []
             for packet in packets:
-                self.store.create_context_record(
-                    ContextRecord(
-                        id=new_id("context"),
-                        record_type="objective_review_packet",
-                        project_id=objective.project_id,
-                        objective_id=objective.id,
-                        visibility="operator_visible",
-                        author_type="system",
-                        content=str(packet["summary"]),
-                        metadata={
-                            "review_id": review_id,
-                            "reviewer": packet["reviewer"],
-                            "dimension": packet["dimension"],
-                            "verdict": packet["verdict"],
-                            "progress_status": packet.get("progress_status"),
-                            "severity": packet.get("severity"),
-                            "owner_scope": packet.get("owner_scope"),
-                            "findings": packet["findings"],
-                            "evidence": packet["evidence"],
-                            "closure_criteria": packet.get("closure_criteria"),
-                            "evidence_required": packet.get("evidence_required"),
-                            "repeat_reason": packet.get("repeat_reason"),
-                            "llm_usage": packet.get("llm_usage"),
-                            "backend": packet.get("backend"),
-                            "prompt_path": packet.get("prompt_path"),
-                            "response_path": packet.get("response_path"),
-                        },
-                    )
-                )
-            self.store.create_context_record(
-                ContextRecord(
+                packet_record = ContextRecord(
                     id=new_id("context"),
-                    record_type="objective_review_completed",
+                    record_type="objective_review_packet",
                     project_id=objective.project_id,
                     objective_id=objective.id,
                     visibility="operator_visible",
                     author_type="system",
-                    content=f"Completed automatic objective review with {len(packets)} reviewer packet(s).",
-                    metadata={"review_id": review_id, "packet_count": len(packets)},
+                    content=str(packet["summary"]),
+                    metadata={
+                        "review_id": review_id,
+                        "reviewer": packet["reviewer"],
+                        "dimension": packet["dimension"],
+                        "verdict": packet["verdict"],
+                        "progress_status": packet.get("progress_status"),
+                        "severity": packet.get("severity"),
+                        "owner_scope": packet.get("owner_scope"),
+                        "findings": packet["findings"],
+                        "evidence": packet["evidence"],
+                        "required_artifact_type": packet.get("required_artifact_type"),
+                        "artifact_schema": packet.get("artifact_schema"),
+                        "evidence_contract": packet.get("evidence_contract"),
+                        "closure_criteria": packet.get("closure_criteria"),
+                        "evidence_required": packet.get("evidence_required"),
+                        "repeat_reason": packet.get("repeat_reason"),
+                        "llm_usage": packet.get("llm_usage"),
+                        "llm_usage_reported": packet.get("llm_usage_reported"),
+                        "llm_usage_source": packet.get("llm_usage_source"),
+                        "backend": packet.get("backend"),
+                        "prompt_path": packet.get("prompt_path"),
+                        "response_path": packet.get("response_path"),
+                        "review_task_id": packet.get("review_task_id"),
+                        "review_run_id": packet.get("review_run_id"),
+                    },
                 )
+                self.store.create_context_record(packet_record)
+                packet["packet_record_id"] = packet_record.id
+                packet_record_ids.append(packet_record.id)
+            completed_record = ContextRecord(
+                id=new_id("context"),
+                record_type="objective_review_completed",
+                project_id=objective.project_id,
+                objective_id=objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content=f"Completed automatic objective review with {len(packets)} reviewer packet(s).",
+                metadata={"review_id": review_id, "packet_count": len(packets)},
             )
+            self.store.create_context_record(completed_record)
             self.store.create_context_record(
                 ContextRecord(
                     id=new_id("context"),
@@ -6018,6 +6626,19 @@ class HarnessUIDataService:
                 )
             )
             created_task_ids = self._create_objective_review_remediation_tasks(objective, review_id, packets)
+            self._record_objective_review_cycle_artifact(
+                objective=objective,
+                review_id=review_id,
+                packet_record_ids=packet_record_ids,
+                completed_record=completed_record,
+                linked_task_ids=created_task_ids,
+            )
+            self._record_objective_review_reviewer_rebuttals(
+                objective=objective,
+                review_id=review_id,
+                previous_review=previous_review,
+                current_packets=packets,
+            )
             if created_task_ids:
                 self.store.create_context_record(
                     ContextRecord(
@@ -6081,24 +6702,94 @@ class HarnessUIDataService:
                 result, backend = llm_router.execute(LLMInvocation(task=task, run=run, prompt=prompt, run_dir=run_dir))
                 parsed = self._parse_objective_review_response(result.response_text, objective_payload=objective_payload)
                 if parsed:
-                    diagnostics = result.diagnostics if isinstance(result.diagnostics, dict) else {}
-                    llm_usage = {
-                        "cost_usd": float(diagnostics.get("cost_usd", 0.0) or 0.0),
-                        "prompt_tokens": int(diagnostics.get("prompt_tokens", 0) or 0),
-                        "completion_tokens": int(diagnostics.get("completion_tokens", 0) or 0),
-                        "total_tokens": int(diagnostics.get("total_tokens", 0) or 0),
-                        "latency_ms": float(diagnostics.get("latency_ms", 0.0) or 0.0),
-                        "shared_invocation": True,
-                    }
+                    llm_usage, usage_reported, usage_source = self._objective_review_usage_details(result.diagnostics if isinstance(result.diagnostics, dict) else {}, task_id=task.id, run_id=run.id)
                     for packet in parsed:
                         packet["backend"] = backend
                         packet["prompt_path"] = str(result.prompt_path)
                         packet["response_path"] = str(result.response_path)
                         packet["llm_usage"] = llm_usage
+                        packet["llm_usage_reported"] = usage_reported
+                        packet["llm_usage_source"] = usage_source
+                        packet["review_task_id"] = task.id
+                        packet["review_run_id"] = run.id
                     return parsed
             except LLMExecutionError:
                 pass
         return self._deterministic_objective_review_packets(objective_payload)
+
+    def _objective_review_usage_details(
+        self,
+        diagnostics: dict[str, object],
+        *,
+        task_id: str,
+        run_id: str,
+    ) -> tuple[dict[str, object], bool, str]:
+        usage = {
+            "cost_usd": float(diagnostics.get("cost_usd", 0.0) or 0.0),
+            "prompt_tokens": int(diagnostics.get("prompt_tokens", 0) or 0),
+            "completion_tokens": int(diagnostics.get("completion_tokens", 0) or 0),
+            "total_tokens": int(diagnostics.get("total_tokens", 0) or 0),
+            "latency_ms": float(diagnostics.get("latency_ms", 0.0) or 0.0),
+            "shared_invocation": True,
+        }
+        if any(float(usage.get(key, 0) or 0) > 0 for key in ("cost_usd", "prompt_tokens", "completion_tokens", "total_tokens")):
+            return usage, True, "diagnostics"
+        telemetry = getattr(self.ctx, "telemetry", None)
+        if telemetry is not None and hasattr(telemetry, "load_metrics"):
+            try:
+                metrics = telemetry.load_metrics()
+            except Exception:
+                metrics = []
+            for item in metrics:
+                attributes = item.get("attributes") if isinstance(item, dict) else {}
+                if not isinstance(attributes, dict):
+                    continue
+                if str(attributes.get("task_id") or "") != task_id or str(attributes.get("run_id") or "") != run_id:
+                    continue
+                name = str(item.get("name") or "")
+                value = float(item.get("value", 0.0) or 0.0)
+                if name == "llm_cost_usd":
+                    usage["cost_usd"] = value
+                elif name == "llm_prompt_tokens":
+                    usage["prompt_tokens"] = int(value)
+                elif name == "llm_completion_tokens":
+                    usage["completion_tokens"] = int(value)
+                elif name == "llm_total_tokens":
+                    usage["total_tokens"] = int(value)
+                elif name == "llm_execute_duration_ms":
+                    usage["latency_ms"] = max(float(usage.get("latency_ms", 0.0) or 0.0), value)
+        if any(float(usage.get(key, 0) or 0) > 0 for key in ("cost_usd", "prompt_tokens", "completion_tokens", "total_tokens")):
+            return usage, True, "telemetry"
+        if float(usage.get("latency_ms", 0.0) or 0.0) > 0:
+            usage["reported"] = False
+            usage["missing_reason"] = "backend_did_not_report_token_usage"
+            return usage, False, "telemetry_latency_only"
+        return {
+            "shared_invocation": True,
+            "reported": False,
+            "missing_reason": "backend_did_not_report_token_usage",
+        }, False, "unreported"
+
+    def _normalize_objective_review_usage_metadata(
+        self,
+        metadata: dict[str, object],
+    ) -> tuple[dict[str, object], bool, str]:
+        usage = dict(metadata.get("llm_usage") or {}) if isinstance(metadata.get("llm_usage"), dict) else {}
+        source = str(metadata.get("llm_usage_source") or "").strip()
+        raw_reported = metadata.get("llm_usage_reported")
+        if isinstance(raw_reported, bool):
+            reported = raw_reported
+        else:
+            reported = True
+            if bool(usage.get("shared_invocation")) and not any(
+                float(usage.get(key, 0) or 0) > 0 for key in ("cost_usd", "prompt_tokens", "completion_tokens", "total_tokens")
+            ):
+                reported = False
+                if not source:
+                    source = "unreported"
+                usage.setdefault("reported", False)
+                usage.setdefault("missing_reason", "backend_did_not_report_token_usage")
+        return usage, reported, source
 
     def _create_objective_review_remediation_tasks(
         self,
@@ -6121,10 +6812,14 @@ class HarnessUIDataService:
                 continue
             findings = [str(item).strip() for item in list(packet.get("findings") or []) if str(item).strip()]
             summary = str(packet.get("summary") or "").strip()
-            title = f"Address {dimension.replace('_', ' ')} review findings"
-            objective_text = summary or "Address the objective review findings and keep the work bounded to the same objective."
-            if findings:
-                objective_text += "\n" + "\n".join(f"- {item}" for item in findings)
+            evidence_contract = self._objective_review_evidence_contract(packet)
+            artifact_type = str(evidence_contract.get("required_artifact_type") or "review_artifact")
+            title = f"Produce {artifact_type.replace('_', ' ')} for {dimension.replace('_', ' ')} review finding"
+            objective_text = self._build_objective_review_remediation_objective(
+                summary=summary,
+                findings=findings,
+                evidence_contract=evidence_contract,
+            )
             task = self.task_service.create_task_with_policy(
                 project_id=objective.project_id,
                 objective_id=objective.id,
@@ -6141,6 +6836,8 @@ class HarnessUIDataService:
                         "dimension": dimension,
                         "reviewer": str(packet.get("reviewer") or ""),
                         "verdict": verdict,
+                        "finding_record_id": str(packet.get("packet_record_id") or ""),
+                        "evidence_contract": evidence_contract,
                     }
                 },
                 validation_profile="generic",
@@ -6148,13 +6845,263 @@ class HarnessUIDataService:
                 scope={},
                 strategy="objective_review_remediation",
                 max_attempts=3,
-                required_artifacts=["plan", "report"],
+                required_artifacts=list(dict.fromkeys(["plan", "report", artifact_type])),
             )
             created.append(task.id)
             existing_dimensions.add(dimension)
         if created:
             self.store.update_objective_phase(objective.id)
         return created
+
+    def _objective_review_evidence_contract(self, packet: dict[str, object]) -> dict[str, object]:
+        contract = packet.get("evidence_contract") if isinstance(packet.get("evidence_contract"), dict) else {}
+        required_artifact_type = str(
+            contract.get("required_artifact_type") or packet.get("required_artifact_type") or ""
+        ).strip()
+        artifact_schema = self._normalize_objective_review_artifact_schema(
+            contract.get("artifact_schema") if contract else packet.get("artifact_schema"),
+            required_artifact_type=required_artifact_type,
+            dimension=str(packet.get("dimension") or ""),
+        ) or {}
+        closure_criteria = str(contract.get("closure_criteria") or packet.get("closure_criteria") or "").strip()
+        evidence_required = str(contract.get("evidence_required") or packet.get("evidence_required") or "").strip()
+        return {
+            "required_artifact_type": required_artifact_type,
+            "artifact_schema": artifact_schema,
+            "closure_criteria": closure_criteria,
+            "evidence_required": evidence_required,
+        }
+
+    def _build_objective_review_remediation_objective(
+        self,
+        *,
+        summary: str,
+        findings: list[str],
+        evidence_contract: dict[str, object],
+    ) -> str:
+        artifact_type = str(evidence_contract.get("required_artifact_type") or "review_artifact")
+        artifact_schema = evidence_contract.get("artifact_schema") if isinstance(evidence_contract.get("artifact_schema"), dict) else {}
+        required_fields = [str(item).strip() for item in list(artifact_schema.get("required_fields") or []) if str(item).strip()]
+        lines = [f"Produce the required review evidence artifact `{artifact_type}` for this objective-promotion finding."]
+        if summary:
+            lines.append(f"Reviewer summary: {summary}")
+        if findings:
+            lines.append("Findings:")
+            lines.extend(f"- {item}" for item in findings)
+        if evidence_contract.get("closure_criteria"):
+            lines.append(f"Closure criteria: {evidence_contract['closure_criteria']}")
+        if evidence_contract.get("evidence_required"):
+            lines.append(f"Evidence required: {evidence_contract['evidence_required']}")
+        if required_fields:
+            lines.append("Artifact schema fields: " + ", ".join(required_fields))
+        lines.append("Do not answer this generically. Produce the exact artifact type named above.")
+        return "\n".join(lines)
+
+    def _record_objective_review_cycle_artifact(
+        self,
+        *,
+        objective: Objective,
+        review_id: str,
+        packet_record_ids: list[str],
+        completed_record: ContextRecord,
+        linked_task_ids: list[str],
+    ) -> None:
+        existing = [
+            record
+            for record in self.store.list_context_records(objective_id=objective.id, record_type="objective_review_cycle_artifact")
+            if str(record.metadata.get("review_id") or "") == review_id
+        ]
+        if existing:
+            return
+        start_record = next(
+            (
+                record for record in reversed(self.store.list_context_records(objective_id=objective.id, record_type="objective_review_started"))
+                if str(record.metadata.get("review_id") or "") == review_id
+            ),
+            None,
+        )
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="objective_review_cycle_artifact",
+                project_id=objective.project_id,
+                objective_id=objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content=f"Persisted first-class review cycle artifact for review {review_id}.",
+                metadata={
+                    "review_id": review_id,
+                    "start_event": {
+                        "record_id": start_record.id if start_record is not None else "",
+                        "created_at": start_record.created_at.isoformat() if start_record is not None else "",
+                    },
+                    "packet_persistence_events": packet_record_ids,
+                    "terminal_event": {
+                        "record_id": completed_record.id,
+                        "created_at": completed_record.created_at.isoformat(),
+                    },
+                    "linked_outcome": {
+                        "kind": "remediation_created" if linked_task_ids else "review_clear",
+                        "task_ids": linked_task_ids,
+                    },
+                },
+            )
+        )
+
+    def _record_objective_review_worker_responses(self, objective: Objective, latest_round: dict[str, object]) -> None:
+        review_id = str(latest_round.get("review_id") or "")
+        if not review_id:
+            return
+        tasks = [
+            task for task in self.store.list_tasks(objective.project_id)
+            if task.objective_id == objective.id
+            and task.strategy == "objective_review_remediation"
+            and isinstance(task.external_ref_metadata, dict)
+            and isinstance(task.external_ref_metadata.get("objective_review_remediation"), dict)
+            and str(task.external_ref_metadata["objective_review_remediation"].get("review_id") or "") == review_id
+            and task.status == TaskStatus.COMPLETED
+        ]
+        existing_keys = {
+            (
+                str(record.metadata.get("review_id") or ""),
+                str(record.metadata.get("task_id") or ""),
+                str(record.metadata.get("run_id") or ""),
+            )
+            for record in self.store.list_context_records(objective_id=objective.id, record_type="objective_review_worker_response")
+        }
+        for task in tasks:
+            metadata = task.external_ref_metadata.get("objective_review_remediation") if isinstance(task.external_ref_metadata.get("objective_review_remediation"), dict) else {}
+            runs = self.store.list_runs(task.id)
+            run = runs[-1] if runs else None
+            run_id = run.id if run is not None else ""
+            key = (review_id, task.id, run_id)
+            if key in existing_keys:
+                continue
+            evidence_contract = metadata.get("evidence_contract") if isinstance(metadata.get("evidence_contract"), dict) else {}
+            required_artifact_type = str(evidence_contract.get("required_artifact_type") or "")
+            artifacts = self.store.list_artifacts(run.id) if run is not None else []
+            exact_artifact = next((artifact for artifact in artifacts if artifact.kind == required_artifact_type), artifacts[0] if artifacts else None)
+            exact_payload = {
+                "artifact_id": exact_artifact.id if exact_artifact is not None else "",
+                "kind": exact_artifact.kind if exact_artifact is not None else "",
+                "path": exact_artifact.path if exact_artifact is not None else "",
+                "summary": exact_artifact.summary if exact_artifact is not None else "",
+            }
+            self.store.create_context_record(
+                ContextRecord(
+                    id=new_id("context"),
+                    record_type="objective_review_worker_response",
+                    project_id=objective.project_id,
+                    objective_id=objective.id,
+                    task_id=task.id,
+                    run_id=run.id if run is not None else None,
+                    visibility="operator_visible",
+                    author_type="system",
+                    content=f"Worker response recorded for review {review_id} {metadata.get('dimension') or ''}.",
+                    metadata={
+                        "review_id": review_id,
+                        "task_id": task.id,
+                        "run_id": run.id if run is not None else "",
+                        "dimension": str(metadata.get("dimension") or ""),
+                        "finding_record_id": str(metadata.get("finding_record_id") or ""),
+                        "exact_artifact_produced": exact_payload,
+                        "path": exact_payload["path"],
+                        "record_id": exact_payload["artifact_id"],
+                        "closure_mapping": self._map_artifact_to_closure(evidence_contract, exact_payload),
+                        "closure_criteria": str(evidence_contract.get("closure_criteria") or ""),
+                        "required_artifact_type": required_artifact_type,
+                    },
+                )
+            )
+
+    def _map_artifact_to_closure(self, evidence_contract: dict[str, object], exact_payload: dict[str, object]) -> str:
+        artifact_type = str(evidence_contract.get("required_artifact_type") or "")
+        closure = str(evidence_contract.get("closure_criteria") or "")
+        path = str(exact_payload.get("path") or "")
+        if not path:
+            return f"No artifact was found for required artifact type `{artifact_type}`. Closure criteria remain open: {closure}".strip()
+        return f"Artifact `{artifact_type}` was produced at {path}. This response maps directly to closure criteria: {closure}".strip()
+
+    def _record_objective_review_reviewer_rebuttals(
+        self,
+        *,
+        objective: Objective,
+        review_id: str,
+        previous_review: dict[str, object],
+        current_packets: list[dict[str, object]],
+    ) -> None:
+        prior_rounds = list(previous_review.get("review_rounds") or [])
+        if not prior_rounds:
+            return
+        prior_round = prior_rounds[0] if isinstance(prior_rounds[0], dict) else {}
+        prior_review_id = str(prior_round.get("review_id") or "")
+        if not prior_review_id:
+            return
+        current_by_dimension = {
+            str(packet.get("dimension") or ""): packet
+            for packet in current_packets
+            if str(packet.get("dimension") or "")
+        }
+        worker_by_dimension = {
+            str(record.metadata.get("dimension") or ""): record
+            for record in self.store.list_context_records(objective_id=objective.id, record_type="objective_review_worker_response")
+            if str(record.metadata.get("review_id") or "") == prior_review_id and str(record.metadata.get("dimension") or "")
+        }
+        for packet in list(prior_round.get("packets") or []):
+            if str(packet.get("verdict") or "") not in {"concern", "remediation_required"}:
+                continue
+            dimension = str(packet.get("dimension") or "")
+            outcome, reason = self._classify_objective_review_rebuttal(
+                packet,
+                current_by_dimension.get(dimension),
+                worker_by_dimension.get(dimension),
+            )
+            if outcome not in _OBJECTIVE_REVIEW_REBUTTAL_OUTCOMES:
+                continue
+            self.store.create_context_record(
+                ContextRecord(
+                    id=new_id("context"),
+                    record_type="objective_review_reviewer_rebuttal",
+                    project_id=objective.project_id,
+                    objective_id=objective.id,
+                    visibility="operator_visible",
+                    author_type="system",
+                    content=f"Reviewer rebuttal for {dimension}: {outcome}.",
+                    metadata={
+                        "review_id": review_id,
+                        "prior_review_id": prior_review_id,
+                        "dimension": dimension,
+                        "outcome": outcome,
+                        "reason": reason,
+                    },
+                )
+            )
+
+    def _classify_objective_review_rebuttal(
+        self,
+        prior_packet: dict[str, object],
+        current_packet: dict[str, object] | None,
+        worker_response: ContextRecord | None,
+    ) -> tuple[str, str]:
+        prior_contract = self._objective_review_evidence_contract(prior_packet)
+        expected_type = str(prior_contract.get("required_artifact_type") or "")
+        if current_packet and str(current_packet.get("verdict") or "") == "pass":
+            return "accepted", "Current review packet accepted the evidence and cleared the finding."
+        if worker_response is None:
+            return "evidence_not_found", "No worker response record was found for the prior finding."
+        produced = worker_response.metadata.get("exact_artifact_produced") if isinstance(worker_response.metadata.get("exact_artifact_produced"), dict) else {}
+        produced_type = str(produced.get("kind") or "")
+        if not str(produced.get("path") or ""):
+            return "evidence_not_found", "Worker response did not point to a persisted artifact."
+        if expected_type and produced_type and produced_type != expected_type:
+            return "wrong_artifact_type", f"Worker produced `{produced_type}` but the contract required `{expected_type}`."
+        schema = prior_contract.get("artifact_schema") if isinstance(prior_contract.get("artifact_schema"), dict) else {}
+        required_fields = [str(item).strip().lower() for item in list(schema.get("required_fields") or []) if str(item).strip()]
+        if any(field in {"terminal_event", "completed_at"} for field in required_fields):
+            mapping = str(worker_response.metadata.get("closure_mapping") or "")
+            if "No artifact was found" in mapping:
+                return "missing_terminal_event", "The required terminal event evidence was not persisted."
+        return "artifact_incomplete", "A response artifact exists, but the reviewer still did not accept it as closing the contract."
 
     def _run_atomic_generation(self, objective_id: str, generation_id: str, diagram_version: int) -> None:
         objective = self.store.get_objective(objective_id)
@@ -7716,12 +8663,16 @@ class HarnessUIDataService:
                     "status": round_row.get("status"),
                     "verdict_counts": round_row.get("verdict_counts"),
                     "remediation_counts": round_row.get("remediation_counts"),
+                    "review_cycle_artifact": round_row.get("review_cycle_artifact"),
+                    "worker_responses": round_row.get("worker_responses"),
+                    "reviewer_rebuttals": round_row.get("reviewer_rebuttals"),
                     "packets": [
                         {
                             "dimension": packet.get("dimension"),
                             "verdict": packet.get("verdict"),
                             "progress_status": packet.get("progress_status"),
                             "summary": packet.get("summary"),
+                            "evidence_contract": packet.get("evidence_contract"),
                         }
                         for packet in list(round_row.get("packets") or [])
                     ],
@@ -7732,10 +8683,11 @@ class HarnessUIDataService:
             "Review the objective as a whole after execution completed.\n"
             "You may be reviewing a later round after remediation from prior rounds.\n"
             "Judge progress against previous rounds instead of repeating the same concern blindly.\n"
+            "Every non-pass packet becomes an Evidence Contract for remediation. Review findings and remediation must speak the same artifact type.\n"
             "Do not treat an actively running review/remediation cycle as proof of failure on its own.\n"
             "If the current lifecycle is still in progress, distinguish missing implementation from missing final evidence.\n"
             "Return JSON only with keys: summary, packets.\n"
-            "packets must be an array. Each packet must contain reviewer, dimension, verdict, progress_status, severity, owner_scope, summary, findings, evidence, closure_criteria, evidence_required.\n"
+            "packets must be an array. Each packet must contain reviewer, dimension, verdict, progress_status, severity, owner_scope, summary, findings, evidence, required_artifact_type, artifact_schema, closure_criteria, evidence_required.\n"
             "reviewer: short reviewer name\n"
             "dimension: one of intent_fidelity, unit_test_coverage, integration_e2e_coverage, security, devops, atomic_fidelity, code_structure\n"
             "verdict: one of pass, concern, remediation_required\n"
@@ -7745,6 +8697,8 @@ class HarnessUIDataService:
             "summary: short paragraph\n"
             "findings: array of short strings\n"
             "evidence: array of short strings\n"
+            "required_artifact_type: REQUIRED for concern and remediation_required. Name the exact artifact type that must be produced.\n"
+            "artifact_schema: REQUIRED for concern and remediation_required. JSON object with at least type, description, and required_fields.\n"
             "closure_criteria: REQUIRED for concern and remediation_required. Must be concrete and measurable.\n"
             "evidence_required: REQUIRED for concern and remediation_required. Must name the artifact or proof required to clear the finding.\n"
             "repeat_reason: REQUIRED when verdict is concern or remediation_required and progress_status is improving, still_blocking, or resolved.\n"
@@ -7803,8 +8757,17 @@ class HarnessUIDataService:
         evidence = [str(v).strip() for v in list(item.get("evidence") or []) if str(v).strip()]
         severity = str(item.get("severity") or "").strip().lower()
         owner_scope = str(item.get("owner_scope") or "").strip()
-        closure_criteria = str(item.get("closure_criteria") or "").strip()
-        evidence_required = str(item.get("evidence_required") or "").strip()
+        contract_payload = item.get("evidence_contract") if isinstance(item.get("evidence_contract"), dict) else {}
+        required_artifact_type = str(
+            item.get("required_artifact_type") or contract_payload.get("required_artifact_type") or ""
+        ).strip()
+        artifact_schema = self._normalize_objective_review_artifact_schema(
+            item.get("artifact_schema") if item.get("artifact_schema") is not None else contract_payload.get("artifact_schema"),
+            required_artifact_type=required_artifact_type,
+            dimension=dimension,
+        )
+        closure_criteria = str(item.get("closure_criteria") or contract_payload.get("closure_criteria") or "").strip()
+        evidence_required = str(item.get("evidence_required") or contract_payload.get("evidence_required") or "").strip()
         repeat_reason = str(item.get("repeat_reason") or "").strip()
         if not reviewer or not summary:
             return None
@@ -7825,13 +8788,16 @@ class HarnessUIDataService:
                 "summary": summary,
                 "findings": findings,
                 "evidence": evidence,
+                "required_artifact_type": "",
+                "artifact_schema": {},
+                "evidence_contract": {},
                 "closure_criteria": "",
                 "evidence_required": "",
                 "repeat_reason": repeat_reason,
             }
         if severity not in _OBJECTIVE_REVIEW_SEVERITIES:
             return None
-        if not owner_scope or not closure_criteria or not evidence_required:
+        if not owner_scope or not closure_criteria or not evidence_required or not required_artifact_type or artifact_schema is None:
             return None
         if progress_status in {"improving", "still_blocking", "resolved"} and not repeat_reason:
             return None
@@ -7855,6 +8821,12 @@ class HarnessUIDataService:
             and self._packet_requests_round_artifact(evidence_required, closure_criteria)
         ):
             return None
+        evidence_contract = {
+            "required_artifact_type": required_artifact_type,
+            "artifact_schema": artifact_schema,
+            "closure_criteria": closure_criteria,
+            "evidence_required": evidence_required,
+        }
         return {
             "reviewer": reviewer,
             "dimension": dimension,
@@ -7865,6 +8837,9 @@ class HarnessUIDataService:
             "summary": summary,
             "findings": findings,
             "evidence": evidence,
+            "required_artifact_type": required_artifact_type,
+            "artifact_schema": artifact_schema,
+            "evidence_contract": evidence_contract,
             "closure_criteria": closure_criteria,
             "evidence_required": evidence_required,
             "repeat_reason": repeat_reason,
@@ -7877,6 +8852,9 @@ class HarnessUIDataService:
         latest = rounds[0] if isinstance(rounds[0], dict) else {}
         if not latest:
             return False
+        cycle_artifact = latest.get("review_cycle_artifact") if isinstance(latest.get("review_cycle_artifact"), dict) else {}
+        if cycle_artifact:
+            return bool(cycle_artifact.get("record_id")) and bool(cycle_artifact.get("terminal_event"))
         packet_count = int(latest.get("packet_count") or 0)
         completed_at = str(latest.get("completed_at") or "")
         verdict_counts = latest.get("verdict_counts") if isinstance(latest.get("verdict_counts"), dict) else {}
@@ -7906,6 +8884,46 @@ class HarnessUIDataService:
         )
         return any(marker in text for marker in markers)
 
+    def _normalize_objective_review_artifact_schema(
+        self,
+        raw_schema: object,
+        *,
+        required_artifact_type: str,
+        dimension: str,
+    ) -> dict[str, object] | None:
+        artifact_type = required_artifact_type.strip()
+        if not artifact_type:
+            return None
+        schema: dict[str, object] = {}
+        if isinstance(raw_schema, dict):
+            schema = dict(raw_schema)
+        elif isinstance(raw_schema, str) and raw_schema.strip():
+            schema = {"description": raw_schema.strip()}
+        required_fields = [str(item).strip() for item in list(schema.get("required_fields") or []) if str(item).strip()]
+        if not required_fields:
+            required_fields = self._default_review_artifact_required_fields(artifact_type)
+        description = str(schema.get("description") or "").strip()
+        if not description:
+            description = f"Persist one {artifact_type} artifact for the {dimension or 'objective review'} dimension."
+        normalized = {
+            "type": str(schema.get("type") or artifact_type).strip() or artifact_type,
+            "description": description,
+            "required_fields": required_fields,
+        }
+        if schema.get("record_locator"):
+            normalized["record_locator"] = schema.get("record_locator")
+        return normalized
+
+    def _default_review_artifact_required_fields(self, artifact_type: str) -> list[str]:
+        lowered = artifact_type.lower()
+        if "review_cycle" in lowered or "telemetry" in lowered:
+            return ["review_id", "start_event", "packet_persistence_events", "terminal_event", "linked_outcome"]
+        if "review_packet" in lowered:
+            return ["review_id", "reviewer", "dimension", "verdict", "artifacts"]
+        if "test" in lowered:
+            return ["artifact_path", "test_targets", "result"]
+        return ["artifact_path", "summary"]
+
     def _deterministic_objective_review_packets(self, objective_payload: dict[str, object]) -> list[dict[str, object]]:
         counts = objective_payload.get("task_counts", {}) if isinstance(objective_payload, dict) else {}
         failed = int(counts.get("failed", 0) or 0)
@@ -7922,10 +8940,28 @@ class HarnessUIDataService:
                 "summary": "Execution completed and the objective reached a resolved state. Review the linked task outcomes against the original intent before promotion.",
                 "findings": [] if unresolved == 0 else ["There are unresolved failed tasks that still need explicit disposition."],
                 "evidence": [f"Completed tasks: {int(counts.get('completed', 0) or 0)}", f"Unresolved failed tasks: {unresolved}"],
+                "required_artifact_type": "" if unresolved == 0 else "failed_task_disposition_record",
+                "artifact_schema": {} if unresolved == 0 else {
+                    "type": "failed_task_disposition_record",
+                    "description": "Each unresolved failed task must carry an explicit persisted disposition before promotion.",
+                    "required_fields": ["task_id", "disposition", "rationale"],
+                },
+                "evidence_contract": {} if unresolved == 0 else {
+                    "required_artifact_type": "failed_task_disposition_record",
+                    "artifact_schema": {
+                        "type": "failed_task_disposition_record",
+                        "description": "Each unresolved failed task must carry an explicit persisted disposition before promotion.",
+                        "required_fields": ["task_id", "disposition", "rationale"],
+                    },
+                    "closure_criteria": "All failed tasks for the objective must be explicitly waived, superseded, or resolved so unresolved failed task count is zero.",
+                    "evidence_required": "Objective summary shows zero unresolved failed tasks and records explicit failed-task dispositions.",
+                },
                 "closure_criteria": "" if unresolved == 0 else "All failed tasks for the objective must be explicitly waived, superseded, or resolved so unresolved failed task count is zero.",
                 "evidence_required": "" if unresolved == 0 else "Objective summary shows zero unresolved failed tasks and records explicit failed-task dispositions.",
                 "repeat_reason": "",
-                "llm_usage": {},
+                "llm_usage": {"shared_invocation": True, "reported": False, "missing_reason": "deterministic_review_packet"},
+                "llm_usage_reported": False,
+                "llm_usage_source": "deterministic",
             },
             {
                 "reviewer": "QA agent",
@@ -7937,10 +8973,28 @@ class HarnessUIDataService:
                 "summary": "Unit and integration evidence should be reviewed from the completed task reports before promotion.",
                 "findings": ["Objective-level QA packets are not yet derived from report artifacts."],
                 "evidence": [f"Historical failed tasks: {failed}", f"Waived failed tasks: {waived}"],
+                "required_artifact_type": "objective_review_packet",
+                "artifact_schema": {
+                    "type": "objective_review_packet",
+                    "description": "QA closure requires a persisted review packet that cites the exact completed-task test artifacts.",
+                    "required_fields": ["review_id", "reviewer", "dimension", "verdict", "artifacts"],
+                },
+                "evidence_contract": {
+                    "required_artifact_type": "objective_review_packet",
+                    "artifact_schema": {
+                        "type": "objective_review_packet",
+                        "description": "QA closure requires a persisted review packet that cites the exact completed-task test artifacts.",
+                        "required_fields": ["review_id", "reviewer", "dimension", "verdict", "artifacts"],
+                    },
+                    "closure_criteria": "Objective review packets must cite concrete unit-test or integration-test evidence from completed task artifacts for the QA dimensions.",
+                    "evidence_required": "A recorded review packet that references completed-task test artifacts and concludes QA pass or resolved concern status.",
+                },
                 "closure_criteria": "Objective review packets must cite concrete unit-test or integration-test evidence from completed task artifacts for the QA dimensions.",
                 "evidence_required": "A recorded review packet that references completed-task test artifacts and concludes QA pass or resolved concern status.",
                 "repeat_reason": "",
-                "llm_usage": {},
+                "llm_usage": {"shared_invocation": True, "reported": False, "missing_reason": "deterministic_review_packet"},
+                "llm_usage_reported": False,
+                "llm_usage_source": "deterministic",
             },
             {
                 "reviewer": "Structure agent",
@@ -7952,10 +9006,28 @@ class HarnessUIDataService:
                 "summary": "Historical control-plane failures were waived, so code structure should be reviewed carefully before promotion.",
                 "findings": ["Waived control-plane failures deserve a human review pass."] if waived else [],
                 "evidence": [f"Waived failed tasks: {waived}"],
+                "required_artifact_type": "" if not waived else "failed_task_disposition_record",
+                "artifact_schema": {} if not waived else {
+                    "type": "failed_task_disposition_record",
+                    "description": "Waived failed tasks must retain persisted superseding or waiver rationale.",
+                    "required_fields": ["task_id", "disposition", "rationale"],
+                },
+                "evidence_contract": {} if not waived else {
+                    "required_artifact_type": "failed_task_disposition_record",
+                    "artifact_schema": {
+                        "type": "failed_task_disposition_record",
+                        "description": "Waived failed tasks must retain persisted superseding or waiver rationale.",
+                        "required_fields": ["task_id", "disposition", "rationale"],
+                    },
+                    "closure_criteria": "Historical failed tasks must be superseded or waived with rationale so fragmented partial work is not left unresolved.",
+                    "evidence_required": "Failed-task records show explicit superseding or waiver rationale for every historical failure.",
+                },
                 "closure_criteria": "Historical failed tasks must be superseded or waived with rationale so fragmented partial work is not left unresolved." if waived else "",
                 "evidence_required": "Failed-task records show explicit superseding or waiver rationale for every historical failure." if waived else "",
                 "repeat_reason": "",
-                "llm_usage": {},
+                "llm_usage": {"shared_invocation": True, "reported": False, "missing_reason": "deterministic_review_packet"},
+                "llm_usage_reported": False,
+                "llm_usage_source": "deterministic",
             },
         ]
         return packets
@@ -8430,6 +9502,9 @@ class HarnessUIDataService:
         review_completed_records = [record for record in objective_records if record.record_type == "objective_review_completed"]
         review_failed_records = [record for record in objective_records if record.record_type == "objective_review_failed"]
         review_packet_records = [record for record in objective_records if record.record_type == "objective_review_packet"]
+        review_cycle_artifact_records = [record for record in objective_records if record.record_type == "objective_review_cycle_artifact"]
+        worker_response_records = [record for record in objective_records if record.record_type == "objective_review_worker_response"]
+        reviewer_rebuttal_records = [record for record in objective_records if record.record_type == "objective_review_reviewer_rebuttal"]
         waivers_by_task: dict[str, dict[str, object]] = {}
         for record in objective_records:
             if record.record_type != "failed_task_waived":
@@ -8510,29 +9585,37 @@ class HarnessUIDataService:
         start_order = sorted(review_start_records, key=lambda record: record.created_at)
         for idx, start in enumerate(start_order, start=1):
             review_id = str(start.metadata.get("review_id") or start.id)
-            packets = [
-                {
-                    "source": "objective_review",
-                    "review_id": review_id,
-                    "reviewer": str(record.metadata.get("reviewer") or ""),
-                    "dimension": str(record.metadata.get("dimension") or ""),
-                    "verdict": str(record.metadata.get("verdict") or ""),
-                    "progress_status": str(record.metadata.get("progress_status") or "not_applicable"),
-                    "severity": str(record.metadata.get("severity") or ""),
-                    "owner_scope": str(record.metadata.get("owner_scope") or ""),
-                    "summary": record.content,
-                    "findings": list(record.metadata.get("findings") or []),
-                    "evidence": list(record.metadata.get("evidence") or []),
-                    "closure_criteria": str(record.metadata.get("closure_criteria") or ""),
-                    "evidence_required": str(record.metadata.get("evidence_required") or ""),
-                    "repeat_reason": str(record.metadata.get("repeat_reason") or ""),
-                    "llm_usage": dict(record.metadata.get("llm_usage") or {}) if isinstance(record.metadata.get("llm_usage"), dict) else {},
-                    "backend": record.metadata.get("backend"),
-                    "created_at": record.created_at.isoformat(),
-                }
-                for record in review_packet_records
-                if str(record.metadata.get("review_id") or "") == review_id
-            ]
+            packets = []
+            for record in review_packet_records:
+                if str(record.metadata.get("review_id") or "") != review_id:
+                    continue
+                llm_usage, llm_usage_reported, llm_usage_source = self._normalize_objective_review_usage_metadata(record.metadata)
+                packets.append(
+                    {
+                        "source": "objective_review",
+                        "review_id": review_id,
+                        "reviewer": str(record.metadata.get("reviewer") or ""),
+                        "dimension": str(record.metadata.get("dimension") or ""),
+                        "verdict": str(record.metadata.get("verdict") or ""),
+                        "progress_status": str(record.metadata.get("progress_status") or "not_applicable"),
+                        "severity": str(record.metadata.get("severity") or ""),
+                        "owner_scope": str(record.metadata.get("owner_scope") or ""),
+                        "summary": record.content,
+                        "findings": list(record.metadata.get("findings") or []),
+                        "evidence": list(record.metadata.get("evidence") or []),
+                        "required_artifact_type": str(record.metadata.get("required_artifact_type") or ""),
+                        "artifact_schema": record.metadata.get("artifact_schema") if isinstance(record.metadata.get("artifact_schema"), dict) else {},
+                        "evidence_contract": self._objective_review_evidence_contract(record.metadata),
+                        "closure_criteria": str(record.metadata.get("closure_criteria") or ""),
+                        "evidence_required": str(record.metadata.get("evidence_required") or ""),
+                        "repeat_reason": str(record.metadata.get("repeat_reason") or ""),
+                        "llm_usage": llm_usage,
+                        "llm_usage_reported": llm_usage_reported,
+                        "llm_usage_source": llm_usage_source,
+                        "backend": record.metadata.get("backend"),
+                        "created_at": record.created_at.isoformat(),
+                    }
+                )
             completed = next(
                 (record for record in reversed(review_completed_records) if str(record.metadata.get("review_id") or "") == review_id),
                 None,
@@ -8547,6 +9630,39 @@ class HarnessUIDataService:
                 if verdict in verdict_counts:
                     verdict_counts[verdict] += 1
             remediation_tasks = remediation_tasks_by_review.get(review_id, [])
+            review_cycle_artifact = next(
+                (
+                    record for record in reversed(review_cycle_artifact_records)
+                    if str(record.metadata.get("review_id") or "") == review_id
+                ),
+                None,
+            )
+            worker_responses = [
+                {
+                    "record_id": record.id,
+                    "task_id": str(record.metadata.get("task_id") or ""),
+                    "run_id": str(record.metadata.get("run_id") or ""),
+                    "dimension": str(record.metadata.get("dimension") or ""),
+                    "finding_record_id": str(record.metadata.get("finding_record_id") or ""),
+                    "exact_artifact_produced": record.metadata.get("exact_artifact_produced"),
+                    "closure_mapping": str(record.metadata.get("closure_mapping") or ""),
+                    "created_at": record.created_at.isoformat(),
+                }
+                for record in worker_response_records
+                if str(record.metadata.get("review_id") or "") == review_id
+            ]
+            reviewer_rebuttals = [
+                {
+                    "record_id": record.id,
+                    "prior_review_id": str(record.metadata.get("prior_review_id") or ""),
+                    "dimension": str(record.metadata.get("dimension") or ""),
+                    "outcome": str(record.metadata.get("outcome") or ""),
+                    "reason": str(record.metadata.get("reason") or ""),
+                    "created_at": record.created_at.isoformat(),
+                }
+                for record in reviewer_rebuttal_records
+                if str(record.metadata.get("review_id") or "") == review_id
+            ]
             remediation_counts = {"total": len(remediation_tasks), "completed": 0, "active": 0, "pending": 0, "failed": 0}
             for task in remediation_tasks:
                 if task.status.value in remediation_counts:
@@ -8587,6 +9703,15 @@ class HarnessUIDataService:
                         key=lambda item: (str(item.get("created_at") or ""), str(item.get("dimension") or "")),
                         reverse=True,
                     ),
+                    "review_cycle_artifact": {
+                        "record_id": review_cycle_artifact.id,
+                        "start_event": review_cycle_artifact.metadata.get("start_event"),
+                        "packet_persistence_events": list(review_cycle_artifact.metadata.get("packet_persistence_events") or []),
+                        "terminal_event": review_cycle_artifact.metadata.get("terminal_event"),
+                        "linked_outcome": review_cycle_artifact.metadata.get("linked_outcome"),
+                    } if review_cycle_artifact is not None else {},
+                    "worker_responses": sorted(worker_responses, key=lambda item: str(item.get("created_at") or ""), reverse=True),
+                    "reviewer_rebuttals": sorted(reviewer_rebuttals, key=lambda item: str(item.get("created_at") or ""), reverse=True),
                     "remediation_counts": remediation_counts,
                     "remediation_tasks": [
                         {"id": task.id, "title": task.title, "status": task.status.value}
@@ -9185,6 +10310,12 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/promotion-review":
             self._send_html(_PROMOTION_REVIEW_HTML)
+            return
+        if parsed.path == "/token-performance":
+            self._send_html(_TOKEN_PERFORMANCE_HTML)
+            return
+        if parsed.path == "/objectives/new":
+            self._send_html(_OBJECTIVE_CREATE_HTML)
             return
         if parsed.path == "/workspace":
             self._send_html(_FULL_UI_HTML)

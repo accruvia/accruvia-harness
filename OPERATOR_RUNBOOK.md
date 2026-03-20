@@ -32,8 +32,16 @@ Prototype expectations:
 
 ## Core Operator Commands
 
+Pre-release safety rule:
+
+- when running Python from the repo root, always force `src` to the front of import resolution
+- use the `make` targets here, `./bin/pytest-src`, or keep the explicit `PYTHONPATH=src` prefix
+- TODO(remove after packaged release): delete this rule once local installs/imports are deterministic
+
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -v
+./bin/pytest-src -q tests/test_ui.py -q
+PYTHONPATH=src python3 -m pytest -q tests/test_ui.py -q
 ./bin/accruvia-harness doctor
 ./bin/accruvia-harness status
 ./bin/accruvia-harness summary

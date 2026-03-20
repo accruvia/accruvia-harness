@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Temporary pre-release safety rule: keep repo ./src ahead of stale generated
+# workspaces during local pytest runs.
+# TODO(remove after packaged release): delete this wrapper once local installs/imports are deterministic.
+export PYTHONPATH="$repo_root/src${PYTHONPATH:+:$PYTHONPATH}"
+
+exec python3 -m pytest "$@"

@@ -410,9 +410,14 @@ class CommandWorker:
                 "worker_backend": self.backend_name,
                 "command": self.command,
                 "returncode": completed.returncode,
+                "worker_outcome": payload.get("worker_outcome"),
                 "blocked": outcome == "blocked",
                 "infrastructure_failure": infrastructure_failure,
                 "failure_category": payload.get("failure_category"),
+                "failure_message": payload.get("failure_message"),
+                "compile_check": payload.get("compile_check"),
+                "test_check": payload.get("test_check"),
+                "validation_elapsed_seconds": payload.get("validation_elapsed_seconds"),
                 "timeout_seconds": timeout_seconds,
                 "memory_limit_mb": getattr(self.resource_policy, "memory_limit_mb", None),
                 "cpu_time_limit_seconds": getattr(self.resource_policy, "cpu_time_limit_seconds", None),
@@ -507,8 +512,12 @@ class LLMTaskWorker:
                 "llm_model": self.model,
             }
         except LLMExecutionError as exc:
+            error_text = str(exc)
+            timed_out = "timed out" in error_text.lower()
+            failure_category = "executor_timeout" if timed_out else "llm_executor_failure"
+            worker_outcome = "blocked" if timed_out else "failed"
             error_path = run_dir / "llm_error.txt"
-            error_path.write_text(str(exc), encoding="utf-8")
+            error_path.write_text(error_text, encoding="utf-8")
             report_path = run_dir / "report.json"
             report_path.write_text(
                 json.dumps(
@@ -520,13 +529,14 @@ class LLMTaskWorker:
                         "objective": task.objective,
                         "worker_backend": "llm",
                         "llm_backend": routed_backend,
-                        "error": str(exc),
+                        "error": error_text,
                         "validation_profile": task.validation_profile,
                         "project_workspace": str(project_workspace),
-                        "worker_outcome": "blocked",
-                        "blocked": True,
+                        "worker_outcome": worker_outcome,
+                        "blocked": timed_out,
                         "infrastructure_failure": True,
-                        "failure_category": "llm_executor_failure",
+                        "failure_category": failure_category,
+                        "failure_message": error_text,
                     },
                     indent=2,
                     sort_keys=True,
@@ -539,15 +549,17 @@ class LLMTaskWorker:
                     ("report", str(report_path), "Structured run report"),
                     ("llm_error", str(error_path), "LLM execution failure"),
                 ],
-                outcome="blocked",
+                outcome=worker_outcome,
                 diagnostics={
                     "worker_backend": "llm",
                     "llm_backend": routed_backend,
                     "llm_model": self.model,
-                    "error": str(exc),
-                    "blocked": True,
+                    "error": error_text,
+                    "worker_outcome": worker_outcome,
+                    "blocked": timed_out,
                     "infrastructure_failure": True,
-                    "failure_category": "llm_executor_failure",
+                    "failure_category": failure_category,
+                    "failure_message": error_text,
                     "project_workspace": str(project_workspace),
                 },
             )
