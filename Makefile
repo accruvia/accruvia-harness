@@ -5,7 +5,7 @@ PIP ?= .venv/bin/pip
 # TODO(remove after packaged release): drop this once local installs/imports are deterministic.
 PYTHONPATH_VALUE := src
 
-.PHONY: help venv init install bootstrap install-temporal install-observability run ui-restart test test-fast test-e2e test-observer test-temporal test-pytest temporal-up temporal-down
+.PHONY: help venv init install bootstrap install-temporal install-observability run ui-restart verify-test-import-safety test test-fast test-e2e test-observer test-temporal test-pytest temporal-up temporal-down
 
 help:
 	@echo "Targets:"
@@ -17,6 +17,7 @@ help:
 	@echo "  make install-observability Install observability extras"
 	@echo "  make run ARGS=\"status\"     Run the harness CLI"
 	@echo "  make ui-restart             Restart the Harness UI deterministically"
+	@echo "  make verify-test-import-safety  Fail fast if tests would import stale workspace code"
 	@echo "  make test-fast             Run the fast suite"
 	@echo "  make test                  Run the full suite"
 	@echo "  make test-pytest ARGS=...  Run pytest with repo-local import safety"
@@ -49,7 +50,11 @@ run:
 ui-restart:
 	./bin/restart-ui
 
+verify-test-import-safety:
+	./bin/check-test-import-safety
+
 test-fast:
+	$(MAKE) verify-test-import-safety
 	PYTHONPATH=$(PYTHONPATH_VALUE) $(PYTHON) -m unittest \
 		tests.test_engine \
 		tests.test_store \
@@ -61,6 +66,7 @@ test-fast:
 		tests.test_parallel -v
 
 test-e2e:
+	$(MAKE) verify-test-import-safety
 	PYTHONPATH=$(PYTHONPATH_VALUE) $(PYTHON) -m unittest \
 		tests.test_cli \
 		tests.test_llm_e2e \
@@ -68,17 +74,21 @@ test-e2e:
 
 test-temporal: install-temporal temporal-up
 	@trap 'docker compose -f docker-compose.temporal.yml down' EXIT; \
+	$(MAKE) verify-test-import-safety; \
 	PYTHONPATH=$(PYTHONPATH_VALUE) $(PYTHON) -m unittest \
 		tests.test_runtime \
 		tests.test_temporal_e2e -v
 
 test-observer:
+	$(MAKE) verify-test-import-safety
 	PYTHONPATH=$(PYTHONPATH_VALUE) $(PYTHON) -m unittest tests.test_observer -v
 
 test:
+	$(MAKE) verify-test-import-safety
 	PYTHONPATH=$(PYTHONPATH_VALUE) $(PYTHON) -m unittest discover -s tests -v
 
 test-pytest:
+	$(MAKE) verify-test-import-safety
 	PYTHONPATH=$(PYTHONPATH_VALUE) $(PYTHON) -m pytest $(ARGS)
 
 temporal-up:

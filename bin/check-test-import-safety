@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Temporary pre-release safety rule. Tests must resolve accruvia_harness from
+# this repo's ./src tree, not from a generated workspace shadow copy.
+# TODO(remove after packaged release): delete this check once local installs/imports are deterministic.
+PYTHONPATH="$repo_root/src${PYTHONPATH:+:$PYTHONPATH}" python3 - <<'PY' "$repo_root"
+import sys
+from pathlib import Path
+
+repo_root = Path(sys.argv[1]).resolve()
+
+import accruvia_harness
+from accruvia_harness.dev_import_safety import verify_repo_import_path
+
+module_path = verify_repo_import_path(accruvia_harness.__file__, repo_root)
+print(f"Import safety OK: {module_path}")
+PY

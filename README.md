@@ -125,8 +125,10 @@ Why this is explicit right now:
 Examples:
 
 ```bash
+make verify-test-import-safety
 make test
 make test-pytest ARGS='-q tests/test_ui.py -q'
+./bin/check-test-import-safety
 ./bin/pytest-src -q tests/test_ui.py -q
 PYTHONPATH=src python3 -m pytest -q tests/test_ui.py -q
 ```

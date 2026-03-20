@@ -12,6 +12,7 @@ from pathlib import Path
 from accruvia_harness.config import HarnessConfig
 from accruvia_harness.commands.core import _build_supervise_restart_command, _emit_supervise_progress, _redact_command
 from accruvia_harness.cli_parser import build_parser
+from accruvia_harness.dev_import_safety import verify_repo_import_path
 from accruvia_harness.logging_utils import HarnessLogger, classify_error
 from accruvia_harness.store import SQLiteHarnessStore
 from accruvia_harness.telemetry import TelemetrySink, _otlp_signal_endpoints
@@ -67,6 +68,17 @@ class Phase1Tests(unittest.TestCase):
     def test_error_classifier(self) -> None:
         self.assertEqual("validation_error", classify_error(ValueError("bad value")))
         self.assertEqual("unexpected_error", classify_error(RuntimeError("boom")))
+
+    def test_verify_repo_import_path_accepts_repo_src_and_rejects_workspace_shadow(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        good_path = repo_root / "src" / "accruvia_harness" / "ui.py"
+        bad_path = repo_root / ".accruvia-harness" / "workspace" / "runs" / "run_shadow" / "workspace" / "src" / "accruvia_harness" / "ui.py"
+
+        resolved = verify_repo_import_path(good_path, repo_root)
+
+        self.assertEqual(good_path.resolve(), resolved)
+        with self.assertRaisesRegex(RuntimeError, "Unsafe test import path detected"):
+            verify_repo_import_path(bad_path, repo_root)
 
     def test_store_reports_schema_version(self) -> None:
         store = SQLiteHarnessStore(self.base / "harness.db")

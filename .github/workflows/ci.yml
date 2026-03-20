@@ -32,6 +32,7 @@ jobs:
       - name: Run fast suite
         run: |
           . .venv/bin/activate
+          make verify-test-import-safety
           make test-fast
 
   temporal-gate:
@@ -78,6 +79,7 @@ jobs:
       - name: Run Temporal gate
         run: |
           . .venv/bin/activate
+          make verify-test-import-safety
           make test-temporal
 
       - name: Stop Temporal

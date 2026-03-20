@@ -39,6 +39,8 @@ Pre-release safety rule:
 - TODO(remove after packaged release): delete this rule once local installs/imports are deterministic
 
 ```bash
+make verify-test-import-safety
+./bin/check-test-import-safety
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ./bin/pytest-src -q tests/test_ui.py -q
 PYTHONPATH=src python3 -m pytest -q tests/test_ui.py -q
