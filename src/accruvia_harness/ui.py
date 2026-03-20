@@ -6630,12 +6630,12 @@ class HarnessUIDataService:
         override_active = bool(review.get("operator_override"))
         if not bool(review.get("review_clear")) and not override_active:
             raise ValueError("Objective is not yet clear to promote")
-        objective_paths = self._objective_repo_file_set(linked_tasks)
-        if not objective_paths:
-            raise ValueError("Objective promotion could not determine any objective-related file paths to apply")
         source_repo_root = self._objective_source_repo_root(objective.id, linked_tasks)
         if source_repo_root is None:
             raise ValueError("Objective promotion requires a git-backed source repository root")
+        objective_paths = self._objective_repo_file_set(linked_tasks, source_repo_root)
+        if not objective_paths:
+            raise ValueError("Objective promotion could not determine any objective-related file paths to apply")
         candidate = self._latest_completed_task_for_objective(linked_tasks)
         candidate_run_id = ""
         if candidate is not None:
@@ -6806,7 +6806,7 @@ class HarnessUIDataService:
                 selected = task
         return selected
 
-    def _objective_repo_file_set(self, linked_tasks: list[Task]) -> list[str]:
+    def _objective_repo_file_set(self, linked_tasks: list[Task], source_repo_root: Path | None = None) -> list[str]:
         file_paths: set[str] = set()
         for task in linked_tasks:
             runs = self.store.list_runs(task.id)
@@ -6825,7 +6825,47 @@ class HarnessUIDataService:
                         path = str(raw_path or "").strip()
                         if path and not path.startswith("/") and ".." not in Path(path).parts:
                             file_paths.add(str(Path(path)))
+        if source_repo_root is not None:
+            file_paths.update(self._repo_local_change_file_set(source_repo_root))
         return sorted(file_paths)
+
+    def _repo_local_change_file_set(self, repo_root: Path) -> set[str]:
+        completed = subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+            cwd=repo_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            return set()
+        changed: set[str] = set()
+        for line in completed.stdout.splitlines():
+            if len(line) < 4:
+                continue
+            raw_path = line[3:].strip()
+            if not raw_path:
+                continue
+            if " -> " in raw_path:
+                candidates = [part.strip() for part in raw_path.split(" -> ", 1)]
+            else:
+                candidates = [raw_path]
+            for candidate in candidates:
+                normalized = self._normalize_repo_relative_path(candidate)
+                if normalized is not None:
+                    changed.add(normalized)
+        return changed
+
+    def _normalize_repo_relative_path(self, raw_path: str) -> str | None:
+        path = str(raw_path or "").strip().replace("\\", "/")
+        if not path:
+            return None
+        normalized = str(Path(path))
+        if normalized == "." or normalized.startswith(".accruvia-harness") or normalized.startswith("supabase/.temp"):
+            return None
+        if normalized.startswith("/") or normalized.startswith("../") or "/../" in f"/{normalized}":
+            return None
+        return normalized
 
     def _objective_source_repo_root(self, objective_id: str, linked_tasks: list[Task]) -> Path | None:
         for task in reversed(linked_tasks):
@@ -6892,8 +6932,8 @@ class HarnessUIDataService:
         latest_promotion_payload: dict[str, object] | None = self._latest_objective_repo_promotion(objective.id)
         reason = ""
         eligible = False
-        objective_paths = self._objective_repo_file_set(linked_tasks)
         source_repo_root = self._objective_source_repo_root(objective.id, linked_tasks)
+        objective_paths = self._objective_repo_file_set(linked_tasks, source_repo_root)
 
         if candidate is None:
             reason = "No completed linked task is available yet."
@@ -11761,6 +11801,9 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
             payload = fn()
         except ValueError as exc:
             self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        except Exception as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
             return
         self._send_json(payload, status=status)
         if notify:

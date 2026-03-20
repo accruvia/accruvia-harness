@@ -1660,6 +1660,107 @@ class HarnessEngineTests(unittest.TestCase):
         )
         self.assertEqual("base\n", remote_readme.stdout)
 
+    def test_repository_promotion_apply_objective_aborts_before_push_when_fast_gate_fails(self) -> None:
+        repo_root = Path(self.temp_dir.name) / "objective-promotion-fail-repo"
+        repo_root.mkdir()
+        remote_root = self._init_git_repo(repo_root, with_remote=True)
+        assert remote_root is not None
+        tracked = repo_root / "src" / "feature.py"
+        tracked.parent.mkdir(parents=True, exist_ok=True)
+        tracked.write_text("VALUE = 'base'\n", encoding="utf-8")
+        (repo_root / "Makefile").write_text(
+            "verify-test-import-safety:\n"
+            "\t@true\n\n"
+            "test-fast:\n"
+            "\t@echo failing fast gate\n"
+            "\t@false\n",
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "add", "-A"], cwd=repo_root, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "commit", "-m", "initial"], cwd=repo_root, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "push", "-u", "origin", "main"], cwd=repo_root, check=True, capture_output=True, text=True)
+
+        tracked.write_text("VALUE = 'objective'\n", encoding="utf-8")
+        project = Project(
+            id=new_id("project"),
+            name="repo-promotion",
+            description="repo promotion",
+            promotion_mode=PromotionMode.DIRECT_MAIN,
+            repo_provider=RepoProvider.GITHUB,
+            repo_name="accruvia/accruvia-harness",
+            base_branch="main",
+        )
+
+        staging_root = Path(self.temp_dir.name) / "objective-promotion-staging-fail"
+        with self.assertRaisesRegex(RuntimeError, "Pre-push verification failed"):
+            RepositoryPromotionService().apply_objective(
+                project,
+                objective_id=new_id("objective"),
+                objective_title="Objective Promotion Review",
+                source_repo_root=repo_root,
+                source_working_root=repo_root,
+                objective_paths=["src/feature.py", "Makefile"],
+                staging_root=staging_root,
+            )
+
+        remote_show = subprocess.run(
+            ["git", "--git-dir", str(remote_root), "show", "main:src/feature.py"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual("VALUE = 'base'\n", remote_show.stdout)
+        self.assertFalse(any(staging_root.iterdir()) if staging_root.exists() else False)
+
+    def test_repository_promotion_apply_objective_reuses_source_venv_for_pre_push_checks(self) -> None:
+        repo_root = Path(self.temp_dir.name) / "objective-promotion-venv-repo"
+        repo_root.mkdir()
+        remote_root = self._init_git_repo(repo_root, with_remote=True)
+        assert remote_root is not None
+        tracked = repo_root / "src" / "feature.py"
+        tracked.parent.mkdir(parents=True, exist_ok=True)
+        tracked.write_text("VALUE = 'base'\n", encoding="utf-8")
+        (repo_root / "Makefile").write_text(
+            "verify-test-import-safety:\n"
+            "\t@.venv/bin/python -c \"print('verify ok')\"\n\n"
+            "test-fast:\n"
+            "\t@.venv/bin/python -c \"print('fast ok')\"\n",
+            encoding="utf-8",
+        )
+        fake_python = repo_root / ".venv" / "bin" / "python"
+        fake_python.parent.mkdir(parents=True, exist_ok=True)
+        fake_python.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        fake_python.chmod(0o755)
+        subprocess.run(["git", "add", "-A"], cwd=repo_root, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "commit", "-m", "initial"], cwd=repo_root, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "push", "-u", "origin", "main"], cwd=repo_root, check=True, capture_output=True, text=True)
+
+        tracked.write_text("VALUE = 'objective'\n", encoding="utf-8")
+        project = Project(
+            id=new_id("project"),
+            name="repo-promotion",
+            description="repo promotion",
+            promotion_mode=PromotionMode.DIRECT_MAIN,
+            repo_provider=RepoProvider.GITHUB,
+            repo_name="accruvia/accruvia-harness",
+            base_branch="main",
+        )
+
+        staging_root = Path(self.temp_dir.name) / "objective-promotion-staging-venv"
+        result = RepositoryPromotionService().apply_objective(
+            project,
+            objective_id=new_id("objective"),
+            objective_title="Objective Promotion Review",
+            source_repo_root=repo_root,
+            source_working_root=repo_root,
+            objective_paths=["src/feature.py", "Makefile"],
+            staging_root=staging_root,
+        )
+
+        self.assertEqual(result.commit_sha, result.verified_remote_sha)
+        self.assertTrue(result.cleanup_performed)
+        self.assertFalse(any(staging_root.iterdir()) if staging_root.exists() else False)
+
     def test_review_promotion_rejects_and_creates_follow_on(self) -> None:
         engine = HarnessEngine(
             store=self.store,

@@ -38,6 +38,43 @@ def _prepared_project_workspace(run_dir: Path) -> Path:
     return workspace if workspace.exists() else run_dir
 
 
+def _artifact_candidates_for_kind(kind: str) -> tuple[str, ...]:
+    return (
+        kind,
+        f"{kind}.json",
+        f"{kind}.txt",
+        f"{kind}.md",
+        f"{kind}.log",
+        f"{kind}.yaml",
+        f"{kind}.yml",
+        f"{kind}.csv",
+    )
+
+
+def _discover_required_artifacts(
+    task: Task,
+    *,
+    run_dir: Path,
+    project_workspace: Path,
+    existing: list[tuple[str, str, str]],
+) -> list[tuple[str, str, str]]:
+    seen_kinds = {kind for kind, _, _ in existing}
+    discovered: list[tuple[str, str, str]] = []
+    for kind in task.required_artifacts:
+        if kind in seen_kinds:
+            continue
+        for root in (run_dir, project_workspace):
+            for candidate_name in _artifact_candidates_for_kind(kind):
+                candidate = root / candidate_name
+                if candidate.is_file():
+                    discovered.append((kind, str(candidate), f"Discovered required artifact '{kind}'"))
+                    seen_kinds.add(kind)
+                    break
+            if kind in seen_kinds:
+                break
+    return discovered
+
+
 def _default_agent_worker_command() -> str:
     script_path = Path(__file__).resolve().parents[2] / "bin" / "accruvia-codex-worker"
     if script_path.exists():
@@ -392,6 +429,18 @@ class CommandWorker:
             atomicity_artifact.append(
                 ("atomicity_telemetry", str(atomicity_path), "Atomicity telemetry and gate decision")
             )
+        discovered_artifacts = _discover_required_artifacts(
+            task,
+            run_dir=run_dir,
+            project_workspace=project_workspace,
+            existing=[
+                *plan_artifact,
+                *atomicity_artifact,
+                ("worker_stdout", str(stdout_path), "Captured shell worker stdout"),
+                ("worker_stderr", str(stderr_path), "Captured shell worker stderr"),
+                ("report", str(report_path), "Structured run report"),
+            ],
+        )
         summary = f"Executed {self.backend_name} worker command and captured output."
         failure_category = str(payload.get("failure_category") or "").strip()
         if failure_category:
@@ -401,6 +450,7 @@ class CommandWorker:
             artifacts=[
                 *plan_artifact,
                 *atomicity_artifact,
+                *discovered_artifacts,
                 ("worker_stdout", str(stdout_path), "Captured shell worker stdout"),
                 ("worker_stderr", str(stderr_path), "Captured shell worker stderr"),
                 ("report", str(report_path), "Structured run report"),
@@ -592,11 +642,22 @@ class LLMTaskWorker:
             ),
             encoding="utf-8",
         )
+        discovered_artifacts = _discover_required_artifacts(
+            task,
+            run_dir=run_dir,
+            project_workspace=project_workspace,
+            existing=[
+                ("plan", str(result.prompt_path), "Prompt sent to the routed LLM executor"),
+                ("llm_response", str(result.response_path), "LLM response artifact"),
+                ("report", str(report_path), "Structured run report"),
+            ],
+        )
         return WorkResult(
             summary=summary,
             artifacts=[
                 ("plan", str(result.prompt_path), "Prompt sent to the routed LLM executor"),
                 ("llm_response", str(result.response_path), "LLM response artifact"),
+                *discovered_artifacts,
                 ("report", str(report_path), "Structured run report"),
             ],
             outcome=outcome,

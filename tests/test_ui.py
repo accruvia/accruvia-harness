@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -1292,7 +1293,7 @@ class HarnessUIDataServiceTests(unittest.TestCase):
             summary="Ready",
         )
         self.store.create_run(completed_run)
-        report_path = self.workspace_root / f"{completed_run.id}-report.json"
+        report_path = Path(self.tempdir.name) / f"{completed_run.id}-report.json"
         report_path.write_text(
             json.dumps(
                 {
@@ -1426,7 +1427,7 @@ class HarnessUIDataServiceTests(unittest.TestCase):
             summary="Ready",
         )
         self.store.create_run(completed_run)
-        report_path = self.workspace_root / f"{completed_run.id}-report.json"
+        report_path = Path(self.tempdir.name) / f"{completed_run.id}-report.json"
         report_path.write_text(
             json.dumps(
                 {
@@ -1525,7 +1526,7 @@ class HarnessUIDataServiceTests(unittest.TestCase):
             summary="Ready",
         )
         self.store.create_run(completed_run)
-        report_path = self.workspace_root / f"{completed_run.id}-report.json"
+        report_path = Path(self.tempdir.name) / f"{completed_run.id}-report.json"
         report_path.write_text(
             json.dumps(
                 {
@@ -1718,6 +1719,136 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         self.assertEqual("approved", result["promotion"]["status"])
         self.assertEqual(
             ["src/accruvia_harness/ui.py", "tests/test_ui.py"],
+            self.ctx.engine.objective_apply_calls[-1]["objective_paths"],
+        )
+
+    def test_promote_objective_to_repo_includes_current_local_repo_changes(self) -> None:
+        subprocess.run(["git", "init", "-b", "main"], cwd=self.workspace_root, check=True, capture_output=True, text=True)
+        subprocess.run(
+            ["git", "config", "user.name", "Test User"],
+            cwd=self.workspace_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "test@example.com"],
+            cwd=self.workspace_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        tracked_ui = self.workspace_root / "src" / "accruvia_harness" / "ui.py"
+        tracked_ui.parent.mkdir(parents=True, exist_ok=True)
+        tracked_ui.write_text("UI = 'base'\n", encoding="utf-8")
+        tracked_test = self.workspace_root / "tests" / "test_ui.py"
+        tracked_test.parent.mkdir(parents=True, exist_ok=True)
+        tracked_test.write_text("def test_ui():\n    pass\n", encoding="utf-8")
+        workers_file = self.workspace_root / "src" / "accruvia_harness" / "workers.py"
+        workers_file.write_text("WORKERS = 'base'\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=self.workspace_root, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "commit", "-m", "initial"], cwd=self.workspace_root, check=True, capture_output=True, text=True)
+
+        completed_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            title="Repair compile check for Address devops review findings",
+            objective="Ready for repo promotion",
+            status=TaskStatus.COMPLETED,
+        )
+        self.store.create_task(completed_task)
+        completed_run = Run(
+            id=new_id("run"),
+            task_id=completed_task.id,
+            status=RunStatus.COMPLETED,
+            attempt=2,
+            summary="Ready",
+        )
+        self.store.create_run(completed_run)
+        report_path = Path(self.tempdir.name) / f"{completed_run.id}-report.json"
+        report_path.write_text(
+            json.dumps(
+                {
+                    "changed_files": ["src/accruvia_harness/ui.py", "tests/test_ui.py"],
+                    "test_files": ["tests/test_ui.py"],
+                    "compile_check": {"passed": True},
+                    "test_check": {"passed": True},
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.store.create_artifact(
+            Artifact(
+                id=new_id("artifact"),
+                run_id=completed_run.id,
+                kind="report",
+                path=str(report_path),
+                summary="Structured run report",
+            )
+        )
+        self.store.create_event(
+            Event(
+                id=new_id("event"),
+                entity_type="run",
+                entity_id=completed_run.id,
+                event_type="project_workspace_prepared",
+                payload={
+                    "source_repo_root": str(self.workspace_root),
+                    "project_root": str(self.workspace_root / "runs" / completed_run.id / "workspace"),
+                    "workspace_mode": "git_worktree",
+                },
+            )
+        )
+        workers_file.write_text("WORKERS = 'objective-fix'\n", encoding="utf-8")
+        self.store.update_objective_status(self.objective.id, ObjectiveStatus.RESOLVED)
+        review_id = new_id("objective_review")
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="objective_review_started",
+                project_id=self.project.id,
+                objective_id=self.objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Started review.",
+                metadata={"review_id": review_id, "round_number": 1},
+            )
+        )
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="objective_review_override_approved",
+                project_id=self.project.id,
+                objective_id=self.objective.id,
+                visibility="operator_visible",
+                author_type="operator",
+                content="Override approved.",
+                metadata={"review_id": review_id, "round_number": 1, "rationale": "Operator approved."},
+            )
+        )
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="objective_review_completed",
+                project_id=self.project.id,
+                objective_id=self.objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Completed review.",
+                metadata={"review_id": review_id, "round_number": 1, "packet_count": 1},
+            )
+        )
+
+        result = self.service.promote_objective_to_repo(self.objective.id)
+
+        self.assertEqual("approved", result["promotion"]["status"])
+        self.assertEqual(
+            [
+                "src/accruvia_harness/ui.py",
+                "src/accruvia_harness/workers.py",
+                "tests/test_ui.py",
+            ],
             self.ctx.engine.objective_apply_calls[-1]["objective_paths"],
         )
 

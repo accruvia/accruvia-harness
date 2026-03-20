@@ -23,9 +23,19 @@ class PromotionApplyResult:
 
 
 class RepositoryPromotionService:
-    def __init__(self, github: GitHubCLI | None = None, gitlab: GitLabCLI | None = None) -> None:
+    def __init__(
+        self,
+        github: GitHubCLI | None = None,
+        gitlab: GitLabCLI | None = None,
+        *,
+        pre_push_commands: tuple[tuple[str, ...], ...] | None = None,
+    ) -> None:
         self.github = github or GitHubCLI()
         self.gitlab = gitlab or GitLabCLI()
+        self.pre_push_commands = pre_push_commands if pre_push_commands is not None else (
+            ("make", "verify-test-import-safety"),
+            ("make", "test-fast"),
+        )
 
     def apply(
         self,
@@ -45,6 +55,7 @@ class RepositoryPromotionService:
         self._git(workspace_root, "add", "-A")
         self._git(workspace_root, "commit", "-m", self._commit_message(task))
         commit_sha = self._git_output(workspace_root, "rev-parse", "HEAD").strip()
+        self._run_pre_push_checks(workspace_root)
 
         if project.promotion_mode == PromotionMode.DIRECT_MAIN:
             pushed_ref = f"{commit_sha}:{project.base_branch}"
@@ -102,6 +113,7 @@ class RepositoryPromotionService:
             self._git(worktree_root, "add", "-A")
             self._git(worktree_root, "commit", "-m", self._objective_commit_message(objective_id, objective_title))
             commit_sha = self._git_output(worktree_root, "rev-parse", "HEAD").strip()
+            self._run_pre_push_checks(worktree_root, source_repo_root=source_repo_root)
 
             if project.promotion_mode == PromotionMode.DIRECT_MAIN:
                 self._git(worktree_root, "push", "origin", f"HEAD:{project.base_branch}")
@@ -131,13 +143,14 @@ class RepositoryPromotionService:
                     pr_url=pr_url,
                     cleanup_performed=False,
                 )
-            self._cleanup_promotion_worktree(source_repo_root, worktree_root, branch_name)
-            push_result.cleanup_performed = True
             return push_result
-        except Exception:
-            if not worktree_added and worktree_root.exists():
+        finally:
+            if worktree_added:
+                self._cleanup_promotion_worktree(source_repo_root, worktree_root, branch_name)
+                if push_result is not None:
+                    push_result.cleanup_performed = True
+            elif worktree_root.exists():
                 shutil.rmtree(worktree_root, ignore_errors=True)
-            raise
 
     def _open_review(self, project: Project, task: Task, branch_name: str) -> str | None:
         if not project.repo_name or not project.repo_provider:
@@ -294,3 +307,42 @@ class RepositoryPromotionService:
         )
         if worktree_root.exists():
             shutil.rmtree(worktree_root, ignore_errors=True)
+
+    def _run_pre_push_checks(self, workspace_root: Path, *, source_repo_root: Path | None = None) -> None:
+        if not self.pre_push_commands:
+            return
+        if not (workspace_root / "Makefile").exists():
+            return
+        cleanup = self._ensure_pre_push_venv(workspace_root, source_repo_root=source_repo_root)
+        try:
+            for command in self.pre_push_commands:
+                completed = subprocess.run(
+                    list(command),
+                    cwd=workspace_root,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                if completed.returncode != 0:
+                    command_text = " ".join(command)
+                    detail = (completed.stdout or completed.stderr or "").strip()
+                    message = f"Pre-push verification failed for `{command_text}`."
+                    if detail:
+                        message = f"{message}\n\n{detail[-4000:]}"
+                    raise RuntimeError(message)
+        finally:
+            cleanup()
+
+    def _ensure_pre_push_venv(self, workspace_root: Path, *, source_repo_root: Path | None = None):
+        venv_path = workspace_root / ".venv"
+        if venv_path.exists():
+            return lambda: None
+        candidate = None
+        if source_repo_root is not None:
+            source_venv = source_repo_root / ".venv"
+            if source_venv.exists():
+                candidate = source_venv
+        if candidate is None:
+            return lambda: None
+        os.symlink(candidate, venv_path, target_is_directory=True)
+        return lambda: venv_path.unlink(missing_ok=True)

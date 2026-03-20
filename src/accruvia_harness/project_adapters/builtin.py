@@ -19,7 +19,7 @@ class GenericProjectAdapter:
         run: Run,
         run_dir: Path,
     ) -> ProjectWorkspace:
-        workspace_root = run_dir / "workspace"
+        workspace_root = (run_dir / "workspace").resolve()
         workspace_root.mkdir(parents=True, exist_ok=True)
         manifest_path = workspace_root / "workspace_manifest.json"
         manifest_path.write_text(
@@ -61,7 +61,7 @@ class CurrentRepoGitWorktreeAdapter:
         run_dir: Path,
     ) -> ProjectWorkspace:
         source_repo_root = self._resolve_source_repo_root()
-        workspace_root = run_dir / "workspace"
+        workspace_root = (run_dir / "workspace").resolve()
         base_ref = self._resolve_base_ref(source_repo_root, project.base_branch)
         branch_name = f"harness-{task.id[-6:]}-{run.id[-6:]}"
         subprocess.run(
