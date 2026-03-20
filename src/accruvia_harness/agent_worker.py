@@ -208,6 +208,30 @@ def _run_validation_process(
                 )
 
 
+def _workspace_contract_issues(
+    workspace: Path,
+    *,
+    changed_files: list[str],
+    test_command: list[str],
+) -> list[str]:
+    issues: list[str] = []
+    if not workspace.exists():
+        return [f"Workspace root does not exist: {workspace}"]
+    if not workspace.is_dir():
+        return [f"Workspace root is not a directory: {workspace}"]
+
+    missing_targets = [path for path in changed_files if path.endswith(".py") and not (workspace / path).exists()]
+    if missing_targets:
+        preview = ", ".join(sorted(missing_targets)[:5])
+        issues.append(f"Workspace is missing expected Python targets: {preview}")
+
+    module_targets = [part for part in test_command if part.startswith("tests.")]
+    if module_targets and not (workspace / "tests").exists():
+        issues.append("Workspace is missing the tests/ directory required by validation.")
+
+    return issues
+
+
 def select_worker_llm_command(environ: Mapping[str, str]) -> tuple[str, str]:
     chain = select_worker_llm_chain(environ)
     return chain[0] if chain else ("codex", "codex exec")
@@ -596,6 +620,46 @@ def run_validation(environ: Mapping[str, str] | None = None) -> int:
     test_command = validation_policy.command
     test_timeout_seconds = validation_policy.execution_timeout_seconds
     test_startup_timeout_seconds = validation_policy.startup_timeout_seconds
+    workspace_contract_issues = _workspace_contract_issues(
+        workspace,
+        changed_files=[path for path in all_changed if isinstance(path, str)],
+        test_command=test_command,
+    )
+    if workspace_contract_issues:
+        failure_message = "Validation workspace contract failed: " + " ".join(workspace_contract_issues)
+        compile_output_path.write_text(failure_message + "\n", encoding="utf-8")
+        test_output_path.write_text(failure_message + "\n", encoding="utf-8")
+        payload.update(
+            {
+                "worker_outcome": "failed",
+                "compile_check": {
+                    "passed": False,
+                    "targets": [path for path in all_changed if path.endswith(".py")],
+                    "mode": "py_compile",
+                    "output_path": str(compile_output_path),
+                    "timeout_seconds": compile_timeout_seconds,
+                    "timed_out": False,
+                },
+                "test_check": {
+                    "passed": False,
+                    "framework": "unittest",
+                    "command": test_command,
+                    "output_path": str(test_output_path),
+                    "selection": effective_validation_mode,
+                    "timeout_seconds": test_timeout_seconds,
+                    "startup_timeout_seconds": test_startup_timeout_seconds,
+                    "timed_out": False,
+                },
+                "validation_elapsed_seconds": round(time.monotonic() - _validation_start, 2),
+                "failure_category": "workspace_contract_failure",
+                "failure_message": failure_message,
+                "workspace_contract_failure": True,
+                "workspace_contract_issues": workspace_contract_issues,
+                "infrastructure_failure": True,
+            }
+        )
+        report_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        return 1
     test_completed, test_timeout_category = _run_validation_process(
         test_command,
         cwd=workspace,

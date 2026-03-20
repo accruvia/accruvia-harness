@@ -56,6 +56,9 @@ from .domain import (
     MermaidStatus,
     Objective,
     ObjectiveStatus,
+    PromotionMode,
+    PromotionStatus,
+    RepoProvider,
     Run,
     RunStatus,
     Task,
@@ -891,6 +894,256 @@ body[data-view="token-performance"] #token-performance-panel {
   background: #ffffff;
 }
 
+body[data-view="settings"] .sidebar,
+body[data-view="settings"] #next-action-panel,
+body[data-view="settings"] #objective-panel,
+body[data-view="settings"] #interrogation-panel,
+body[data-view="settings"] #mermaid-panel,
+body[data-view="settings"] #execution-panel,
+body[data-view="settings"] #supervisor-panel,
+body[data-view="settings"] #atomic-panel,
+body[data-view="settings"] #promotion-review-panel,
+body[data-view="settings"] #promotion-review-rounds-panel,
+body[data-view="settings"] #cli-panel,
+body[data-view="settings"] #new-objective-panel,
+body[data-view="settings"] #token-performance-panel {
+  display: none !important;
+}
+
+body[data-view="settings"] .header {
+  display: flex !important;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.25rem 0.25rem;
+  background: #ffffff;
+  border: none;
+}
+
+body[data-view="settings"] #content-grid {
+  display: block;
+  width: 100%;
+  margin: 0;
+}
+
+body[data-view="settings"] #settings-panel {
+  display: block !important;
+  width: min(920px, 100%);
+  margin: 0 auto;
+  border: none;
+  box-shadow: none;
+  border-radius: 0;
+  padding: 1.25rem;
+  background: #ffffff;
+}
+
+.settings-shell {
+  display: grid;
+  gap: 1.25rem;
+}
+
+.settings-hero {
+  padding: 1rem 1.1rem;
+  border: 1px solid var(--line);
+  border-radius: 1rem;
+  background:
+    radial-gradient(circle at top right, rgba(162, 76, 43, 0.12), transparent 30%),
+    linear-gradient(135deg, #fff9f0 0%, #fffef9 100%);
+}
+
+.settings-hero h3 {
+  margin: 0 0 0.4rem;
+}
+
+.settings-card {
+  padding: 1rem 1.1rem 1.15rem;
+  border: 1px solid var(--line);
+  border-radius: 1rem;
+  background: #fffdf8;
+}
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.9rem 1rem;
+}
+
+.settings-grid label {
+  display: grid;
+  gap: 0.35rem;
+  font-size: 0.9rem;
+  color: var(--ink);
+}
+
+.settings-grid label.full {
+  grid-column: 1 / -1;
+}
+
+.settings-helper {
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  margin-top: 1rem;
+}
+
+.settings-save-button {
+  position: relative;
+  min-width: 10.5rem;
+  transition: transform 160ms ease, box-shadow 200ms ease, background-color 200ms ease;
+}
+
+.settings-save-button:not(:disabled):hover {
+  transform: translateY(-1px);
+}
+
+.settings-save-button.is-saving {
+  background: linear-gradient(90deg, #a24c2b, #c86a3d, #a24c2b);
+  background-size: 200% 100%;
+  animation: settings-save-sheen 1s linear infinite;
+}
+
+.settings-save-button.is-saved {
+  background: linear-gradient(135deg, #2f6f4f, #4f8f6f);
+  box-shadow: 0 0 0 0 rgba(47, 111, 79, 0.4);
+  animation: settings-save-pop 550ms ease;
+}
+
+.settings-save-button:disabled:not(.is-saved):not(.is-saving) {
+  cursor: default;
+}
+
+.settings-save-status {
+  min-height: 1.25rem;
+  color: var(--muted);
+  font-size: 0.86rem;
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.settings-save-status.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.settings-save-status.success {
+  color: var(--success);
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  background: rgba(31, 41, 51, 0.42);
+  backdrop-filter: blur(2px);
+  z-index: 40;
+}
+
+.modal-overlay[hidden] {
+  display: none !important;
+}
+
+.modal-card {
+  width: min(560px, 100%);
+  border-radius: 1.1rem;
+  border: 1px solid rgba(223, 211, 184, 0.9);
+  background:
+    radial-gradient(circle at top right, rgba(162, 76, 43, 0.08), transparent 30%),
+    #fffdf8;
+  box-shadow: 0 24px 60px rgba(31, 41, 51, 0.24);
+  padding: 1.15rem 1.15rem 1rem;
+}
+
+.modal-card.working {
+  border-color: #d8b08e;
+  background:
+    radial-gradient(circle at top right, rgba(217, 178, 106, 0.18), transparent 34%),
+    linear-gradient(135deg, #fff6eb 0%, #fffdfa 100%);
+}
+
+.modal-card.success {
+  border-color: #9fc9ab;
+  background:
+    radial-gradient(circle at top right, rgba(47, 111, 79, 0.14), transparent 34%),
+    linear-gradient(135deg, #eff9f1 0%, #fbfffc 100%);
+}
+
+.modal-card.error {
+  border-color: #d8b08e;
+  background:
+    radial-gradient(circle at top right, rgba(162, 76, 43, 0.12), transparent 34%),
+    linear-gradient(135deg, #fff4ea 0%, #fffdfa 100%);
+}
+
+.modal-title {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+.modal-body {
+  margin-top: 0.7rem;
+  color: var(--ink);
+  line-height: 1.5;
+  white-space: pre-line;
+}
+
+.modal-status-row {
+  display: none;
+  align-items: center;
+  gap: 0.7rem;
+  margin-top: 0.9rem;
+}
+
+.modal-card.working .modal-status-row {
+  display: flex;
+}
+
+.modal-spinner {
+  width: 1rem;
+  height: 1rem;
+  border-radius: 999px;
+  border: 2px solid rgba(191, 98, 43, 0.2);
+  border-top-color: #bf622b;
+  animation: modal-spin 0.85s linear infinite;
+}
+
+.modal-status-text {
+  color: #8a461e;
+  font-size: 0.92rem;
+  font-weight: 600;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.7rem;
+  margin-top: 1rem;
+}
+
+@keyframes settings-save-pop {
+  0% { transform: scale(0.96); box-shadow: 0 0 0 0 rgba(47, 111, 79, 0.4); }
+  45% { transform: scale(1.03); box-shadow: 0 0 0 10px rgba(47, 111, 79, 0); }
+  100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(47, 111, 79, 0); }
+}
+
+@keyframes modal-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes settings-save-sheen {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
 body[data-view="atomic"] .atomic-objective-picker,
 body[data-view="control-flow"] .atomic-objective-picker,
 body[data-view="promotion-review"] .atomic-objective-picker {
@@ -1280,6 +1533,76 @@ body[data-view="atomic"] .conversation-form {
   margin-top: 0.35rem;
   font-size: 1.2rem;
   font-weight: 700;
+}
+
+.promotion-summary-card.repo-promotion-success {
+  border-color: #9fc9ab;
+  background:
+    radial-gradient(circle at top right, rgba(47, 111, 79, 0.16), transparent 32%),
+    linear-gradient(135deg, #eff9f1 0%, #fbfffc 100%);
+}
+
+.repo-promotion-success-title {
+  margin: 0 0 0.45rem;
+  color: var(--success);
+  font-size: 1.1rem;
+}
+
+.repo-promotion-success-copy {
+  color: #22563d;
+  font-size: 0.95rem;
+  line-height: 1.45;
+}
+
+.repo-promotion-success-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.8rem;
+}
+
+.repo-promotion-success-link {
+  color: var(--success);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.repo-promotion-success-link:hover {
+  text-decoration: underline;
+}
+
+.promotion-primary-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 0.72rem 1.1rem;
+  border: 1px solid #8a461e;
+  border-radius: 999px;
+  background:
+    linear-gradient(135deg, #a24c2b 0%, #c56a3a 100%);
+  color: #fffdf9;
+  font-size: 0.92rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  box-shadow: 0 10px 24px rgba(162, 76, 43, 0.18);
+  transition: transform 160ms ease, box-shadow 180ms ease, filter 180ms ease;
+}
+
+.promotion-primary-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 14px 28px rgba(162, 76, 43, 0.24);
+  filter: saturate(1.04);
+}
+
+.promotion-primary-button:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.promotion-primary-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+  box-shadow: none;
 }
 
 .promotion-section-title {
@@ -2438,6 +2761,9 @@ const state = {
   view: document.body.dataset.view || 'default',
   atomicTab: 'all',
   manualViewOverride: sessionStorage.getItem('accruvia.ui.manualViewOverride') || '',
+  repoSettingsBaseline: '',
+  repoSettingsSaving: false,
+  repoSettingsSavedAt: 0,
 };
 
 function preferredProjectFromList(projects) {
@@ -2557,8 +2883,20 @@ const promotionReviewRoundsContent = document.getElementById('promotion-review-r
 const newObjectivePanel = document.getElementById('new-objective-panel');
 const tokenPerformancePanel = document.getElementById('token-performance-panel');
 const tokenPerformanceContent = document.getElementById('token-performance-content');
+const settingsPanel = document.getElementById('settings-panel');
+const settingsContent = document.getElementById('settings-content');
+const modalOverlay = document.getElementById('modal-overlay');
+const modalCard = document.getElementById('modal-card');
+const modalTitle = document.getElementById('modal-title');
+const modalBody = document.getElementById('modal-body');
+const modalStatusRow = document.getElementById('modal-status-row');
+const modalStatusText = document.getElementById('modal-status-text');
+const modalCancel = document.getElementById('modal-cancel');
+const modalConfirm = document.getElementById('modal-confirm');
 let activeConversationController = null;
 let selectedDiagramElement = null;
+let modalResolver = null;
+let modalLocked = false;
 
 function showError(message) {
   pageError.textContent = message;
@@ -2633,6 +2971,72 @@ function addLocalNotice(text) {
 function clearError() {
   pageError.hidden = true;
   pageError.textContent = '';
+}
+
+function renderModalState({
+  title = '',
+  body = '',
+  confirmLabel = 'OK',
+  cancelLabel = 'Cancel',
+  tone = '',
+  showCancel = true,
+  locked = false,
+  statusText = '',
+} = {}) {
+  modalLocked = locked;
+  if (modalTitle) modalTitle.textContent = title || '';
+  if (modalBody) modalBody.textContent = body || '';
+  if (modalCard) modalCard.className = `modal-card ${tone}`.trim();
+  if (modalStatusText) modalStatusText.textContent = statusText || '';
+  if (modalStatusRow) modalStatusRow.hidden = !statusText;
+  if (modalConfirm) {
+    modalConfirm.textContent = confirmLabel;
+    modalConfirm.disabled = locked;
+  }
+  if (modalCancel) {
+    modalCancel.textContent = cancelLabel;
+    modalCancel.hidden = !showCancel;
+    modalCancel.disabled = locked;
+  }
+}
+
+function openModal({ title, body, confirmLabel = 'OK', cancelLabel = 'Cancel', tone = '', showCancel = true }) {
+  return new Promise((resolve) => {
+    modalResolver = resolve;
+    renderModalState({ title, body, confirmLabel, cancelLabel, tone, showCancel, locked: false, statusText: '' });
+    if (modalOverlay) modalOverlay.hidden = false;
+  });
+}
+
+function setModalWorking({ title, body, statusText = 'Working…' }) {
+  renderModalState({
+    title,
+    body,
+    confirmLabel: 'Working…',
+    cancelLabel: 'Cancel',
+    tone: 'working',
+    showCancel: false,
+    locked: true,
+    statusText,
+  });
+  if (modalOverlay) modalOverlay.hidden = false;
+}
+
+function closeModal(result) {
+  modalLocked = false;
+  if (modalOverlay) modalOverlay.hidden = true;
+  const resolver = modalResolver;
+  modalResolver = null;
+  if (resolver) resolver(result);
+}
+
+function repoSettingsSignature(payload) {
+  return JSON.stringify({
+    promotion_mode: String(payload?.promotion_mode || ''),
+    repo_provider: String(payload?.repo_provider || ''),
+    repo_name: String(payload?.repo_name || ''),
+    base_branch: String(payload?.base_branch || ''),
+  });
 }
 
 async function api(path, options = {}) {
@@ -3362,6 +3766,116 @@ function renderTokenPerformancePage() {
   `;
 }
 
+function syncRepoSettingsButtonState() {
+  const saveButton = document.getElementById('repo-settings-save-btn');
+  const status = document.getElementById('repo-settings-save-status');
+  const promotionMode = document.getElementById('settings-repo-promotion-mode');
+  const repoProvider = document.getElementById('settings-repo-provider');
+  const repoName = document.getElementById('settings-repo-name');
+  const baseBranch = document.getElementById('settings-repo-base-branch');
+  if (!(saveButton instanceof HTMLButtonElement) || !status) return;
+  const currentSignature = repoSettingsSignature({
+    promotion_mode: promotionMode?.value || '',
+    repo_provider: repoProvider?.value || '',
+    repo_name: repoName?.value || '',
+    base_branch: baseBranch?.value || '',
+  });
+  const dirty = currentSignature !== state.repoSettingsBaseline;
+  saveButton.classList.remove('is-saving', 'is-saved');
+  if (state.repoSettingsSaving) {
+    saveButton.disabled = true;
+    saveButton.textContent = 'Saving…';
+    saveButton.classList.add('is-saving');
+    status.textContent = 'Saving repo settings…';
+    status.className = 'settings-save-status visible';
+    return;
+  }
+  if (dirty) {
+    saveButton.disabled = false;
+    saveButton.textContent = 'Save repo settings';
+    status.textContent = 'Unsaved changes';
+    status.className = 'settings-save-status visible';
+    return;
+  }
+  saveButton.disabled = true;
+  if (state.repoSettingsSavedAt) {
+    saveButton.textContent = 'Saved';
+    saveButton.classList.add('is-saved');
+    status.textContent = 'Repo promotion settings saved.';
+    status.className = 'settings-save-status visible success';
+  } else {
+    saveButton.textContent = 'Save repo settings';
+    status.textContent = 'No changes yet';
+    status.className = 'settings-save-status';
+  }
+}
+
+function renderSettingsPage() {
+  if (!settingsPanel || !settingsContent) return;
+  settingsPanel.hidden = state.view !== 'settings';
+  if (state.view !== 'settings') return;
+  const workspace = state.workspace;
+  if (!workspace) {
+    settingsContent.innerHTML = '<div class="empty">No workspace loaded.</div>';
+    return;
+  }
+  const project = workspace.project || {};
+  state.repoSettingsBaseline = repoSettingsSignature({
+    promotion_mode: project.promotion_mode || '',
+    repo_provider: project.repo_provider || '',
+    repo_name: project.repo_name || '',
+    base_branch: project.base_branch || 'main',
+  });
+  settingsContent.innerHTML = `
+    <div class="settings-shell">
+      <section class="settings-hero">
+        <h3>Repository promotion settings</h3>
+        <p class="settings-helper">Choose how approved objective code gets applied back to the repo. These settings are project-level, not objective-level.</p>
+      </section>
+      <section class="settings-card">
+        <div class="settings-grid">
+          <label>
+            Promotion mode
+            <select id="settings-repo-promotion-mode">
+              <option value="direct_main" ${project.promotion_mode === 'direct_main' ? 'selected' : ''}>Direct to main</option>
+              <option value="branch_only" ${project.promotion_mode === 'branch_only' ? 'selected' : ''}>Branch only</option>
+              <option value="branch_and_pr" ${project.promotion_mode === 'branch_and_pr' ? 'selected' : ''}>Branch and PR</option>
+            </select>
+          </label>
+          <label>
+            Repo provider
+            <select id="settings-repo-provider">
+              <option value="github" ${project.repo_provider === 'github' ? 'selected' : ''}>GitHub</option>
+              <option value="gitlab" ${project.repo_provider === 'gitlab' ? 'selected' : ''}>GitLab</option>
+            </select>
+          </label>
+          <label class="full">
+            Repository
+            <input id="settings-repo-name" type="text" value="${escapeHtml(project.repo_name || '')}" placeholder="owner/repo" />
+          </label>
+          <label>
+            Base branch
+            <input id="settings-repo-base-branch" type="text" value="${escapeHtml(project.base_branch || 'main')}" placeholder="main" />
+          </label>
+        </div>
+        <div class="settings-actions">
+          <button id="repo-settings-save-btn" type="button" class="settings-save-button">Save repo settings</button>
+          <div id="repo-settings-save-status" class="settings-save-status"></div>
+        </div>
+      </section>
+    </div>
+  `;
+  settingsContent.querySelectorAll('input, select').forEach((element) => {
+    element.addEventListener('input', syncRepoSettingsButtonState);
+    element.addEventListener('change', syncRepoSettingsButtonState);
+  });
+  const saveButton = document.getElementById('repo-settings-save-btn');
+  if (saveButton instanceof HTMLButtonElement) {
+    saveButton.addEventListener('click', handleSaveRepoPromotionSettings);
+  }
+  syncRepoSettingsButtonState();
+}
+
 function renderObjectives() {
   objectiveList.innerHTML = '';
   const workspace = state.workspace;
@@ -4023,6 +4537,11 @@ function renderPromotionReview() {
     return;
   }
   const review = objective.promotion_review || {};
+  const repoPromotion = objective.repo_promotion || {};
+  const projectSettings = repoPromotion.project_settings || {};
+  const candidate = repoPromotion.candidate || null;
+  const latestRepoPromotion = repoPromotion.latest_promotion || null;
+  const applyback = latestRepoPromotion?.applyback || {};
   const counts = review.task_counts || {};
   const rounds = Array.isArray(review.review_rounds) ? review.review_rounds : [];
   const latestRound = rounds[0] || null;
@@ -4030,6 +4549,7 @@ function renderPromotionReview() {
   const packets = Array.isArray(review.review_packets) ? review.review_packets : [];
   const failedTasks = Array.isArray(review.failed_tasks) ? review.failed_tasks : [];
   const reviewState = review.objective_review_state || {};
+  const operatorOverride = review.operator_override || null;
   const verdictCounts = (latestRound && latestRound.verdict_counts) || review.verdict_counts || {};
   function humanizeDimension(value) {
     const raw = String(value || '').trim();
@@ -4087,6 +4607,8 @@ function renderPromotionReview() {
   const reviewHasStarted = rounds.length > 0;
   if (reviewState.status === 'running') {
     promotionReviewSummary.textContent = `Automatic objective promotion review round ${latestRound?.round_number || ''} is running. Reviewer packets will appear here as each agent finishes.`;
+  } else if (operatorOverride) {
+    promotionReviewSummary.textContent = review.next_action || 'An operator override approved the latest objective review round.';
   } else if (!reviewHasStarted) {
     promotionReviewSummary.textContent = 'Promotion review has not started yet. No agent review packets are recorded yet. Use the harness output panel on the left to ask questions while the harness prepares review work.';
   } else {
@@ -4095,6 +4617,7 @@ function renderPromotionReview() {
   const pills = [];
   if (latestRound) {
     const roundStateLabel =
+      latestRound.operator_override ? 'Operator approved' :
       latestRound.status === 'remediating' ? 'Back in Atomic' :
       latestRound.status === 'ready_for_rerun' ? 'Ready for re-review' :
       latestRound.status === 'running' ? 'Review running' :
@@ -4102,7 +4625,7 @@ function renderPromotionReview() {
       latestRound.status === 'failed' ? 'Review failed' :
       latestRound.status === 'needs_remediation' ? 'Remediation needed' :
       'Review active';
-    pills.push(`<span class="pill ${latestRound.status === 'passed' ? 'status-complete' : latestRound.status === 'failed' || latestRound.status === 'needs_remediation' ? 'status-failed' : 'status-running'}">${escapeHtml(roundStateLabel)}</span>`);
+    pills.push(`<span class="pill ${latestRound.operator_override || latestRound.status === 'passed' ? 'status-complete' : latestRound.status === 'failed' || latestRound.status === 'needs_remediation' ? 'status-failed' : 'status-running'}">${escapeHtml(roundStateLabel)}</span>`);
     const reviewerPills = (Array.isArray(latestRound.packets) ? latestRound.packets : []).map((packet) => {
       const verdict = String(packet.verdict || '').trim();
       const reviewer = humanizeReviewer(packet.reviewer, packet.dimension);
@@ -4134,6 +4657,11 @@ function renderPromotionReview() {
     }
   }
   const latestUsage = aggregateUsage(Array.isArray(latestRound?.packets) ? latestRound.packets : []);
+  const forcePromotionAction = review.can_force_promote ? `
+    <div class="promotion-summary-actions">
+      <button id="promotion-force-approve-btn" class="secondary-button" type="button">Force Promote</button>
+    </div>
+  ` : '';
   const summaryCards = `
     <div class="promotion-summary-grid">
       <div class="promotion-summary-card"><div class="label">Review rounds</div><div class="value">${rounds.length || 0}</div></div>
@@ -4142,6 +4670,8 @@ function renderPromotionReview() {
       <div class="promotion-summary-card"><div class="label">Waived failures</div><div class="value">${review.waived_failed_count || 0}</div></div>
       <div class="promotion-summary-card"><div class="label">Latest round usage</div><div class="value" style="font-size:1rem">${escapeHtml(usageBits(latestUsage).join(' · ') || 'No LLM usage yet')}</div></div>
     </div>
+    ${forcePromotionAction}
+    ${operatorOverride ? `<div class="hint">Operator override by ${escapeHtml(operatorOverride.author || 'operator')} at ${escapeHtml(formatRelativeTime(operatorOverride.created_at))}: ${escapeHtml(operatorOverride.rationale || 'No rationale recorded.')}</div>` : ''}
   `;
   const renderPacket = (packet) => {
     const latest = packet.latest || {};
@@ -4204,7 +4734,7 @@ function renderPromotionReview() {
     const remediationCounts = round.remediation_counts || {};
     const roundPills = [];
     if (round.status === 'passed') {
-      roundPills.push('<span class="pill status-complete">Passed</span>');
+      roundPills.push(`<span class="pill status-complete">${round.operator_override ? 'Operator approved' : 'Passed'}</span>`);
     } else if (round.status === 'running') {
       roundPills.push('<span class="pill status-running live">Running</span>');
     } else if (round.status === 'remediating') {
@@ -4227,7 +4757,7 @@ function renderPromotionReview() {
     const remediationList = Array.isArray(round.remediation_tasks) ? round.remediation_tasks : [];
     const roundUsage = aggregateUsage(packetList);
     const summaryStats = [
-      { label: 'Round status', value: round.status === 'remediating' ? 'Back in Atomic' : round.status === 'ready_for_rerun' ? 'Ready for re-review' : round.status === 'needs_remediation' ? 'Remediation needed' : round.status === 'running' ? 'Review running' : round.status === 'passed' ? 'Passed' : round.status === 'failed' ? 'Review failed' : round.status },
+      { label: 'Round status', value: round.status === 'remediating' ? 'Back in Atomic' : round.status === 'ready_for_rerun' ? 'Ready for re-review' : round.status === 'needs_remediation' ? 'Remediation needed' : round.status === 'running' ? 'Review running' : round.status === 'passed' ? (round.operator_override ? 'Operator approved' : 'Passed') : round.status === 'failed' ? 'Review failed' : round.status },
       { label: 'Pass', value: String(roundVerdicts.pass || 0), tone: 'status-complete' },
       { label: 'Concern', value: String(roundVerdicts.concern || 0), tone: (roundVerdicts.concern || 0) > 0 ? 'status-running' : '' },
       { label: 'Remediation tasks', value: String(remediationCounts.total || 0) },
@@ -4286,7 +4816,7 @@ function renderPromotionReview() {
             latestRound.status === 'remediating' ? 'Atomic is running remediation work' :
             latestRound.status === 'ready_for_rerun' ? 'Ready for the next promotion review round' :
             latestRound.status === 'running' ? 'Promotion review is actively running' :
-            latestRound.status === 'passed' ? 'This round passed cleanly' :
+            latestRound.status === 'passed' ? (latestRound.operator_override ? 'This round was operator-approved' : 'This round passed cleanly') :
             latestRound.status === 'failed' ? 'This review round failed' :
             'This round still needs remediation'
           }</strong>
@@ -4294,7 +4824,7 @@ function renderPromotionReview() {
             latestRound.status === 'remediating' ? 'The harness is back in Atomic right now, working reviewer feedback before the next round.' :
             latestRound.status === 'ready_for_rerun' ? 'All remediation tasks from this round are done. The harness should re-review next.' :
             latestRound.status === 'running' ? 'Reviewer packets will appear here as the board finishes its judgments.' :
-            latestRound.status === 'passed' ? 'No reviewer concerns remain for this round.' :
+            latestRound.status === 'passed' ? (latestRound.operator_override ? 'An operator override cleared this round for promotion even though the underlying reviewer packets remain recorded below.' : 'No reviewer concerns remain for this round.') :
             'Reviewer concerns still require action.'
           }</span>
         </div>
@@ -4416,8 +4946,54 @@ function renderPromotionReview() {
       </article>
     `;
   }).join('') : '<div class="empty">No failed tasks are currently recorded for this objective.</div>';
+  const promotionSucceeded = latestRepoPromotion?.status === 'approved' && applyback?.status === 'applied';
+  const successHeadline = projectSettings.promotion_mode === 'direct_main'
+    ? `Pushed directly to ${projectSettings.base_branch || 'main'}`
+    : applyback?.pr_url
+      ? 'Pushed branch and opened pull request'
+      : 'Pushed branch to remote';
+  const successBody = projectSettings.promotion_mode === 'direct_main'
+    ? `The harness built the current objective snapshot, committed it in an isolated promotion worktree, pushed it to origin/${projectSettings.base_branch || 'main'} for ${projectSettings.repo_name || 'the configured repo'}, and cleaned up the transient worktree after verification.`
+    : applyback?.pr_url
+      ? `The harness built the current objective snapshot, pushed ${applyback.pushed_ref || applyback.branch_name || 'the branch'} to origin, and opened a review against ${projectSettings.base_branch || 'main'}.`
+      : `The harness built the current objective snapshot and pushed ${applyback.pushed_ref || applyback.branch_name || 'the branch'} to origin for ${projectSettings.repo_name || 'the configured repo'}.`;
+  const repoPromotionHtml = `
+    <section>
+        <div class="promotion-section-title">
+          <h4>Promote to repo</h4>
+        <span class="hint">Objective review clears governance. This action builds an objective snapshot from all tracked objective files, commits it in an isolated promotion worktree, pushes it, and then cleans up the transient worktree after verification.</span>
+      </div>
+      <div class="promotion-summary-card ${promotionSucceeded ? 'repo-promotion-success' : ''}">
+        ${promotionSucceeded ? `
+          <h5 class="repo-promotion-success-title">${escapeHtml(successHeadline)}</h5>
+          <div class="repo-promotion-success-copy">${escapeHtml(successBody)}</div>
+          <div class="repo-promotion-success-meta">
+            ${applyback.commit_sha ? `<span class="pill status-complete">Commit ${escapeHtml(String(applyback.commit_sha).slice(0, 8))}</span>` : ''}
+            ${projectSettings.promotion_mode === 'direct_main' ? `<span class="pill status-complete">Remote updated: origin/${escapeHtml(projectSettings.base_branch || 'main')}</span>` : ''}
+            ${applyback.pushed_ref && projectSettings.promotion_mode !== 'direct_main' ? `<span class="pill status-complete">Remote updated: origin/${escapeHtml(applyback.pushed_ref)}</span>` : ''}
+            ${applyback.pr_url ? `<a class="repo-promotion-success-link" href="${escapeHtml(applyback.pr_url)}" target="_blank" rel="noreferrer">Open review</a>` : ''}
+          </div>
+        ` : ''}
+        <div class="label">Objective snapshot</div>
+        <div class="value" style="font-size:1rem;">${escapeHtml(candidate?.title || 'No completed linked task')}</div>
+        <div class="helper">
+          ${candidate ? `Anchor task ${escapeHtml(candidate.task_id || '')} · run ${escapeHtml(candidate.latest_completed_run_id || '')} · attempt ${escapeHtml(String(candidate.latest_completed_attempt || '?'))}` : 'No completed linked task is available for this objective yet.'}
+        </div>
+        <div class="helper" style="margin-top:10px;">${escapeHtml(repoPromotion.reason || '')}</div>
+        ${latestRepoPromotion ? `<div class="promotion-failed-meta" style="margin-top:12px;">
+          <span class="pill ${latestRepoPromotion.status === 'approved' ? 'status-complete' : latestRepoPromotion.status === 'pending' ? '' : 'status-failed'}">Latest promotion: ${escapeHtml(latestRepoPromotion.status || '')}</span>
+          ${latestRepoPromotion.applyback?.pr_url ? `<span class="pill">PR ready</span>` : ''}
+          ${latestRepoPromotion.applyback?.commit_sha ? `<span class="pill">Commit ${escapeHtml(String(latestRepoPromotion.applyback.commit_sha).slice(0, 8))}</span>` : ''}
+        </div>` : ''}
+        <div class="promotion-action-row" style="margin-top:14px;">
+          <button type="button" class="promotion-primary-button" ${repoPromotion.eligible ? '' : 'disabled'} data-promotion-action="promote-objective-to-repo">Promote Objective to The Repo</button>
+        </div>
+      </div>
+    </section>
+  `;
   promotionReviewContent.innerHTML = `
     ${latestRoundHero}
+    ${repoPromotionHtml}
     ${reportCardHtml}
     ${summaryCards}
     ${taskPacketHtml}
@@ -4444,6 +5020,127 @@ function renderPromotionReview() {
       renderPromotionReview();
     });
   });
+  promotionReviewContent.querySelectorAll('[data-promotion-action]').forEach((element) => {
+    element.addEventListener('click', async () => {
+      const action = element.getAttribute('data-promotion-action') || '';
+      if (action === 'save-repo-settings') {
+        await handleSaveRepoPromotionSettings();
+      } else if (action === 'promote-objective-to-repo') {
+        await handlePromoteObjectiveToRepo();
+      }
+    });
+  });
+}
+
+async function handleForcePromotionOverride() {
+  if (!state.objectiveId) return;
+  const rationale = window.prompt('Why are you force-promoting this objective review? This will be recorded in the audit trail.', 'Operator override: promotion review evidence is sufficient and remaining blocker is harness bookkeeping.');
+  if (rationale === null) return;
+  const trimmed = rationale.trim();
+  if (!trimmed) {
+    showError('Enter a rationale before force-promoting.');
+    return;
+  }
+  try {
+    clearError();
+    await api(`/api/objectives/${encodeURIComponent(state.objectiveId)}/promotion/force`, {
+      method: 'POST',
+      body: JSON.stringify({ rationale: trimmed }),
+    });
+    await loadWorkspace();
+  } catch (error) {
+    showError(error.message || 'Unable to force-promote the objective review');
+  }
+}
+
+async function handleSaveRepoPromotionSettings() {
+  if (!state.projectId) return;
+  const promotionMode = document.getElementById('settings-repo-promotion-mode')?.value || '';
+  const repoProvider = document.getElementById('settings-repo-provider')?.value || '';
+  const repoName = document.getElementById('settings-repo-name')?.value || '';
+  const baseBranch = document.getElementById('settings-repo-base-branch')?.value || '';
+  try {
+    clearError();
+    state.repoSettingsSaving = true;
+    syncRepoSettingsButtonState();
+    await api(`/api/projects/${encodeURIComponent(state.projectId)}/repo-settings`, {
+      method: 'POST',
+      body: JSON.stringify({
+        promotion_mode: promotionMode,
+        repo_provider: repoProvider,
+        repo_name: repoName,
+        base_branch: baseBranch,
+      }),
+    });
+    state.repoSettingsSaving = false;
+    state.repoSettingsSavedAt = Date.now();
+    await loadWorkspace();
+  } catch (error) {
+    state.repoSettingsSaving = false;
+    syncRepoSettingsButtonState();
+    showError(error.message || 'Unable to save repo promotion settings');
+  }
+}
+
+async function handlePromoteObjectiveToRepo() {
+  if (!state.objectiveId) return;
+  const objective = currentObjective();
+  const repoPromotion = objective?.repo_promotion || {};
+  const candidate = repoPromotion.candidate || null;
+  const settings = repoPromotion.project_settings || {};
+  const destination = settings.promotion_mode === 'direct_main'
+    ? `push directly to ${settings.base_branch || 'main'}`
+    : settings.promotion_mode === 'branch_only'
+      ? 'push a branch without opening a PR'
+      : `push a branch and open a PR to ${settings.base_branch || 'main'}`;
+  const candidateText = candidate
+    ? `${candidate.title} (${candidate.task_id}, run ${candidate.latest_completed_run_id})`
+    : 'the objective snapshot';
+  const confirmed = await openModal({
+    title: 'Promote Objective to The Repo',
+    body: `Promote the current objective snapshot anchored by ${candidateText}?\n\nThis will ${destination} for ${settings.repo_name || 'the configured repo'}.`,
+    confirmLabel: 'Promote now',
+    cancelLabel: 'Cancel',
+  });
+  if (!confirmed) return;
+  try {
+    clearError();
+    setModalWorking({
+      title: 'Promoting Objective to The Repo',
+      body: `The harness is staging the current objective snapshot in an isolated promotion worktree, applying it against the latest ${settings.base_branch || 'main'}, and pushing it. You will stay here until the result is ready.`,
+      statusText: settings.promotion_mode === 'direct_main'
+        ? `Pushing to origin/${settings.base_branch || 'main'}…`
+        : 'Preparing repository promotion…',
+    });
+    const result = await api(`/api/objectives/${encodeURIComponent(state.objectiveId)}/promote`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+    const applyback = result?.applyback || {};
+    const successText = settings.promotion_mode === 'direct_main'
+      ? `The harness committed the objective snapshot, pushed it to origin/${settings.base_branch || 'main'}, verified the remote update, and removed the transient promotion worktree.`
+      : applyback.pr_url
+        ? `The harness committed the objective snapshot, pushed ${applyback.pushed_ref || applyback.branch_name || 'the branch'} to origin, and opened a review.`
+        : `The harness committed the objective snapshot and pushed ${applyback.pushed_ref || applyback.branch_name || 'the branch'} to origin.`;
+    await loadWorkspace();
+    await openModal({
+      title: 'Promotion completed',
+      body: successText,
+      confirmLabel: 'Close',
+      tone: 'success',
+      showCancel: false,
+    });
+  } catch (error) {
+    const message = error.message || 'Unable to promote objective code to the repository';
+    showError(message);
+    await openModal({
+      title: 'Promotion did not complete',
+      body: message,
+      confirmLabel: 'Close',
+      tone: 'error',
+      showCancel: false,
+    });
+  }
 }
 
 function renderInterrogationReview(objective) {
@@ -4577,6 +5274,9 @@ function renderWorkspaceChrome() {
   } else if (state.view === 'token-performance') {
     workspaceTitle.textContent = 'Token performance';
     workspaceSummary.textContent = 'Review LLM usage across promotion-review rounds, objectives, and reviewers.';
+  } else if (state.view === 'settings') {
+    workspaceTitle.textContent = 'Project settings';
+    workspaceSummary.textContent = 'Repository promotion policy for the currently selected project.';
   } else {
     workspaceTitle.textContent = objective ? objective.title : workspace.project.name;
     workspaceSummary.textContent = objective
@@ -4598,6 +5298,10 @@ function renderWorkspaceChrome() {
     workspaceStatus.textContent = state.projectId
       ? `Usage in ${workspace.project.name}`
       : 'Select a project';
+  } else if (state.view === 'settings') {
+    workspaceStatus.textContent = state.projectId
+      ? `Editing ${workspace.project.name}`
+      : 'Select a project';
   } else {
     workspaceStatus.textContent = `${workspace.loop_status.status} · queue ${queueDepth}`;
   }
@@ -4614,6 +5318,7 @@ function renderViewNav() {
     { key: 'control-flow', href: `/workspace${suffix}`, label: 'Control Flow' },
     { key: 'atomic', href: `/atomic${suffix}`, label: 'Atomic' },
     { key: 'promotion-review', href: `/promotion-review${suffix}`, label: 'Promotion Review' },
+    { key: 'settings', href: `/settings${suffix}`, label: 'Settings' },
     { key: 'token-performance', href: `/token-performance${suffix}`, label: 'Token Performance' },
     { key: 'harness', href: '/harness', label: 'Dashboard' },
   ];
@@ -4668,6 +5373,7 @@ async function loadWorkspace() {
   renderObjectives();
   renderWorkspaceChrome();
   renderObjectiveCreatePage();
+  renderSettingsPage();
   renderTokenPerformancePage();
   renderTasks();
   renderRuns();
@@ -5115,6 +5821,15 @@ if (executionPrimaryButton) {
   });
 }
 
+if (promotionReviewPanel) {
+  promotionReviewPanel.addEventListener('click', async (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    if (target.id !== 'promotion-force-approve-btn') return;
+    await handleForcePromotionOverride();
+  });
+}
+
 if (conversationPrimaryButton) {
   conversationPrimaryButton.addEventListener('click', async () => {
     try {
@@ -5186,6 +5901,28 @@ if (viewNav) {
     } else {
       state.manualViewOverride = '';
       sessionStorage.removeItem('accruvia.ui.manualViewOverride');
+    }
+  });
+}
+
+if (modalCancel) {
+  modalCancel.addEventListener('click', () => {
+    if (modalLocked) return;
+    closeModal(false);
+  });
+}
+
+if (modalConfirm) {
+  modalConfirm.addEventListener('click', () => {
+    if (modalLocked) return;
+    closeModal(true);
+  });
+}
+
+if (modalOverlay) {
+  modalOverlay.addEventListener('click', (event) => {
+    if (event.target === modalOverlay && !modalLocked) {
+      closeModal(false);
     }
   });
 }
@@ -5661,6 +6398,9 @@ _FULL_UI_HTML = """
           <section id="token-performance-panel" class="panel" hidden>
             <div id="token-performance-content"></div>
           </section>
+          <section id="settings-panel" class="panel" hidden>
+            <div id="settings-content"></div>
+          </section>
           <section id="objective-panel" class="panel">
             <h3 id="objective-title">Current objective</h3>
             <p id="objective-summary" class="hint">No objective selected.</p>
@@ -5787,6 +6527,20 @@ _FULL_UI_HTML = """
         </section>
       </main>
     </div>
+    <div id="modal-overlay" class="modal-overlay" hidden>
+      <div id="modal-card" class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+        <h3 id="modal-title" class="modal-title"></h3>
+        <div id="modal-body" class="modal-body"></div>
+        <div id="modal-status-row" class="modal-status-row" hidden>
+          <div class="modal-spinner" aria-hidden="true"></div>
+          <div id="modal-status-text" class="modal-status-text"></div>
+        </div>
+        <div class="modal-actions">
+          <button id="modal-cancel" type="button" class="secondary">Cancel</button>
+          <button id="modal-confirm" type="button">OK</button>
+        </div>
+      </div>
+    </div>
     <script type="module" src="/app.js"></script>
   </body>
 </html>
@@ -5801,6 +6555,7 @@ _INDEX_HTML = _render_view_html("control-flow", "split-workspace")
 _ATOMIC_HTML = _render_view_html("atomic", "split-workspace")
 _PROMOTION_REVIEW_HTML = _render_view_html("promotion-review", "split-workspace")
 _OBJECTIVE_CREATE_HTML = _render_view_html("objective-create", "full-review")
+_SETTINGS_HTML = _render_view_html("settings", "full-review")
 _TOKEN_PERFORMANCE_HTML = _render_view_html("token-performance", "full-review")
 _HARNESS_HTML = _render_view_html("harness", "dashboard")
 
@@ -5835,6 +6590,114 @@ class HarnessUIDataService:
                 }
             )
         return {"projects": projects}
+
+    def update_project_repo_settings(
+        self,
+        project_id: str,
+        *,
+        promotion_mode: str,
+        repo_provider: str,
+        repo_name: str,
+        base_branch: str,
+    ) -> dict[str, object]:
+        project = self.store.get_project(project_id)
+        if project is None:
+            raise ValueError(f"Unknown project: {project_id}")
+        cleaned_repo_name = repo_name.strip()
+        cleaned_base_branch = base_branch.strip()
+        if not cleaned_repo_name:
+            raise ValueError("Repository name must not be empty")
+        if not cleaned_base_branch:
+            raise ValueError("Base branch must not be empty")
+        updated = self.task_service.update_project(
+            project.id,
+            promotion_mode=PromotionMode(promotion_mode),
+            repo_provider=RepoProvider(repo_provider),
+            repo_name=cleaned_repo_name,
+            base_branch=cleaned_base_branch,
+        )
+        return {"project": serialize_dataclass(updated)}
+
+    def promote_objective_to_repo(self, objective_id: str) -> dict[str, object]:
+        objective = self.store.get_objective(objective_id)
+        if objective is None:
+            raise ValueError(f"Unknown objective: {objective_id}")
+        project = self.store.get_project(objective.project_id)
+        if project is None:
+            raise ValueError(f"Unknown project for objective: {objective.project_id}")
+        linked_tasks = [task for task in self.store.list_tasks(objective.project_id) if task.objective_id == objective.id]
+        review = self._promotion_review_for_objective(objective.id, linked_tasks)
+        override_active = bool(review.get("operator_override"))
+        if not bool(review.get("review_clear")) and not override_active:
+            raise ValueError("Objective is not yet clear to promote")
+        objective_paths = self._objective_repo_file_set(linked_tasks)
+        if not objective_paths:
+            raise ValueError("Objective promotion could not determine any objective-related file paths to apply")
+        source_repo_root = self._objective_source_repo_root(objective.id, linked_tasks)
+        if source_repo_root is None:
+            raise ValueError("Objective promotion requires a git-backed source repository root")
+        candidate = self._latest_completed_task_for_objective(linked_tasks)
+        candidate_run_id = ""
+        if candidate is not None:
+            runs = self.store.list_runs(candidate.id)
+            completed_run = next((run for run in reversed(runs) if run.status == RunStatus.COMPLETED), None)
+            candidate_run_id = completed_run.id if completed_run is not None else ""
+        apply_result = self.ctx.engine.repository_promotions.apply_objective(
+            project,
+            objective_id=objective.id,
+            objective_title=objective.title,
+            source_repo_root=source_repo_root,
+            source_working_root=source_repo_root,
+            objective_paths=objective_paths,
+            staging_root=self.workspace_root / "objective_promotions",
+        )
+        applyback = {
+            "status": "applied",
+            "branch_name": apply_result.branch_name,
+            "commit_sha": apply_result.commit_sha,
+            "pushed_ref": apply_result.pushed_ref,
+            "pr_url": apply_result.pr_url,
+            "promotion_mode": project.promotion_mode.value,
+            "cleanup_performed": apply_result.cleanup_performed,
+            "verified_remote_sha": apply_result.verified_remote_sha,
+            "objective_paths": objective_paths,
+            "source_repo_root": str(source_repo_root),
+        }
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="action_receipt",
+                project_id=objective.project_id,
+                objective_id=objective.id,
+                task_id=candidate.id if candidate is not None else None,
+                run_id=candidate_run_id or None,
+                visibility="operator_visible",
+                author_type="system",
+                content="Action receipt: Promoted the objective snapshot to the repository.",
+                metadata={
+                    "kind": "objective_repo_promotion",
+                    "task_id": candidate.id if candidate is not None else "",
+                    "run_id": candidate_run_id,
+                    "promotion_status": "approved",
+                    "applyback": applyback,
+                    "objective_paths": objective_paths,
+                },
+            )
+        )
+        return {
+            "objective_id": objective.id,
+            "task_id": candidate.id if candidate is not None else "",
+            "run_id": candidate_run_id,
+            "promotion": {
+                "id": new_id("promotion"),
+                "task_id": candidate.id if candidate is not None else "",
+                "run_id": candidate_run_id,
+                "status": "approved",
+                "summary": "Objective snapshot promoted to the repository.",
+                "created_at": _dt.datetime.now(_dt.UTC).isoformat(),
+            },
+            "applyback": applyback,
+        }
 
     def project_workspace(self, project_ref: str) -> dict[str, object]:
         project_id = resolve_project_ref(self.ctx, project_ref)
@@ -5893,6 +6756,7 @@ class HarnessUIDataService:
                     "atomic_generation": atomic_generation,
                     "atomic_units": self._atomic_units_for_objective(objective.id, linked_tasks, atomic_generation),
                     "promotion_review": self._promotion_review_for_objective(objective.id, linked_tasks),
+                    "repo_promotion": self._repo_promotion_for_objective(objective.id, linked_tasks),
                     "recommended_view": (
                         "promotion-review"
                         if objective.status == ObjectiveStatus.RESOLVED
@@ -5920,6 +6784,157 @@ class HarnessUIDataService:
                 "running": _BACKGROUND_SUPERVISOR.is_running(project.id),
                 **_BACKGROUND_SUPERVISOR.status(project.id),
             },
+        }
+
+    def _latest_completed_task_for_objective(self, linked_tasks: list[Task]) -> Task | None:
+        best: tuple[str, str, str] | None = None
+        selected: Task | None = None
+        for task in linked_tasks:
+            if task.status != TaskStatus.COMPLETED:
+                continue
+            runs = self.store.list_runs(task.id)
+            completed_run = next((run for run in reversed(runs) if run.status == RunStatus.COMPLETED), None)
+            if completed_run is None:
+                continue
+            score = (
+                str(completed_run.created_at or ""),
+                str(task.created_at or ""),
+                task.id,
+            )
+            if best is None or score > best:
+                best = score
+                selected = task
+        return selected
+
+    def _objective_repo_file_set(self, linked_tasks: list[Task]) -> list[str]:
+        file_paths: set[str] = set()
+        for task in linked_tasks:
+            runs = self.store.list_runs(task.id)
+            for run in runs:
+                report_artifacts = [artifact for artifact in self.store.list_artifacts(run.id) if artifact.kind == "report" and artifact.path]
+                if not report_artifacts:
+                    continue
+                report_path = Path(report_artifacts[-1].path)
+                try:
+                    payload = json.loads(report_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                changed_files = payload.get("changed_files")
+                if isinstance(changed_files, list):
+                    for raw_path in changed_files:
+                        path = str(raw_path or "").strip()
+                        if path and not path.startswith("/") and ".." not in Path(path).parts:
+                            file_paths.add(str(Path(path)))
+        return sorted(file_paths)
+
+    def _objective_source_repo_root(self, objective_id: str, linked_tasks: list[Task]) -> Path | None:
+        for task in reversed(linked_tasks):
+            runs = self.store.list_runs(task.id)
+            for run in reversed(runs):
+                events = self.store.list_events(entity_type="run", entity_id=run.id)
+                for event in reversed(events):
+                    if event.event_type != "project_workspace_prepared":
+                        continue
+                    source_repo_root = str(event.payload.get("source_repo_root") or "").strip()
+                    if source_repo_root:
+                        return Path(source_repo_root).resolve()
+        return None
+
+    def _latest_objective_repo_promotion(self, objective_id: str) -> dict[str, object] | None:
+        records = [
+            record
+            for record in self.store.list_context_records(objective_id=objective_id, record_type="action_receipt")
+            if str(record.metadata.get("kind") or "") == "objective_repo_promotion"
+        ]
+        if not records:
+            return None
+        record = records[-1]
+        applyback = dict(record.metadata.get("applyback") or {})
+        return {
+            "id": record.id,
+            "status": "approved",
+            "summary": record.content,
+            "created_at": record.created_at.isoformat(),
+            "applyback": applyback,
+            "task_id": str(record.metadata.get("task_id") or ""),
+            "run_id": str(record.metadata.get("run_id") or ""),
+        }
+
+    def _missing_repo_promotion_validation_reason(self, run_id: str) -> str:
+        report_artifacts = [artifact for artifact in self.store.list_artifacts(run_id) if artifact.kind == "report" and artifact.path]
+        if not report_artifacts:
+            return "The latest completed run does not have a structured report artifact."
+        report_path = Path(report_artifacts[-1].path)
+        try:
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return "The latest completed run has an unreadable structured report artifact."
+        compile_check = payload.get("compile_check")
+        test_check = payload.get("test_check")
+        if isinstance(compile_check, dict) and isinstance(test_check, dict):
+            return ""
+        return (
+            "The latest completed run is missing persisted compile/test validation evidence in report.json. "
+            "Re-run or re-validate the task before repo promotion."
+        )
+
+    def _repo_promotion_for_objective(self, objective_id: str, linked_tasks: list[Task]) -> dict[str, object]:
+        objective = self.store.get_objective(objective_id)
+        if objective is None:
+            raise ValueError(f"Unknown objective: {objective_id}")
+        project = self.store.get_project(objective.project_id)
+        if project is None:
+            raise ValueError(f"Unknown project for objective: {objective.project_id}")
+        review = self._promotion_review_for_objective(objective.id, linked_tasks)
+        override_active = bool(review.get("operator_override"))
+        candidate = self._latest_completed_task_for_objective(linked_tasks)
+        candidate_payload: dict[str, object] | None = None
+        latest_promotion_payload: dict[str, object] | None = self._latest_objective_repo_promotion(objective.id)
+        reason = ""
+        eligible = False
+        objective_paths = self._objective_repo_file_set(linked_tasks)
+        source_repo_root = self._objective_source_repo_root(objective.id, linked_tasks)
+
+        if candidate is None:
+            reason = "No completed linked task is available yet."
+        else:
+            runs = self.store.list_runs(candidate.id)
+            completed_run = next((run for run in reversed(runs) if run.status == RunStatus.COMPLETED), None)
+            candidate_payload = {
+                "task_id": candidate.id,
+                "title": candidate.title,
+                "status": candidate.status.value,
+                "latest_completed_run_id": completed_run.id if completed_run is not None else "",
+                "latest_completed_attempt": completed_run.attempt if completed_run is not None else None,
+            }
+            if completed_run is None:
+                reason = "The latest completed linked task does not have a completed run."
+            elif not objective_paths:
+                reason = "Objective promotion could not determine any objective-related file paths to apply."
+            elif source_repo_root is None:
+                reason = "Objective promotion requires a git-backed source repository root."
+            else:
+                if not bool(review.get("review_clear")) and not override_active:
+                    reason = "Objective review must be clear before repo promotion."
+                else:
+                    eligible = True
+                    reason = (
+                        f"Operator override is active. Repo promotion will stage the current objective snapshot for {len(objective_paths)} tracked file(s) and apply it to the repository."
+                        if override_active and not bool(review.get("review_clear"))
+                        else f"The objective snapshot is ready to promote to the repository with {len(objective_paths)} tracked file(s)."
+                    )
+
+        return {
+            "eligible": eligible,
+            "reason": reason,
+            "project_settings": {
+                "promotion_mode": project.promotion_mode.value,
+                "repo_provider": project.repo_provider.value if project.repo_provider is not None else "",
+                "repo_name": project.repo_name,
+                "base_branch": project.base_branch,
+            },
+            "candidate": candidate_payload,
+            "latest_promotion": latest_promotion_payload,
         }
 
     def create_objective(self, project_ref: str, title: str, summary: str) -> dict[str, object]:
@@ -6523,6 +7538,20 @@ class HarnessUIDataService:
             review_state = self._objective_review_state(objective_id)
         latest_round = (review_summary.get("review_rounds") or [None])[0]
         latest_round_status = str(latest_round.get("status") or "") if isinstance(latest_round, dict) else ""
+        if isinstance(latest_round, dict) and latest_round.get("review_id"):
+            review_id = str(latest_round.get("review_id") or "")
+            restarted_any = False
+            for task in linked_tasks:
+                metadata = task.external_ref_metadata if isinstance(task.external_ref_metadata, dict) else {}
+                remediation = metadata.get("objective_review_remediation") if isinstance(metadata.get("objective_review_remediation"), dict) else None
+                if (
+                    task.status == TaskStatus.FAILED
+                    and remediation is not None
+                    and str(remediation.get("review_id") or "") == review_id
+                ):
+                    restarted_any = self._auto_retry_restart_safe_failed_task(task) or restarted_any
+            if restarted_any:
+                return
         if objective.status != ObjectiveStatus.RESOLVED and latest_round_status not in {"ready_for_rerun", "failed"}:
             return
         if (
@@ -7851,6 +8880,86 @@ class HarnessUIDataService:
         run = self.ctx.engine.run_once(task.id)
         return {"run": serialize_dataclass(run)}
 
+    def force_promote_objective_review(self, objective_id: str, *, rationale: str, author: str = "operator") -> dict[str, object]:
+        objective = self.store.get_objective(objective_id)
+        if objective is None:
+            raise ValueError(f"Unknown objective: {objective_id}")
+        reason = rationale.strip()
+        if not reason:
+            raise ValueError("A rationale is required to force-promote an objective review")
+        linked_tasks = [task for task in self.store.list_tasks(objective.project_id) if task.objective_id == objective.id]
+        review = self._promotion_review_for_objective(objective.id, linked_tasks)
+        latest_round = (review.get("review_rounds") or [None])[0]
+        if not isinstance(latest_round, dict) or not latest_round.get("review_id"):
+            raise ValueError("No objective review round exists to override")
+        if int(review.get("unresolved_failed_count", 0) or 0) == 0 and bool(review.get("review_clear")):
+            return {"objective_id": objective.id, "status": "already_clear"}
+        if any(task.status == TaskStatus.ACTIVE for task in linked_tasks):
+            raise ValueError("Cannot force-promote while remediation tasks are still active")
+        if any(task.status == TaskStatus.PENDING for task in linked_tasks):
+            raise ValueError("Cannot force-promote while remediation tasks are still pending")
+
+        review_id = str(latest_round.get("review_id") or "")
+        waived_task_ids: list[str] = []
+        for task in linked_tasks:
+            if task.status != TaskStatus.FAILED:
+                continue
+            metadata = task.external_ref_metadata if isinstance(task.external_ref_metadata, dict) else {}
+            remediation = metadata.get("objective_review_remediation") if isinstance(metadata.get("objective_review_remediation"), dict) else None
+            remediation_review_id = str(remediation.get("review_id") or "") if remediation else ""
+            if remediation_review_id and remediation_review_id != review_id:
+                continue
+            self.task_service.apply_failed_task_disposition(
+                task_id=task.id,
+                disposition="waive_obsolete",
+                rationale=f"Operator force-promoted objective review: {reason}",
+            )
+            waived_task_ids.append(task.id)
+
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="objective_review_override_approved",
+                project_id=objective.project_id,
+                objective_id=objective.id,
+                visibility="operator_visible",
+                author_type="operator",
+                content=f"Operator force-approved objective review round {latest_round.get('round_number') or ''}.",
+                metadata={
+                    "review_id": review_id,
+                    "round_number": latest_round.get("round_number"),
+                    "rationale": reason,
+                    "author": author,
+                    "waived_task_ids": waived_task_ids,
+                },
+            )
+        )
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="action_receipt",
+                project_id=objective.project_id,
+                objective_id=objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Action receipt: Operator force-approved the latest objective promotion review.",
+                metadata={
+                    "kind": "objective_review",
+                    "status": "force_approved",
+                    "review_id": review_id,
+                    "rationale": reason,
+                    "waived_task_ids": waived_task_ids,
+                },
+            )
+        )
+        self.store.update_objective_phase(objective.id)
+        return {
+            "objective_id": objective.id,
+            "status": "force_approved",
+            "review_id": review_id,
+            "waived_task_ids": waived_task_ids,
+        }
+
     def retry_task(self, task_id: str) -> dict[str, object]:
         task = self.store.get_task(task_id)
         if task is None:
@@ -7858,8 +8967,67 @@ class HarnessUIDataService:
         if task.status.value != "failed":
             raise ValueError(f"Task is {task.status.value}, not failed")
         self.store.update_task_status(task_id, TaskStatus.PENDING)
-        _BACKGROUND_SUPERVISOR.start(task.project_id, self.ctx.engine, watch=True)
+        engine = getattr(self.ctx, "engine", None)
+        if engine is not None:
+            _BACKGROUND_SUPERVISOR.start(task.project_id, engine, watch=True)
         return {"task_id": task_id, "status": "pending"}
+
+    def _auto_retry_restart_safe_failed_task(self, task: Task) -> bool:
+        if task.status != TaskStatus.FAILED:
+            return False
+        runs = self.store.list_runs(task.id)
+        if not runs:
+            return False
+        latest_run = runs[-1]
+        metadata = dict(task.external_ref_metadata) if isinstance(task.external_ref_metadata, dict) else {}
+        triage = metadata.get("auto_restart_triage") if isinstance(metadata.get("auto_restart_triage"), dict) else {}
+        if str(triage.get("source_run_id") or "") == latest_run.id:
+            return False
+
+        reason = ""
+        if latest_run.summary == "Recovered: process crash detected" and latest_run.attempt < task.max_attempts:
+            reason = "recovered_process_crash"
+        else:
+            evaluations = self.store.list_evaluations(latest_run.id)
+            latest_evaluation = evaluations[-1] if evaluations else None
+            details = latest_evaluation.details if latest_evaluation is not None and isinstance(latest_evaluation.details, dict) else {}
+            diagnostics = details.get("diagnostics") if isinstance(details.get("diagnostics"), dict) else {}
+            failure_category = str(diagnostics.get("failure_category") or "").strip()
+            infrastructure_failure = bool(diagnostics.get("infrastructure_failure"))
+            restart_safe_categories = {"executor_process_failure", "executor_timeout", "llm_executor_failure", "workspace_contract_failure"}
+            if infrastructure_failure and failure_category in restart_safe_categories and latest_run.attempt < task.max_attempts:
+                reason = failure_category
+
+        if not reason:
+            return False
+
+        metadata["auto_restart_triage"] = {
+            "disposition": "retry_as_is",
+            "reason": reason,
+            "source_run_id": latest_run.id,
+            "source_attempt": latest_run.attempt,
+            "requeued_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        }
+        self.store.update_task_external_metadata(task.id, metadata)
+        self.store.update_task_status(task.id, TaskStatus.PENDING)
+        if task.objective_id:
+            self.store.create_context_record(
+                ContextRecord(
+                    id=new_id("context"),
+                    record_type="action_receipt",
+                    project_id=task.project_id,
+                    objective_id=task.objective_id,
+                    task_id=task.id,
+                    visibility="operator_visible",
+                    author_type="system",
+                    content=f"Action receipt: Automatically requeued restart-safe failed task {task.title}.",
+                    metadata={"kind": "failed_task_auto_requeued", "task_id": task.id, "source_run_id": latest_run.id, "reason": reason},
+                )
+            )
+        engine = getattr(self.ctx, "engine", None)
+        if engine is not None:
+            _BACKGROUND_SUPERVISOR.start(task.project_id, engine, watch=True)
+        return True
 
     def retry_all_failed(self, project_id: str) -> dict[str, object]:
         # Check LLM availability via the central gate before requeuing.
@@ -7874,8 +9042,9 @@ class HarnessUIDataService:
             if task.status == TaskStatus.FAILED:
                 self.store.update_task_status(task.id, TaskStatus.PENDING)
                 reset_count += 1
-        if reset_count > 0:
-            _BACKGROUND_SUPERVISOR.start(project_id, self.ctx.engine, watch=True)
+        engine = getattr(self.ctx, "engine", None)
+        if reset_count > 0 and engine is not None:
+            _BACKGROUND_SUPERVISOR.start(project_id, engine, watch=True)
         return {"reset_count": reset_count, "probe_results": gate.last_probe_results}
 
     def start_supervisor(self, project_id: str) -> dict[str, object]:
@@ -9505,6 +10674,7 @@ class HarnessUIDataService:
         review_cycle_artifact_records = [record for record in objective_records if record.record_type == "objective_review_cycle_artifact"]
         worker_response_records = [record for record in objective_records if record.record_type == "objective_review_worker_response"]
         reviewer_rebuttal_records = [record for record in objective_records if record.record_type == "objective_review_reviewer_rebuttal"]
+        override_records = [record for record in objective_records if record.record_type == "objective_review_override_approved"]
         waivers_by_task: dict[str, dict[str, object]] = {}
         for record in objective_records:
             if record.record_type != "failed_task_waived":
@@ -9663,6 +10833,13 @@ class HarnessUIDataService:
                 for record in reviewer_rebuttal_records
                 if str(record.metadata.get("review_id") or "") == review_id
             ]
+            operator_override = next(
+                (
+                    record for record in reversed(override_records)
+                    if str(record.metadata.get("review_id") or "") == review_id
+                ),
+                None,
+            )
             remediation_counts = {"total": len(remediation_tasks), "completed": 0, "active": 0, "pending": 0, "failed": 0}
             for task in remediation_tasks:
                 if task.status.value in remediation_counts:
@@ -9675,12 +10852,14 @@ class HarnessUIDataService:
                 if needs_remediation:
                     if remediation_counts["active"] > 0 or remediation_counts["pending"] > 0:
                         status = "remediating"
-                    elif remediation_counts["total"] > 0:
+                    elif remediation_counts["total"] > 0 and remediation_counts["failed"] == 0 and remediation_counts["completed"] == remediation_counts["total"]:
                         status = "ready_for_rerun"
                     else:
                         status = "needs_remediation"
                 else:
                     status = "passed"
+            if operator_override is not None:
+                status = "passed"
             round_activity = [start.created_at]
             round_activity.extend(record.created_at for record in review_packet_records if str(record.metadata.get("review_id") or "") == review_id)
             if completed is not None:
@@ -9710,6 +10889,13 @@ class HarnessUIDataService:
                         "terminal_event": review_cycle_artifact.metadata.get("terminal_event"),
                         "linked_outcome": review_cycle_artifact.metadata.get("linked_outcome"),
                     } if review_cycle_artifact is not None else {},
+                    "operator_override": {
+                        "record_id": operator_override.id,
+                        "rationale": str(operator_override.metadata.get("rationale") or operator_override.content or ""),
+                        "author": str(operator_override.metadata.get("author") or operator_override.author_type or "operator"),
+                        "created_at": operator_override.created_at.isoformat(),
+                        "waived_task_ids": list(operator_override.metadata.get("waived_task_ids") or []),
+                    } if operator_override is not None else {},
                     "worker_responses": sorted(worker_responses, key=lambda item: str(item.get("created_at") or ""), reverse=True),
                     "reviewer_rebuttals": sorted(reviewer_rebuttals, key=lambda item: str(item.get("created_at") or ""), reverse=True),
                     "remediation_counts": remediation_counts,
@@ -9722,6 +10908,11 @@ class HarnessUIDataService:
             )
         review_rounds = sorted(round_rows, key=lambda item: int(item.get("round_number") or 0), reverse=True)
         latest_round = review_rounds[0] if review_rounds else None
+        latest_override = (
+            latest_round.get("operator_override")
+            if isinstance(latest_round, dict) and isinstance(latest_round.get("operator_override"), dict)
+            else {}
+        )
         objective_review_packets = list(latest_round.get("packets") or []) if isinstance(latest_round, dict) else []
         all_review_packets = objective_review_packets + review_packets
         all_review_packets.sort(
@@ -9750,7 +10941,10 @@ class HarnessUIDataService:
                 and objective_review_state.get("review_id") != str(latest_round.get("review_id") or "")
             )
         )
-        review_clear = ready and bool(latest_round) and verdict_counts["concern"] == 0 and verdict_counts["remediation_required"] == 0
+        override_active = bool(latest_override)
+        review_clear = ready and bool(latest_round) and (
+            override_active or (verdict_counts["concern"] == 0 and verdict_counts["remediation_required"] == 0)
+        )
         phase = "promotion_review_pending" if ready and not latest_round else "promotion_review_active" if latest_round else "execution"
         if counts["active"] > 0 or counts["pending"] > 0:
             next_action = "Review findings were turned into remediation tasks. Continue in Atomic while the harness works through them."
@@ -9758,6 +10952,9 @@ class HarnessUIDataService:
         elif unresolved_failed_count:
             next_action = "Resolve or disposition the remaining failed tasks before promotion can proceed."
             phase = "remediation_required"
+        elif override_active:
+            next_action = "The latest promotion review round was operator-approved. The objective is clear to promote."
+            phase = "promotion_review_active"
         elif verdict_counts["remediation_required"] > 0 or verdict_counts["concern"] > 0:
             concern_total = verdict_counts["remediation_required"] + verdict_counts["concern"]
             if latest_round_status == "ready_for_rerun":
@@ -9788,6 +10985,8 @@ class HarnessUIDataService:
             "objective_review_packet_count": sum(int((round_row.get("packet_count") or 0)) for round_row in review_rounds),
             "review_rounds": review_rounds,
             "can_start_new_round": can_start_new_round,
+            "can_force_promote": bool(latest_round) and not override_active and counts["active"] == 0 and counts["pending"] == 0,
+            "operator_override": latest_override,
             "review_packets": all_review_packets,
             "failed_tasks": failed_entries,
             "next_action": next_action,
@@ -10314,6 +11513,9 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
         if parsed.path == "/token-performance":
             self._send_html(_TOKEN_PERFORMANCE_HTML)
             return
+        if parsed.path == "/settings":
+            self._send_html(_SETTINGS_HTML)
+            return
         if parsed.path == "/objectives/new":
             self._send_html(_OBJECTIVE_CREATE_HTML)
             return
@@ -10360,6 +11562,20 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/projects/") and parsed.path.endswith("/repo-settings"):
+            project_id = parsed.path[len("/api/projects/") : -len("/repo-settings")].strip("/")
+            payload = self._read_json_body()
+            self._dispatch_json(
+                lambda: self.data_service.update_project_repo_settings(
+                    project_id,
+                    promotion_mode=str(payload.get("promotion_mode") or ""),
+                    repo_provider=str(payload.get("repo_provider") or ""),
+                    repo_name=str(payload.get("repo_name") or ""),
+                    base_branch=str(payload.get("base_branch") or ""),
+                ),
+                notify=True,
+            )
+            return
         if parsed.path.startswith("/api/projects/") and parsed.path.endswith("/objectives"):
             project_ref = parsed.path[len("/api/projects/") : -len("/objectives")].strip("/")
             payload = self._read_json_body()
@@ -10400,6 +11616,26 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
             self._dispatch_json(
                 lambda: self.data_service.complete_interrogation_review(objective_id),
                 status=HTTPStatus.CREATED,
+                notify=True,
+            )
+            return
+        if parsed.path.startswith("/api/objectives/") and parsed.path.endswith("/promotion/force"):
+            objective_id = parsed.path[len("/api/objectives/") : -len("/promotion/force")].strip("/")
+            payload = self._read_json_body()
+            self._dispatch_json(
+                lambda: self.data_service.force_promote_objective_review(
+                    objective_id,
+                    rationale=str(payload.get("rationale") or ""),
+                    author=str(payload.get("author") or "operator"),
+                ),
+                status=HTTPStatus.CREATED,
+                notify=True,
+            )
+            return
+        if parsed.path.startswith("/api/objectives/") and parsed.path.endswith("/promote"):
+            objective_id = parsed.path[len("/api/objectives/") : -len("/promote")].strip("/")
+            self._dispatch_json(
+                lambda: self.data_service.promote_objective_to_repo(objective_id),
                 notify=True,
             )
             return

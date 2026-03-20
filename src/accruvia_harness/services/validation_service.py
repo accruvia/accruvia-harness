@@ -19,14 +19,10 @@ class ValidationService:
         """Run compile+test on candidate and return an updated WorkResult."""
         run_dir = self.workspace_root / "runs" / run.id
         run_dir.mkdir(parents=True, exist_ok=True)
-        diagnostics = dict(work_result.diagnostics or {})
-        project_workspace = Path(
-            str(diagnostics.get("project_workspace") or workspace_path)
-        )
 
         environ = {
             "ACCRUVIA_RUN_DIR": str(run_dir),
-            "ACCRUVIA_PROJECT_WORKSPACE": str(project_workspace),
+            "ACCRUVIA_PROJECT_WORKSPACE": str(workspace_path),
             "ACCRUVIA_TASK_ID": task.id,
             "ACCRUVIA_RUN_ID": run.id,
             "ACCRUVIA_TASK_VALIDATION_MODE": task.validation_mode,
@@ -52,20 +48,18 @@ class ValidationService:
                 report = {}
 
         report["validation_exit_code"] = exit_code
-        if report:
-            report_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+        diagnostics = dict(work_result.diagnostics or {})
         diagnostics.update(
             {
                 "worker_outcome": str(report.get("worker_outcome") or work_result.outcome),
-                "project_workspace": str(project_workspace),
-                "changed_files": report.get("changed_files", diagnostics.get("changed_files", [])),
-                "test_files": report.get("test_files", diagnostics.get("test_files", [])),
                 "compile_check": report.get("compile_check"),
                 "test_check": report.get("test_check"),
                 "validation_elapsed_seconds": report.get("validation_elapsed_seconds"),
-                "validation_exit_code": exit_code,
                 "failure_category": report.get("failure_category") or diagnostics.get("failure_category"),
                 "failure_message": report.get("failure_message") or diagnostics.get("failure_message"),
+                "infrastructure_failure": bool(report.get("infrastructure_failure") or diagnostics.get("infrastructure_failure")),
+                "workspace_contract_failure": bool(report.get("workspace_contract_failure")),
+                "workspace_contract_issues": list(report.get("workspace_contract_issues") or []),
             }
         )
         outcome = str(report.get("worker_outcome") or work_result.outcome or "success")

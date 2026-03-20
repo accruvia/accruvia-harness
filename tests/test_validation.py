@@ -85,6 +85,37 @@ class DeterministicValidationTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual("missing_test_evidence", result.issues[0].code)
 
+    def test_live_candidate_report_shape_without_validation_proof_fails_compile_and_test_validators(self) -> None:
+        self.report_path.write_text(
+            json.dumps(
+                {
+                    "worker_outcome": "candidate",
+                    "changed_files": ["src/accruvia_harness/ui.py", "tests/test_ui.py"],
+                    "test_files": ["tests/test_ui.py"],
+                    "summary": "Candidate emitted but validation proof was never persisted.",
+                    "validation_profile": "python",
+                    "validation_mode": "default_focused",
+                    "effective_validation_mode": "default_focused",
+                    "worker_backend": "agent",
+                    "llm_backend": "codex",
+                    "command": "codex exec",
+                    "atomicity_gate": {"score": 0.1, "flags": [], "action": "allow", "rationale": "safe"},
+                    "atomicity_telemetry_path": "/tmp/atomicity_telemetry.json",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        changed = ChangedFilesValidator().validate(self.task, self.artifacts)
+        compile_result = CompileCheckValidator().validate(self.task, self.artifacts)
+        test_result = TestEvidenceValidator().validate(self.task, self.artifacts)
+
+        self.assertTrue(changed.ok)
+        self.assertFalse(compile_result.ok)
+        self.assertEqual("compile_check_failed", compile_result.issues[0].code)
+        self.assertFalse(test_result.ok)
+        self.assertEqual("missing_test_evidence", test_result.issues[0].code)
+
     def test_python_profile_validator_requires_python_tests(self) -> None:
         self.task.validation_profile = "python"
         self.report_path.write_text(

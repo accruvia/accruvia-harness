@@ -29,6 +29,7 @@ from accruvia_harness.domain import (
 )
 from accruvia_harness.interrogation import HarnessQueryService
 from accruvia_harness.llm import LLMExecutionResult
+from accruvia_harness.services.repository_promotion_service import PromotionApplyResult
 from accruvia_harness.store import SQLiteHarnessStore
 from accruvia_harness.ui import BackgroundSupervisorCoordinator, HarnessUIDataService
 
@@ -199,6 +200,97 @@ class ZeroUsageObjectiveReviewRouter(FakeLLMRouter):
         )
 
 
+class FakePromotionEngine:
+    def __init__(self, store: SQLiteHarnessStore) -> None:
+        self.store = store
+        self.review_calls: list[tuple[str, str | None]] = []
+        self.affirm_calls: list[tuple[str, str | None, str | None]] = []
+        self.worker = SimpleNamespace(set_stop_requested=lambda *_args, **_kwargs: None)
+        self.objective_apply_calls: list[dict[str, object]] = []
+        self.repository_promotions = SimpleNamespace(apply_objective=self._apply_objective)
+
+    def review_promotion(self, task_id: str, run_id: str | None = None, create_follow_on: bool = True):
+        self.review_calls.append((task_id, run_id))
+        promotion = PromotionRecord(
+            id=new_id("promotion"),
+            task_id=task_id,
+            run_id=run_id or "",
+            status=PromotionStatus.PENDING,
+            summary="Pending affirmation.",
+            details={"validators": [], "affirmation_required": True},
+        )
+        self.store.create_promotion(promotion)
+        return SimpleNamespace(promotion=promotion, follow_on_task_id=None)
+
+    def affirm_promotion(
+        self,
+        task_id: str,
+        run_id: str | None = None,
+        promotion_id: str | None = None,
+        create_follow_on: bool = True,
+    ):
+        self.affirm_calls.append((task_id, run_id, promotion_id))
+        existing = next(
+            (promotion for promotion in self.store.list_promotions(task_id) if promotion.id == (promotion_id or "")),
+            None,
+        )
+        if existing is None:
+            raise ValueError("Missing promotion")
+        approved = PromotionRecord(
+            id=existing.id,
+            task_id=existing.task_id,
+            run_id=existing.run_id,
+            status=PromotionStatus.APPROVED,
+            summary="Approved.",
+            details={
+                **existing.details,
+                "applyback": {
+                    "status": "applied",
+                    "branch_name": "promotions/demo",
+                    "commit_sha": "abc123def456",
+                    "pushed_ref": "promotions/demo",
+                    "pr_url": "https://github.com/accruvia/accruvia-harness/pull/123",
+                    "promotion_mode": "branch_and_pr",
+                    "updated_existing_review": False,
+                },
+            },
+            created_at=existing.created_at,
+        )
+        self.store.update_promotion(approved)
+        return SimpleNamespace(promotion=approved, follow_on_task_id=None)
+
+    def _apply_objective(
+        self,
+        project,
+        *,
+        objective_id,
+        objective_title,
+        source_repo_root,
+        source_working_root,
+        objective_paths,
+        staging_root,
+    ):
+        self.objective_apply_calls.append(
+            {
+                "project_id": project.id,
+                "objective_id": objective_id,
+                "objective_title": objective_title,
+                "source_repo_root": str(source_repo_root),
+                "source_working_root": str(source_working_root),
+                "objective_paths": list(objective_paths),
+                "staging_root": str(staging_root),
+            }
+        )
+        return PromotionApplyResult(
+            branch_name="objective/demo",
+            commit_sha="abc123def456",
+            pushed_ref="abc123def456:main",
+            pr_url=None,
+            cleanup_performed=True,
+            verified_remote_sha="abc123def456",
+        )
+
+
 class HarnessUIDataServiceTests(unittest.TestCase):
     def test_objective_create_view_uses_dedicated_page_form(self) -> None:
         self.assertIn('data-view="objective-create"', ui_module._OBJECTIVE_CREATE_HTML)
@@ -210,6 +302,29 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         self.assertIn('data-view="token-performance"', ui_module._TOKEN_PERFORMANCE_HTML)
         self.assertIn('token-performance-content', ui_module._TOKEN_PERFORMANCE_HTML)
         self.assertIn('/token-performance', ui_module._APP_JS)
+
+    def test_settings_view_exists(self) -> None:
+        self.assertIn('data-view="settings"', ui_module._SETTINGS_HTML)
+        self.assertIn('settings-content', ui_module._SETTINGS_HTML)
+        self.assertIn('/settings', ui_module._APP_JS)
+        self.assertIn('repo-settings-save-btn', ui_module._APP_JS)
+        self.assertIn('modal-overlay', ui_module._FULL_UI_HTML)
+        self.assertIn('modal-status-row', ui_module._FULL_UI_HTML)
+
+    def test_promotion_review_ui_supports_force_promotion_override(self) -> None:
+        self.assertIn("promotion-force-approve-btn", ui_module._APP_JS)
+        self.assertIn("/promotion/force", ui_module._APP_JS)
+        self.assertIn("This round was operator-approved", ui_module._APP_JS)
+        self.assertIn("underlying reviewer packets remain recorded below", ui_module._APP_JS)
+        self.assertIn("Promote Objective to The Repo", ui_module._APP_JS)
+        self.assertIn("promotion-primary-button", ui_module._APP_JS)
+        self.assertIn("/promote", ui_module._APP_JS)
+        self.assertIn("Remote updated:", ui_module._APP_JS)
+        self.assertIn("Promotion did not complete", ui_module._APP_JS)
+        self.assertIn("Promotion completed", ui_module._APP_JS)
+        self.assertIn("Promoting Objective to The Repo", ui_module._APP_JS)
+        self.assertIn("Pushing to origin/", ui_module._APP_JS)
+        self.assertIn("setModalWorking", ui_module._APP_JS)
 
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
@@ -327,6 +442,7 @@ class HarnessUIDataServiceTests(unittest.TestCase):
                 }
             ),
         )
+        self.ctx.engine = FakePromotionEngine(self.store)
         self.service = HarnessUIDataService(self.ctx)
 
     def test_project_workspace_renders_mermaid_and_hides_nudges_from_comments(self) -> None:
@@ -1075,6 +1191,574 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         self.assertEqual(2, review["review_rounds"][0]["round_number"])
         self.assertEqual("objective_review", review["review_rounds"][0]["packets"][0]["source"])
         self.assertEqual(4, review["objective_review_packet_count"])
+
+    def test_objective_review_failed_remediation_is_not_marked_ready_for_rerun(self) -> None:
+        fake_router = FakeLLMRouter("{}")
+        self.ctx.interrogation_service = SimpleNamespace(llm_router=fake_router)
+        self.service = HarnessUIDataService(self.ctx)
+        completed_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            title="Review-ready task",
+            objective="Execution is complete",
+            status=TaskStatus.COMPLETED,
+        )
+        self.store.create_task(completed_task)
+        self.store.update_objective_status(self.objective.id, ObjectiveStatus.RESOLVED)
+
+        self.service.queue_objective_review(self.objective.id, async_mode=False)
+        remediation_task = next(
+            task for task in self.store.list_tasks(self.project.id)
+            if task.objective_id == self.objective.id and task.strategy == "objective_review_remediation"
+        )
+        self.store.update_task_status(remediation_task.id, TaskStatus.FAILED)
+
+        payload = self.service.project_workspace(self.project.id)
+        objective_payload = next(item for item in payload["objectives"] if item["id"] == self.objective.id)
+        review = objective_payload["promotion_review"]
+        latest_round = review["review_rounds"][0]
+
+        self.assertEqual("needs_remediation", latest_round["status"])
+        self.assertEqual(1, latest_round["remediation_counts"]["failed"])
+        self.assertFalse(review["can_start_new_round"])
+
+    def test_force_promote_objective_review_waives_failed_remediation_and_marks_review_clear(self) -> None:
+        fake_router = FakeLLMRouter("{}")
+        self.ctx.interrogation_service = SimpleNamespace(llm_router=fake_router)
+        self.service = HarnessUIDataService(self.ctx)
+        completed_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            title="Review-ready task",
+            objective="Execution is complete",
+            status=TaskStatus.COMPLETED,
+        )
+        self.store.create_task(completed_task)
+        self.store.update_objective_status(self.objective.id, ObjectiveStatus.RESOLVED)
+
+        self.service.queue_objective_review(self.objective.id, async_mode=False)
+        remediation_task = next(
+            task for task in self.store.list_tasks(self.project.id)
+            if task.objective_id == self.objective.id and task.strategy == "objective_review_remediation"
+        )
+        remediation_run = Run(
+            id=new_id("run"),
+            task_id=remediation_task.id,
+            status=RunStatus.FAILED,
+            attempt=1,
+            summary="Artifacts were insufficient.",
+        )
+        self.store.create_run(remediation_run)
+        self.store.update_task_status(remediation_task.id, TaskStatus.FAILED)
+
+        result = self.service.force_promote_objective_review(
+            self.objective.id,
+            rationale="Override the review because the remaining blocker is harness bookkeeping.",
+        )
+
+        payload = self.service.project_workspace(self.project.id)
+        objective_payload = next(item for item in payload["objectives"] if item["id"] == self.objective.id)
+        review = objective_payload["promotion_review"]
+        latest_round = review["review_rounds"][0]
+        updated_task = self.store.get_task(remediation_task.id)
+
+        self.assertEqual("force_approved", result["status"])
+        self.assertEqual(TaskStatus.FAILED, updated_task.status)
+        self.assertEqual("waived", review["failed_tasks"][0]["effective_status"])
+        self.assertTrue(review["review_clear"])
+        self.assertEqual("passed", latest_round["status"])
+        self.assertEqual("operator", latest_round["operator_override"]["author"])
+        self.assertIn("harness bookkeeping", latest_round["operator_override"]["rationale"])
+        self.assertEqual(ObjectiveStatus.RESOLVED, self.store.get_objective(self.objective.id).status)
+
+    def test_repo_promotion_allows_operator_override_despite_remaining_failed_bookkeeping(self) -> None:
+        review_id = new_id("objective_review")
+        completed_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            title="Review-ready task",
+            objective="Execution is complete",
+            status=TaskStatus.COMPLETED,
+        )
+        self.store.create_task(completed_task)
+        completed_run = Run(
+            id=new_id("run"),
+            task_id=completed_task.id,
+            status=RunStatus.COMPLETED,
+            attempt=1,
+            summary="Ready",
+        )
+        self.store.create_run(completed_run)
+        report_path = self.workspace_root / f"{completed_run.id}-report.json"
+        report_path.write_text(
+            json.dumps(
+                {
+                    "changed_files": ["src/accruvia_harness/ui.py", "tests/test_ui.py"],
+                    "test_files": ["tests/test_ui.py"],
+                    "compile_check": {"passed": True},
+                    "test_check": {"passed": True},
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.store.create_artifact(
+            Artifact(
+                id=new_id("artifact"),
+                run_id=completed_run.id,
+                kind="report",
+                path=str(report_path),
+                summary="Structured run report",
+            )
+        )
+        self.store.create_event(
+            Event(
+                id=new_id("event"),
+                entity_type="run",
+                entity_id=completed_run.id,
+                event_type="project_workspace_prepared",
+                payload={
+                    "source_repo_root": str(self.workspace_root),
+                    "project_root": str(self.workspace_root / "runs" / completed_run.id / "workspace"),
+                    "workspace_mode": "git_worktree",
+                },
+            )
+        )
+        blocking_failed = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            title="Repair compile check",
+            objective="Residual bookkeeping failure",
+            status=TaskStatus.FAILED,
+        )
+        self.store.create_task(blocking_failed)
+        self.store.update_objective_status(self.objective.id, ObjectiveStatus.RESOLVED)
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="objective_review_started",
+                project_id=self.project.id,
+                objective_id=self.objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Started review.",
+                metadata={"review_id": review_id, "round_number": 1},
+            )
+        )
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="objective_review_packet",
+                project_id=self.project.id,
+                objective_id=self.objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Concern remains.",
+                metadata={"review_id": review_id, "reviewer": "Ops", "dimension": "devops", "verdict": "concern"},
+            )
+        )
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="objective_review_completed",
+                project_id=self.project.id,
+                objective_id=self.objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Completed review.",
+                metadata={"review_id": review_id, "round_number": 1, "packet_count": 1},
+            )
+        )
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="objective_review_override_approved",
+                project_id=self.project.id,
+                objective_id=self.objective.id,
+                visibility="operator_visible",
+                author_type="operator",
+                content="Operator approved.",
+                metadata={"review_id": review_id, "round_number": 1, "rationale": "Proceed anyway."},
+            )
+        )
+
+        payload = self.service.project_workspace(self.project.id)
+        objective_payload = next(item for item in payload["objectives"] if item["id"] == self.objective.id)
+        self.assertFalse(objective_payload["promotion_review"]["review_clear"])
+        self.assertTrue(objective_payload["repo_promotion"]["eligible"])
+        self.assertIn("Operator override is active", objective_payload["repo_promotion"]["reason"])
+
+        result = self.service.promote_objective_to_repo(self.objective.id)
+        self.assertEqual("approved", result["promotion"]["status"])
+
+    def test_update_project_repo_settings_persists_project_promotion_fields(self) -> None:
+        result = self.service.update_project_repo_settings(
+            self.project.id,
+            promotion_mode="direct_main",
+            repo_provider="github",
+            repo_name="accruvia/accruvia-harness",
+            base_branch="main",
+        )
+
+        self.assertEqual("direct_main", result["project"]["promotion_mode"])
+        self.assertEqual("github", result["project"]["repo_provider"])
+        self.assertEqual("accruvia/accruvia-harness", result["project"]["repo_name"])
+        self.assertEqual("main", result["project"]["base_branch"])
+
+    def test_project_workspace_exposes_repo_promotion_candidate_for_resolved_objective(self) -> None:
+        completed_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            title="Apply the finished change",
+            objective="Ready for repo promotion",
+            status=TaskStatus.COMPLETED,
+        )
+        self.store.create_task(completed_task)
+        completed_run = Run(
+            id=new_id("run"),
+            task_id=completed_task.id,
+            status=RunStatus.COMPLETED,
+            attempt=1,
+            summary="Ready",
+        )
+        self.store.create_run(completed_run)
+        report_path = self.workspace_root / f"{completed_run.id}-report.json"
+        report_path.write_text(
+            json.dumps(
+                {
+                    "changed_files": ["src/accruvia_harness/ui.py", "tests/test_ui.py"],
+                    "test_files": ["tests/test_ui.py"],
+                    "compile_check": {"passed": True},
+                    "test_check": {"passed": True},
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.store.create_artifact(
+            Artifact(
+                id=new_id("artifact"),
+                run_id=completed_run.id,
+                kind="report",
+                path=str(report_path),
+                summary="Structured run report",
+            )
+        )
+        self.store.create_event(
+            Event(
+                id=new_id("event"),
+                entity_type="run",
+                entity_id=completed_run.id,
+                event_type="project_workspace_prepared",
+                payload={
+                    "source_repo_root": str(self.workspace_root),
+                    "project_root": str(self.workspace_root / "runs" / completed_run.id / "workspace"),
+                    "workspace_mode": "git_worktree",
+                },
+            )
+        )
+        self.store.update_objective_status(self.objective.id, ObjectiveStatus.RESOLVED)
+        review_id = new_id("objective_review")
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="objective_review_started",
+                project_id=self.project.id,
+                objective_id=self.objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Started review.",
+                metadata={"review_id": review_id, "round_number": 1},
+            )
+        )
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="objective_review_packet",
+                project_id=self.project.id,
+                objective_id=self.objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Passed review.",
+                metadata={"review_id": review_id, "reviewer": "QA", "dimension": "unit_test_coverage", "verdict": "pass"},
+            )
+        )
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="objective_review_completed",
+                project_id=self.project.id,
+                objective_id=self.objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Completed review.",
+                metadata={"review_id": review_id, "round_number": 1, "packet_count": 1},
+            )
+        )
+
+        payload = self.service.project_workspace(self.project.id)
+        objective_payload = next(item for item in payload["objectives"] if item["id"] == self.objective.id)
+        repo_promotion = objective_payload["repo_promotion"]
+
+        self.assertTrue(repo_promotion["eligible"])
+        self.assertEqual(completed_task.id, repo_promotion["candidate"]["task_id"])
+        self.assertEqual(completed_run.id, repo_promotion["candidate"]["latest_completed_run_id"])
+
+    def test_promote_objective_to_repo_applies_objective_file_set(self) -> None:
+        completed_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            title="Apply the finished change",
+            objective="Ready for repo promotion",
+            status=TaskStatus.COMPLETED,
+        )
+        self.store.create_task(completed_task)
+        completed_run = Run(
+            id=new_id("run"),
+            task_id=completed_task.id,
+            status=RunStatus.COMPLETED,
+            attempt=2,
+            summary="Ready",
+        )
+        self.store.create_run(completed_run)
+        report_path = self.workspace_root / f"{completed_run.id}-report.json"
+        report_path.write_text(
+            json.dumps(
+                {
+                    "changed_files": ["src/accruvia_harness/ui.py", "tests/test_ui.py"],
+                    "test_files": ["tests/test_ui.py"],
+                    "compile_check": {"passed": True},
+                    "test_check": {"passed": True},
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.store.create_artifact(
+            Artifact(
+                id=new_id("artifact"),
+                run_id=completed_run.id,
+                kind="report",
+                path=str(report_path),
+                summary="Structured run report",
+            )
+        )
+        self.store.create_event(
+            Event(
+                id=new_id("event"),
+                entity_type="run",
+                entity_id=completed_run.id,
+                event_type="project_workspace_prepared",
+                payload={
+                    "source_repo_root": str(self.workspace_root),
+                    "project_root": str(self.workspace_root / "runs" / completed_run.id / "workspace"),
+                    "workspace_mode": "git_worktree",
+                },
+            )
+        )
+        self.store.update_objective_status(self.objective.id, ObjectiveStatus.RESOLVED)
+        review_id = new_id("objective_review")
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="objective_review_started",
+                project_id=self.project.id,
+                objective_id=self.objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Started review.",
+                metadata={"review_id": review_id, "round_number": 1},
+            )
+        )
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="objective_review_packet",
+                project_id=self.project.id,
+                objective_id=self.objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Passed review.",
+                metadata={"review_id": review_id, "reviewer": "QA", "dimension": "unit_test_coverage", "verdict": "pass"},
+            )
+        )
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="objective_review_completed",
+                project_id=self.project.id,
+                objective_id=self.objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Completed review.",
+                metadata={"review_id": review_id, "round_number": 1, "packet_count": 1},
+            )
+        )
+
+        result = self.service.promote_objective_to_repo(self.objective.id)
+
+        self.assertEqual(completed_task.id, result["task_id"])
+        self.assertEqual(completed_run.id, result["run_id"])
+        self.assertEqual("approved", result["promotion"]["status"])
+        self.assertEqual("abc123def456:main", result["applyback"]["pushed_ref"])
+        self.assertEqual(
+            ["src/accruvia_harness/ui.py", "tests/test_ui.py"],
+            self.ctx.engine.objective_apply_calls[0]["objective_paths"],
+        )
+        self.assertEqual([], self.ctx.engine.review_calls)
+        self.assertEqual([], self.ctx.engine.affirm_calls)
+
+    def test_repo_promotion_uses_objective_file_set_even_when_latest_task_report_lacks_validation_proof(self) -> None:
+        completed_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            title="Address devops review findings",
+            objective="Ready for repo promotion",
+            status=TaskStatus.COMPLETED,
+        )
+        self.store.create_task(completed_task)
+        completed_run = Run(
+            id=new_id("run"),
+            task_id=completed_task.id,
+            status=RunStatus.COMPLETED,
+            attempt=1,
+            summary="Ready",
+        )
+        self.store.create_run(completed_run)
+        report_path = self.workspace_root / f"{completed_run.id}-report.json"
+        report_path.write_text(
+            json.dumps(
+                {
+                    "worker_outcome": "candidate",
+                    "changed_files": ["src/accruvia_harness/ui.py", "tests/test_ui.py"],
+                    "test_files": ["tests/test_ui.py"],
+                    "summary": "Candidate emitted but validation proof was never persisted.",
+                    "validation_profile": "python",
+                    "validation_mode": "default_focused",
+                    "effective_validation_mode": "default_focused",
+                    "worker_backend": "agent",
+                    "llm_backend": "codex",
+                    "command": "codex exec",
+                    "atomicity_gate": {"score": 0.1, "flags": [], "action": "allow", "rationale": "safe"},
+                    "atomicity_telemetry_path": str(self.workspace_root / "atomicity_telemetry.json"),
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.store.create_artifact(
+            Artifact(
+                id=new_id("artifact"),
+                run_id=completed_run.id,
+                kind="report",
+                path=str(report_path),
+                summary="Structured run report",
+            )
+        )
+        self.store.create_event(
+            Event(
+                id=new_id("event"),
+                entity_type="run",
+                entity_id=completed_run.id,
+                event_type="project_workspace_prepared",
+                payload={
+                    "source_repo_root": str(self.workspace_root),
+                    "project_root": str(self.workspace_root / "runs" / completed_run.id / "workspace"),
+                    "workspace_mode": "git_worktree",
+                },
+            )
+        )
+        self.store.update_objective_status(self.objective.id, ObjectiveStatus.RESOLVED)
+        review_id = new_id("objective_review")
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="objective_review_started",
+                project_id=self.project.id,
+                objective_id=self.objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Started review.",
+                metadata={"review_id": review_id, "round_number": 1},
+            )
+        )
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="objective_review_override_approved",
+                project_id=self.project.id,
+                objective_id=self.objective.id,
+                visibility="operator_visible",
+                author_type="operator",
+                content="Override approved.",
+                metadata={"review_id": review_id, "round_number": 1, "rationale": "Operator approved."},
+            )
+        )
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="objective_review_completed",
+                project_id=self.project.id,
+                objective_id=self.objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Completed review.",
+                metadata={"review_id": review_id, "round_number": 1, "packet_count": 1},
+            )
+        )
+
+        repo_promotion = self.service._repo_promotion_for_objective(self.objective.id, [completed_task])
+
+        self.assertTrue(repo_promotion["eligible"])
+        self.assertIn("objective snapshot", repo_promotion["reason"])
+        result = self.service.promote_objective_to_repo(self.objective.id)
+        self.assertEqual("approved", result["promotion"]["status"])
+        self.assertEqual(
+            ["src/accruvia_harness/ui.py", "tests/test_ui.py"],
+            self.ctx.engine.objective_apply_calls[-1]["objective_paths"],
+        )
+
+    def test_objective_review_auto_requeues_restart_safe_failed_remediation(self) -> None:
+        fake_router = FakeLLMRouter("{}")
+        self.ctx.interrogation_service = SimpleNamespace(llm_router=fake_router)
+        self.service = HarnessUIDataService(self.ctx)
+        completed_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            title="Review-ready task",
+            objective="Execution is complete",
+            status=TaskStatus.COMPLETED,
+        )
+        self.store.create_task(completed_task)
+        self.store.update_objective_status(self.objective.id, ObjectiveStatus.RESOLVED)
+
+        self.service.queue_objective_review(self.objective.id, async_mode=False)
+        remediation_task = next(
+            task for task in self.store.list_tasks(self.project.id)
+            if task.objective_id == self.objective.id and task.strategy == "objective_review_remediation"
+        )
+        failed_run = Run(
+            id=new_id("run"),
+            task_id=remediation_task.id,
+            status=RunStatus.FAILED,
+            attempt=1,
+            summary="Recovered: process crash detected",
+        )
+        self.store.create_run(failed_run)
+        self.store.update_task_status(remediation_task.id, TaskStatus.FAILED)
+
+        self.service._maybe_resume_objective_review(self.objective.id)
+
+        updated_task = self.store.get_task(remediation_task.id)
+        self.assertIsNotNone(updated_task)
+        self.assertEqual(TaskStatus.PENDING, updated_task.status)
+        metadata = updated_task.external_ref_metadata.get("auto_restart_triage")
+        self.assertEqual("retry_as_is", metadata["disposition"])
+        self.assertEqual(failed_run.id, metadata["source_run_id"])
 
     def test_completed_remediation_persists_worker_response_record(self) -> None:
         fake_router = FakeLLMRouter("{}")

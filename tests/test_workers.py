@@ -192,6 +192,31 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(7, result.diagnostics["returncode"])
         self.assertTrue((self.base / "runs" / self.run.id / "worker.stderr.txt").exists())
 
+    def test_agent_worker_discovers_required_artifact_written_to_prepared_workspace(self) -> None:
+        self.task.required_artifacts = ["plan", "report", "completed_objective_review_telemetry_trace"]
+        run_dir = self.base / "runs" / self.run.id
+        workspace = run_dir / "workspace"
+        workspace.mkdir(parents=True)
+        command = (
+            "printf 'summary\\n' && "
+            "printf '{\"worker_outcome\":\"success\"}\\n' > \"$ACCRUVIA_RUN_DIR/report.json\" && "
+            "printf '{\"review_id\":\"review_1\"}\\n' > completed_objective_review_telemetry_trace.json"
+        )
+
+        worker = AgentCommandWorker(command)
+        result = worker.work(self.task, self.run, self.base)
+
+        self.assertEqual("success", result.outcome)
+        artifact_kinds = {kind for kind, _, _ in result.artifacts}
+        self.assertIn("completed_objective_review_telemetry_trace", artifact_kinds)
+        artifact_paths = {
+            kind: path for kind, path, _ in result.artifacts if kind == "completed_objective_review_telemetry_trace"
+        }
+        self.assertEqual(
+            str(workspace / "completed_objective_review_telemetry_trace.json"),
+            artifact_paths["completed_objective_review_telemetry_trace"],
+        )
+
     def test_build_worker_requires_command_for_shell_backend(self) -> None:
         with self.assertRaises(ValueError):
             build_worker("shell")
@@ -524,6 +549,40 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(report["test_check"]["timed_out"])
         self.assertEqual(1, report["test_check"]["startup_timeout_seconds"])
         self.assertIn("startup ceiling", (run_dir / "test_output.txt").read_text(encoding="utf-8"))
+
+    def test_run_validation_fails_fast_on_workspace_contract_violation(self) -> None:
+        workspace = self.base / "workspace-contract-failure"
+        workspace.mkdir(parents=True)
+        run_dir = self.base / "run-workspace-contract"
+        run_dir.mkdir(parents=True)
+        report_path = run_dir / "report.json"
+        report_path.write_text(
+            json.dumps(
+                {
+                    "worker_outcome": "candidate",
+                    "changed_files": ["src/accruvia_harness/ui.py"],
+                    "effective_validation_mode": "default_focused",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        env = {
+            "ACCRUVIA_RUN_DIR": str(run_dir),
+            "ACCRUVIA_PROJECT_WORKSPACE": str(workspace),
+            "ACCRUVIA_TASK_ID": self.task.id,
+            "ACCRUVIA_RUN_ID": self.run.id,
+            "ACCRUVIA_TASK_VALIDATION_MODE": "default_focused",
+        }
+
+        result = run_validation(env)
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(1, result)
+        self.assertEqual("workspace_contract_failure", report["failure_category"])
+        self.assertTrue(report["infrastructure_failure"])
+        self.assertTrue(report["workspace_contract_failure"])
+        self.assertIn("missing expected python targets", report["failure_message"].lower())
 
     def test_atomicity_gate_blocks_self_referential_operator_change_before_validation(self) -> None:
         workspace = self.base / "workspace-self-ref"

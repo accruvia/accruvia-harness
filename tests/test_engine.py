@@ -178,6 +178,37 @@ class ManifestProjectAdapter:
             diagnostics={"project_adapter": self.name},
         )
 
+
+class CandidateArtifactWorker(LocalArtifactWorker):
+    def work(self, task, run, workspace_root: Path) -> WorkResult:  # type: ignore[override]
+        run_dir = workspace_root / "runs" / run.id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        project_workspace = run_dir / "workspace"
+        project_workspace.mkdir(parents=True, exist_ok=True)
+        plan_path = run_dir / "plan.txt"
+        plan_path.write_text("plan\n", encoding="utf-8")
+        report_path = run_dir / "report.json"
+        report_path.write_text(
+            json.dumps(
+                {
+                    "worker_outcome": "candidate",
+                    "changed_files": ["src/demo.py"],
+                    "compile_check": {"passed": True},
+                    "test_files": ["tests/test_demo.py"],
+                    "test_check": {"passed": True},
+                }
+            ),
+            encoding="utf-8",
+        )
+        return WorkResult(
+            summary="Recorded candidate artifacts.",
+            artifacts=[
+                ("plan", str(plan_path), "Plan artifact"),
+                ("report", str(report_path), "Candidate report artifact"),
+            ],
+            diagnostics={"worker_outcome": "candidate"},
+        )
+
     def build_worker(self, project, task, run, workspace, default_worker):
         return None
 
@@ -370,6 +401,142 @@ class HarnessEngineTests(unittest.TestCase):
         self.assertIn("workspace_metadata", artifact_paths)
         self.assertTrue(Path(artifact_paths["workspace_metadata"]).exists())
         self.assertIn("project_workspace_prepared", [event.event_type for event in events])
+
+    def test_run_once_validates_against_prepared_project_workspace(self) -> None:
+        registry = ProjectAdapterRegistry()
+        registry.register(ManifestProjectAdapter())
+        engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-validation-root",
+            project_adapter_registry=registry,
+            worker=CandidateArtifactWorker(),
+        )
+        project = Project(
+            id=new_id("project"),
+            name="manifest-validation-project",
+            description="Uses custom project adapter for validation",
+            adapter_name="manifest",
+        )
+        self.store.create_project(project)
+        task = engine.create_task_with_policy(
+            project_id=project.id,
+            title="Validate from prepared workspace",
+            objective="Ensure validation uses the project workspace root",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+
+        captured: dict[str, Path] = {}
+
+        class FakeValidationService:
+            def validate(self, task, run, work_result, workspace_path):
+                captured["workspace_path"] = Path(workspace_path)
+                updated_diagnostics = dict(work_result.diagnostics or {})
+                updated_diagnostics.update(
+                    {
+                        "worker_outcome": "success",
+                        "compile_check": {"passed": True},
+                        "test_check": {"passed": True},
+                    }
+                )
+                report_path = engine.workspace_root / "runs" / run.id / "report.json"
+                report_path.write_text(
+                    json.dumps(
+                        {
+                            "worker_outcome": "success",
+                            "changed_files": ["src/demo.py"],
+                            "test_files": ["tests/test_demo.py"],
+                            "compile_check": {"passed": True},
+                            "test_check": {"passed": True},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return WorkResult(
+                    summary=work_result.summary,
+                    artifacts=list(work_result.artifacts),
+                    outcome="success",
+                    diagnostics=updated_diagnostics,
+                )
+
+        engine.validation = FakeValidationService()
+        engine.runs.validation_service = engine.validation
+
+        run = engine.run_once(task.id)
+
+        expected_workspace = engine.workspace_root / "runs" / run.id / "workspace"
+        self.assertEqual(expected_workspace.resolve(), captured["workspace_path"].resolve())
+
+    def test_run_once_fails_candidate_when_validation_evidence_is_missing(self) -> None:
+        engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-missing-validation-proof",
+            worker=CandidateArtifactWorker(),
+        )
+        task = engine.create_task_with_policy(
+            project_id=self.project_id,
+            title="Missing validation proof",
+            objective="Mirror the live broken candidate report shape",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+
+        class BrokenValidationService:
+            def validate(self, task, run, work_result, workspace_path):
+                report_path = engine.workspace_root / "runs" / run.id / "report.json"
+                report_path.write_text(
+                    json.dumps(
+                        {
+                            "worker_outcome": "candidate",
+                            "changed_files": ["src/accruvia_harness/ui.py", "tests/test_ui.py"],
+                            "test_files": ["tests/test_ui.py"],
+                            "summary": "Candidate emitted but validation proof was never persisted.",
+                            "validation_profile": "python",
+                            "validation_mode": "default_focused",
+                            "effective_validation_mode": "default_focused",
+                            "worker_backend": "agent",
+                            "llm_backend": "codex",
+                            "command": "codex exec",
+                            "atomicity_gate": {"score": 0.1, "flags": [], "action": "allow", "rationale": "safe"},
+                            "atomicity_telemetry_path": str(engine.workspace_root / "runs" / run.id / "atomicity_telemetry.json"),
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return WorkResult(
+                    summary=work_result.summary,
+                    artifacts=list(work_result.artifacts),
+                    outcome="success",
+                    diagnostics={"worker_outcome": "candidate"},
+                )
+
+        engine.validation = BrokenValidationService()
+        engine.runs.validation_service = engine.validation
+
+        run = engine.run_once(task.id)
+
+        stored_run = self.store.get_run(run.id)
+        self.assertIsNotNone(stored_run)
+        self.assertEqual(RunStatus.FAILED, stored_run.status)
+        task_after = self.store.get_task(task.id)
+        self.assertIsNotNone(task_after)
+        self.assertEqual(TaskStatus.FAILED, task_after.status)
+        report_path = engine.workspace_root / "runs" / run.id / "report.json"
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual("failed", payload["worker_outcome"])
+        self.assertEqual("validation_evidence_missing", payload["failure_category"])
 
     def test_run_once_blocks_objective_linked_task_when_execution_gate_is_not_ready(self) -> None:
         objective = Objective(
@@ -1435,6 +1602,63 @@ class HarnessEngineTests(unittest.TestCase):
 
         self.assertEqual("approved", result.promotion.status.value)
         self.assertIn("affirmation", result.promotion.details)
+
+    def test_repository_promotion_apply_objective_pushes_objective_snapshot_and_cleans_worktree(self) -> None:
+        repo_root = Path(self.temp_dir.name) / "objective-promotion-repo"
+        repo_root.mkdir()
+        remote_root = self._init_git_repo(repo_root, with_remote=True)
+        assert remote_root is not None
+        tracked = repo_root / "src" / "feature.py"
+        tracked.parent.mkdir(parents=True, exist_ok=True)
+        tracked.write_text("VALUE = 'base'\n", encoding="utf-8")
+        unrelated = repo_root / "README.md"
+        unrelated.write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=repo_root, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "commit", "-m", "initial"], cwd=repo_root, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "push", "-u", "origin", "main"], cwd=repo_root, check=True, capture_output=True, text=True)
+
+        tracked.write_text("VALUE = 'objective'\n", encoding="utf-8")
+        unrelated.write_text("local dirt\n", encoding="utf-8")
+        project = Project(
+            id=new_id("project"),
+            name="repo-promotion",
+            description="repo promotion",
+            promotion_mode=PromotionMode.DIRECT_MAIN,
+            repo_provider=RepoProvider.GITHUB,
+            repo_name="accruvia/accruvia-harness",
+            base_branch="main",
+        )
+
+        staging_root = Path(self.temp_dir.name) / "objective-promotion-staging"
+        result = RepositoryPromotionService().apply_objective(
+            project,
+            objective_id=new_id("objective"),
+            objective_title="Objective Promotion Review",
+            source_repo_root=repo_root,
+            source_working_root=repo_root,
+            objective_paths=["src/feature.py"],
+            staging_root=staging_root,
+        )
+
+        self.assertTrue(result.commit_sha)
+        self.assertTrue(result.pushed_ref.endswith(":main"))
+        self.assertTrue(result.cleanup_performed)
+        self.assertEqual(result.commit_sha, result.verified_remote_sha)
+        self.assertFalse(any(staging_root.iterdir()) if staging_root.exists() else False)
+        remote_show = subprocess.run(
+            ["git", "--git-dir", str(remote_root), "show", "main:src/feature.py"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual("VALUE = 'objective'\n", remote_show.stdout)
+        remote_readme = subprocess.run(
+            ["git", "--git-dir", str(remote_root), "show", "main:README.md"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual("base\n", remote_readme.stdout)
 
     def test_review_promotion_rejects_and_creates_follow_on(self) -> None:
         engine = HarnessEngine(

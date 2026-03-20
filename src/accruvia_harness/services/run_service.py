@@ -93,14 +93,14 @@ class RunService:
             raise
 
     def _run_once_inner(self, task, project, progress) -> Run:
-        work, run = self._work_phase(task, project, progress)
+        work, run, prepared_project_root = self._work_phase(task, project, progress)
         if run.status == RunStatus.BLOCKED:
             return run
         progress({"type": "ready_for_next", "task_id": task.id})
-        return self._validation_phase(task, run, work, progress)
+        return self._validation_phase(task, run, work, prepared_project_root, progress)
 
     def _work_phase(self, task, project, progress):
-        """Everything up to and including worker.work(). Returns (WorkResult, Run)."""
+        """Everything up to and including worker.work(). Returns (WorkResult, Run, project_root)."""
         from ..policy import WorkResult as _WR
 
         self.store.create_event(
@@ -311,11 +311,11 @@ class RunService:
                 "run_id": run.id,
                 "message": str(work.diagnostics.get("failure_message", "")),
             })
-            return work, run
+            return work, run, prepared_workspace.project_root
 
-        return work, run
+        return work, run, prepared_workspace.project_root
 
-    def _validation_phase(self, task, run, work, progress) -> Run:
+    def _validation_phase(self, task, run, work, project_workspace_root: Path, progress) -> Run:
         """Run validation on candidates, then analyze and decide."""
         attempt = run.attempt
 
@@ -329,10 +329,11 @@ class RunService:
                 "phase": "validating",
             })
             if hasattr(self, "validation_service") and self.validation_service is not None:
-                validation_result = self.validation_service.validate(task, run, work, self.workspace_root)
+                validation_result = self.validation_service.validate(task, run, work, project_workspace_root)
                 # Update work result with validation outcome
                 if validation_result is not None:
                     work = validation_result
+            work = self._enforce_validation_evidence(task, run, work)
 
         self.store.create_event(
             Event(
@@ -567,6 +568,55 @@ class RunService:
                 validation_profile=task.validation_profile,
             )
         return run
+
+    def _enforce_validation_evidence(self, task, run, work):
+        diagnostics = dict(work.diagnostics or {})
+        worker_outcome = str(diagnostics.get("worker_outcome") or "")
+        compile_check = diagnostics.get("compile_check")
+        test_check = diagnostics.get("test_check")
+        missing_validation_evidence = worker_outcome == "candidate" or not isinstance(compile_check, dict) or not isinstance(test_check, dict)
+        if not missing_validation_evidence:
+            return work
+
+        failure_message = (
+            "Candidate validation did not persist deterministic compile_check and test_check evidence. "
+            "The run cannot be promoted until validation writes those report fields."
+        )
+        diagnostics.update(
+            {
+                "worker_outcome": "failed",
+                "failure_category": "validation_evidence_missing",
+                "failure_message": failure_message,
+                "compile_check": compile_check if isinstance(compile_check, dict) else None,
+                "test_check": test_check if isinstance(test_check, dict) else None,
+            }
+        )
+        run_dir = self.workspace_root / "runs" / run.id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        report_path = run_dir / "report.json"
+        if report_path.exists():
+            try:
+                payload = json.loads(report_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                payload = {}
+        else:
+            payload = {}
+        payload.update(
+            {
+                "task_id": task.id,
+                "run_id": run.id,
+                "worker_outcome": "failed",
+                "failure_category": "validation_evidence_missing",
+                "failure_message": failure_message,
+            }
+        )
+        report_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        return type(work)(
+            summary=failure_message,
+            artifacts=list(work.artifacts),
+            outcome="failed",
+            diagnostics=diagnostics,
+        )
 
     def _ensure_failure_evidence(self, task, run, work):
         if work.outcome not in {"blocked", "failed"}:
