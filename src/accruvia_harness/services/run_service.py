@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
 from pathlib import Path
 
 from ..context_control import objective_execution_gate
@@ -53,6 +56,7 @@ class RunService:
         self.validation_service = validation_service
 
     def run_once(self, task_id: str, progress_callback=None) -> Run:
+        self.cleanup_stale_run_workspaces()
         task = self.store.get_task(task_id)
         if task is None:
             raise ValueError(f"Unknown task: {task_id}")
@@ -77,6 +81,91 @@ class RunService:
             ):
                 return self._run_once(task, project, progress_callback=progress_callback)
         return self._run_once(task, project, progress_callback=progress_callback)
+
+    def cleanup_stale_run_workspaces(self) -> dict[str, int]:
+        runs_root = self.workspace_root / "runs"
+        summary = {
+            "removed": 0,
+            "removed_orphaned": 0,
+            "skipped_active": 0,
+            "skipped_artifact_backed": 0,
+            "missing_run": 0,
+        }
+        if not runs_root.exists():
+            return summary
+        terminal_statuses = {
+            RunStatus.COMPLETED,
+            RunStatus.FAILED,
+            RunStatus.BLOCKED,
+            RunStatus.DISPOSED,
+        }
+        for run_root in runs_root.iterdir():
+            workspace_dir = run_root / "workspace"
+            if not run_root.is_dir() or not workspace_dir.exists():
+                continue
+            run = self.store.get_run(run_root.name)
+            if run is None:
+                summary["missing_run"] += 1
+                self._remove_workspace_dir(run_root.name, workspace_dir)
+                summary["removed_orphaned"] += 1
+                continue
+            if run.status not in terminal_statuses:
+                summary["skipped_active"] += 1
+                continue
+            if self._workspace_contains_referenced_artifacts(run.id, workspace_dir):
+                summary["skipped_artifact_backed"] += 1
+                continue
+            self._remove_workspace_dir(run.id, workspace_dir)
+            summary["removed"] += 1
+        return summary
+
+    def _workspace_contains_referenced_artifacts(self, run_id: str, workspace_dir: Path) -> bool:
+        workspace_resolved = workspace_dir.resolve()
+        for artifact in self.store.list_artifacts(run_id):
+            artifact_path = str(artifact.path or "").strip()
+            if not artifact_path:
+                continue
+            candidate = Path(artifact_path).resolve(strict=False)
+            if self._path_is_within(candidate, workspace_resolved):
+                return True
+        return False
+
+    def _remove_workspace_dir(self, run_id: str, workspace_dir: Path) -> None:
+        events = self.store.list_events(entity_type="run", entity_id=run_id)
+        prepared_event = next(
+            (event for event in reversed(events) if event.event_type == "project_workspace_prepared"),
+            None,
+        )
+        source_repo_root = ""
+        workspace_mode = ""
+        if prepared_event is not None:
+            source_repo_root = str(prepared_event.payload.get("source_repo_root") or "").strip()
+            workspace_mode = str(prepared_event.payload.get("workspace_mode") or "").strip()
+        if workspace_mode == "git_worktree" and source_repo_root:
+            completed = subprocess.run(
+                ["git", "worktree", "remove", "--force", str(workspace_dir)],
+                cwd=source_repo_root,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if completed.returncode == 0:
+                subprocess.run(
+                    ["git", "worktree", "prune"],
+                    cwd=source_repo_root,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                return
+        if workspace_dir.exists():
+            shutil.rmtree(workspace_dir, ignore_errors=True)
+
+    @staticmethod
+    def _path_is_within(candidate: Path, parent: Path) -> bool:
+        candidate_str = os.path.normcase(str(candidate))
+        parent_str = os.path.normcase(str(parent))
+        return candidate_str == parent_str or candidate_str.startswith(parent_str + os.sep)
 
     def _run_once(self, task, project, progress_callback=None) -> Run:
         progress = progress_callback or (lambda _event: None)

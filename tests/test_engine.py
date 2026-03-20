@@ -9,6 +9,7 @@ from pathlib import Path
 
 from accruvia_harness.config import HarnessConfig
 from accruvia_harness.domain import (
+    Artifact,
     ContextRecord,
     DecisionAction,
     IntentModel,
@@ -31,6 +32,7 @@ from accruvia_harness.policy import DecideResult, WorkResult
 from accruvia_harness.services.promotion_service import PromotionService
 from accruvia_harness.services.repository_promotion_service import RepositoryPromotionService
 from accruvia_harness.services.objective_promotion_service import ObjectivePromotionService
+from accruvia_harness.services.run_service import RunService
 from accruvia_harness.project_adapters import ProjectAdapterRegistry
 from accruvia_harness.workers import LocalArtifactWorker
 from accruvia_harness.store import SQLiteHarnessStore
@@ -1760,6 +1762,98 @@ class HarnessEngineTests(unittest.TestCase):
         self.assertEqual(result.commit_sha, result.verified_remote_sha)
         self.assertTrue(result.cleanup_performed)
         self.assertFalse(any(staging_root.iterdir()) if staging_root.exists() else False)
+
+    def test_cleanup_stale_run_workspaces_removes_terminal_non_artifact_workspaces(self) -> None:
+        service = RunService(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-cleanup",
+            planner=object(),
+            worker=LocalArtifactWorker(),
+            analyzer=object(),
+            decider=object(),
+            project_adapter_registry=ProjectAdapterRegistry(),
+        )
+        task = self.engine.create_task_with_policy(
+            project_id=self.project_id,
+            title="cleanup",
+            objective="cleanup",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="default",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+        runs_root = service.workspace_root / "runs"
+        completed_run = Run(
+            id=new_id("run"),
+            task_id=task.id,
+            status=RunStatus.COMPLETED,
+            attempt=1,
+            summary="done",
+        )
+        active_run = Run(
+            id=new_id("run"),
+            task_id=task.id,
+            status=RunStatus.WORKING,
+            attempt=1,
+            summary="working",
+        )
+        kept_run = Run(
+            id=new_id("run"),
+            task_id=task.id,
+            status=RunStatus.COMPLETED,
+            attempt=1,
+            summary="kept",
+        )
+        for run in (completed_run, active_run, kept_run):
+            self.store.create_run(run)
+            workspace = runs_root / run.id / "workspace"
+            workspace.mkdir(parents=True, exist_ok=True)
+            (workspace / "marker.txt").write_text(run.id, encoding="utf-8")
+        kept_artifact = runs_root / kept_run.id / "workspace" / "evidence.json"
+        kept_artifact.write_text("{}", encoding="utf-8")
+        self.store.create_artifact(
+            Artifact(
+                id=new_id("artifact"),
+                run_id=kept_run.id,
+                kind="report",
+                path=str(kept_artifact),
+                summary="Evidence kept in workspace",
+            )
+        )
+
+        summary = service.cleanup_stale_run_workspaces()
+
+        self.assertEqual(1, summary["removed"])
+        self.assertEqual(0, summary["removed_orphaned"])
+        self.assertEqual(1, summary["skipped_active"])
+        self.assertEqual(1, summary["skipped_artifact_backed"])
+        self.assertFalse((runs_root / completed_run.id / "workspace").exists())
+        self.assertTrue((runs_root / active_run.id / "workspace").exists())
+        self.assertTrue((runs_root / kept_run.id / "workspace").exists())
+
+    def test_cleanup_stale_run_workspaces_removes_orphaned_workspaces(self) -> None:
+        service = RunService(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-cleanup-orphan",
+            planner=object(),
+            worker=LocalArtifactWorker(),
+            analyzer=object(),
+            decider=object(),
+            project_adapter_registry=ProjectAdapterRegistry(),
+        )
+        orphan_workspace = service.workspace_root / "runs" / new_id("run") / "workspace"
+        orphan_workspace.mkdir(parents=True, exist_ok=True)
+        (orphan_workspace / "marker.txt").write_text("orphan", encoding="utf-8")
+
+        summary = service.cleanup_stale_run_workspaces()
+
+        self.assertEqual(1, summary["missing_run"])
+        self.assertEqual(1, summary["removed_orphaned"])
+        self.assertFalse(orphan_workspace.exists())
 
     def test_review_promotion_rejects_and_creates_follow_on(self) -> None:
         engine = HarnessEngine(
