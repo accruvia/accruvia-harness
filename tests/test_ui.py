@@ -1605,14 +1605,21 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         self.assertEqual(completed_run.id, result["run_id"])
         self.assertEqual("approved", result["promotion"]["status"])
         self.assertEqual("abc123def456:main", result["applyback"]["pushed_ref"])
+        self.assertEqual([completed_task.id], result["applyback"]["applied_task_ids"])
+        self.assertEqual(1, result["applyback"]["applied_task_count"])
         self.assertEqual(
             ["src/accruvia_harness/ui.py", "tests/test_ui.py"],
             self.ctx.engine.objective_apply_calls[0]["objective_paths"],
         )
+        updated_task = next(task for task in self.store.list_tasks(self.project.id) if task.id == completed_task.id)
+        self.assertEqual(
+            "abc123def456",
+            updated_task.external_ref_metadata["repo_applyback"]["applied_commit_sha"],
+        )
         self.assertEqual([], self.ctx.engine.review_calls)
         self.assertEqual([], self.ctx.engine.affirm_calls)
 
-    def test_repo_promotion_uses_objective_file_set_even_when_latest_task_report_lacks_validation_proof(self) -> None:
+    def test_repo_promotion_blocks_unapplied_completed_task_missing_validation_proof(self) -> None:
         completed_task = Task(
             id=new_id("task"),
             project_id=self.project.id,
@@ -1713,94 +1720,95 @@ class HarnessUIDataServiceTests(unittest.TestCase):
 
         repo_promotion = self.service._repo_promotion_for_objective(self.objective.id, [completed_task])
 
-        self.assertTrue(repo_promotion["eligible"])
-        self.assertIn("objective snapshot", repo_promotion["reason"])
-        result = self.service.promote_objective_to_repo(self.objective.id)
-        self.assertEqual("approved", result["promotion"]["status"])
-        self.assertEqual(
-            ["src/accruvia_harness/ui.py", "tests/test_ui.py"],
-            self.ctx.engine.objective_apply_calls[-1]["objective_paths"],
-        )
+        self.assertFalse(repo_promotion["eligible"])
+        self.assertIn("not ready for repo promotion", repo_promotion["reason"])
+        self.assertIn("missing persisted compile/test validation evidence", repo_promotion["reason"])
+        with self.assertRaisesRegex(ValueError, "not ready for repo promotion"):
+            self.service.promote_objective_to_repo(self.objective.id)
+        self.assertEqual([], self.ctx.engine.objective_apply_calls)
 
-    def test_promote_objective_to_repo_includes_current_local_repo_changes(self) -> None:
-        subprocess.run(["git", "init", "-b", "main"], cwd=self.workspace_root, check=True, capture_output=True, text=True)
-        subprocess.run(
-            ["git", "config", "user.name", "Test User"],
-            cwd=self.workspace_root,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        subprocess.run(
-            ["git", "config", "user.email", "test@example.com"],
-            cwd=self.workspace_root,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        tracked_ui = self.workspace_root / "src" / "accruvia_harness" / "ui.py"
-        tracked_ui.parent.mkdir(parents=True, exist_ok=True)
-        tracked_ui.write_text("UI = 'base'\n", encoding="utf-8")
-        tracked_test = self.workspace_root / "tests" / "test_ui.py"
-        tracked_test.parent.mkdir(parents=True, exist_ok=True)
-        tracked_test.write_text("def test_ui():\n    pass\n", encoding="utf-8")
-        workers_file = self.workspace_root / "src" / "accruvia_harness" / "workers.py"
-        workers_file.write_text("WORKERS = 'base'\n", encoding="utf-8")
-        subprocess.run(["git", "add", "-A"], cwd=self.workspace_root, check=True, capture_output=True, text=True)
-        subprocess.run(["git", "commit", "-m", "initial"], cwd=self.workspace_root, check=True, capture_output=True, text=True)
-
-        completed_task = Task(
+    def test_promote_objective_to_repo_batches_only_unapplied_completed_atomic_units(self) -> None:
+        first_task = Task(
             id=new_id("task"),
             project_id=self.project.id,
             objective_id=self.objective.id,
-            title="Repair compile check for Address devops review findings",
+            title="Atomic unit one",
+            objective="Ready for repo promotion",
+            status=TaskStatus.COMPLETED,
+            external_ref_metadata={
+                "repo_applyback": {
+                    "applied_commit_sha": "already-on-main",
+                    "applied_at": "2026-03-20T00:00:00+00:00",
+                }
+            },
+        )
+        second_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            title="Atomic unit two",
             objective="Ready for repo promotion",
             status=TaskStatus.COMPLETED,
         )
-        self.store.create_task(completed_task)
-        completed_run = Run(
-            id=new_id("run"),
-            task_id=completed_task.id,
-            status=RunStatus.COMPLETED,
-            attempt=2,
-            summary="Ready",
+        third_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            title="Atomic unit three",
+            objective="Ready for repo promotion",
+            status=TaskStatus.COMPLETED,
         )
-        self.store.create_run(completed_run)
-        report_path = Path(self.tempdir.name) / f"{completed_run.id}-report.json"
-        report_path.write_text(
-            json.dumps(
-                {
-                    "changed_files": ["src/accruvia_harness/ui.py", "tests/test_ui.py"],
-                    "test_files": ["tests/test_ui.py"],
-                    "compile_check": {"passed": True},
-                    "test_check": {"passed": True},
-                }
-            ),
-            encoding="utf-8",
-        )
-        self.store.create_artifact(
-            Artifact(
-                id=new_id("artifact"),
-                run_id=completed_run.id,
-                kind="report",
-                path=str(report_path),
-                summary="Structured run report",
+        self.store.create_task(first_task)
+        self.store.create_task(second_task)
+        self.store.create_task(third_task)
+
+        first_run = Run(id=new_id("run"), task_id=first_task.id, status=RunStatus.COMPLETED, attempt=1, summary="Done")
+        second_run = Run(id=new_id("run"), task_id=second_task.id, status=RunStatus.COMPLETED, attempt=1, summary="Done")
+        third_run = Run(id=new_id("run"), task_id=third_task.id, status=RunStatus.COMPLETED, attempt=2, summary="Done")
+        self.store.create_run(first_run)
+        self.store.create_run(second_run)
+        self.store.create_run(third_run)
+
+        for run, changed_files in (
+            (first_run, ["src/accruvia_harness/already_applied.py"]),
+            (second_run, ["src/accruvia_harness/ui.py", "tests/test_ui.py"]),
+            (third_run, ["src/accruvia_harness/workers.py", "tests/test_workers.py"]),
+        ):
+            report_path = Path(self.tempdir.name) / f"{run.id}-report.json"
+            report_path.write_text(
+                json.dumps(
+                    {
+                        "changed_files": changed_files,
+                        "test_files": [changed_files[-1]],
+                        "compile_check": {"passed": True},
+                        "test_check": {"passed": True},
+                    }
+                ),
+                encoding="utf-8",
             )
-        )
-        self.store.create_event(
-            Event(
-                id=new_id("event"),
-                entity_type="run",
-                entity_id=completed_run.id,
-                event_type="project_workspace_prepared",
-                payload={
-                    "source_repo_root": str(self.workspace_root),
-                    "project_root": str(self.workspace_root / "runs" / completed_run.id / "workspace"),
-                    "workspace_mode": "git_worktree",
-                },
+            self.store.create_artifact(
+                Artifact(
+                    id=new_id("artifact"),
+                    run_id=run.id,
+                    kind="report",
+                    path=str(report_path),
+                    summary="Structured run report",
+                )
             )
-        )
-        workers_file.write_text("WORKERS = 'objective-fix'\n", encoding="utf-8")
+            self.store.create_event(
+                Event(
+                    id=new_id("event"),
+                    entity_type="run",
+                    entity_id=run.id,
+                    event_type="project_workspace_prepared",
+                    payload={
+                        "source_repo_root": str(self.workspace_root),
+                        "project_root": str(self.workspace_root / "runs" / run.id / "workspace"),
+                        "workspace_mode": "git_worktree",
+                    },
+                )
+            )
+
         self.store.update_objective_status(self.objective.id, ObjectiveStatus.RESOLVED)
         review_id = new_id("objective_review")
         self.store.create_context_record(
@@ -1818,13 +1826,13 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         self.store.create_context_record(
             ContextRecord(
                 id=new_id("context"),
-                record_type="objective_review_override_approved",
+                record_type="objective_review_packet",
                 project_id=self.project.id,
                 objective_id=self.objective.id,
                 visibility="operator_visible",
-                author_type="operator",
-                content="Override approved.",
-                metadata={"review_id": review_id, "round_number": 1, "rationale": "Operator approved."},
+                author_type="system",
+                content="Passed review.",
+                metadata={"review_id": review_id, "reviewer": "QA", "dimension": "unit_test_coverage", "verdict": "pass"},
             )
         )
         self.store.create_context_record(
@@ -1840,17 +1848,155 @@ class HarnessUIDataServiceTests(unittest.TestCase):
             )
         )
 
+        repo_promotion = self.service._repo_promotion_for_objective(self.objective.id, [first_task, second_task, third_task])
+        self.assertTrue(repo_promotion["eligible"])
+        self.assertEqual(2, repo_promotion["candidate"]["unapplied_completed_task_count"])
+        self.assertEqual([second_task.id, third_task.id], repo_promotion["candidate"]["unapplied_completed_task_ids"])
+
         result = self.service.promote_objective_to_repo(self.objective.id)
 
-        self.assertEqual("approved", result["promotion"]["status"])
+        self.assertEqual(third_task.id, result["task_id"])
+        self.assertEqual(third_run.id, result["run_id"])
+        self.assertEqual([second_task.id, third_task.id], result["applyback"]["applied_task_ids"])
+        self.assertEqual(2, result["applyback"]["applied_task_count"])
         self.assertEqual(
             [
                 "src/accruvia_harness/ui.py",
                 "src/accruvia_harness/workers.py",
                 "tests/test_ui.py",
+                "tests/test_workers.py",
             ],
             self.ctx.engine.objective_apply_calls[-1]["objective_paths"],
         )
+        first_updated = next(task for task in self.store.list_tasks(self.project.id) if task.id == first_task.id)
+        second_updated = next(task for task in self.store.list_tasks(self.project.id) if task.id == second_task.id)
+        third_updated = next(task for task in self.store.list_tasks(self.project.id) if task.id == third_task.id)
+        self.assertEqual("already-on-main", first_updated.external_ref_metadata["repo_applyback"]["applied_commit_sha"])
+        self.assertEqual("abc123def456", second_updated.external_ref_metadata["repo_applyback"]["applied_commit_sha"])
+        self.assertEqual("abc123def456", third_updated.external_ref_metadata["repo_applyback"]["applied_commit_sha"])
+
+        repo_promotion_after = self.service._repo_promotion_for_objective(
+            self.objective.id,
+            [task for task in self.store.list_tasks(self.project.id) if task.objective_id == self.objective.id],
+        )
+        self.assertFalse(repo_promotion_after["eligible"])
+        self.assertIn("already been promoted", repo_promotion_after["reason"])
+
+    def test_promote_atomic_unit_to_repo_marks_only_requested_task_as_applied(self) -> None:
+        first_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            title="Atomic unit one",
+            objective="Ready for repo promotion",
+            status=TaskStatus.COMPLETED,
+        )
+        second_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            title="Atomic unit two",
+            objective="Ready for repo promotion",
+            status=TaskStatus.COMPLETED,
+        )
+        self.store.create_task(first_task)
+        self.store.create_task(second_task)
+
+        first_run = Run(id=new_id("run"), task_id=first_task.id, status=RunStatus.COMPLETED, attempt=1, summary="Done")
+        second_run = Run(id=new_id("run"), task_id=second_task.id, status=RunStatus.COMPLETED, attempt=2, summary="Done")
+        self.store.create_run(first_run)
+        self.store.create_run(second_run)
+        for run, changed_files in (
+            (first_run, ["src/accruvia_harness/ui.py", "tests/test_ui.py"]),
+            (second_run, ["src/accruvia_harness/workers.py", "tests/test_workers.py"]),
+        ):
+            report_path = Path(self.tempdir.name) / f"{run.id}-report.json"
+            report_path.write_text(
+                json.dumps(
+                    {
+                        "changed_files": changed_files,
+                        "test_files": [changed_files[-1]],
+                        "compile_check": {"passed": True},
+                        "test_check": {"passed": True},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.store.create_artifact(
+                Artifact(
+                    id=new_id("artifact"),
+                    run_id=run.id,
+                    kind="report",
+                    path=str(report_path),
+                    summary="Structured run report",
+                )
+            )
+            self.store.create_event(
+                Event(
+                    id=new_id("event"),
+                    entity_type="run",
+                    entity_id=run.id,
+                    event_type="project_workspace_prepared",
+                    payload={
+                        "source_repo_root": str(self.workspace_root),
+                        "project_root": str(self.workspace_root / "runs" / run.id / "workspace"),
+                        "workspace_mode": "git_worktree",
+                    },
+                )
+            )
+
+        self.store.update_objective_status(self.objective.id, ObjectiveStatus.RESOLVED)
+        review_id = new_id("objective_review")
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="objective_review_started",
+                project_id=self.project.id,
+                objective_id=self.objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Started review.",
+                metadata={"review_id": review_id, "round_number": 1},
+            )
+        )
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="objective_review_packet",
+                project_id=self.project.id,
+                objective_id=self.objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Passed review.",
+                metadata={"review_id": review_id, "reviewer": "QA", "dimension": "unit_test_coverage", "verdict": "pass"},
+            )
+        )
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="objective_review_completed",
+                project_id=self.project.id,
+                objective_id=self.objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Completed review.",
+                metadata={"review_id": review_id, "round_number": 1, "packet_count": 1},
+            )
+        )
+
+        result = self.service.promote_atomic_unit_to_repo(first_task.id)
+
+        self.assertEqual(first_task.id, result["task_id"])
+        self.assertEqual(first_run.id, result["run_id"])
+        self.assertEqual([first_task.id], result["applyback"]["applied_task_ids"])
+        self.assertEqual(
+            ["src/accruvia_harness/ui.py", "tests/test_ui.py"],
+            self.ctx.engine.objective_apply_calls[-1]["objective_paths"],
+        )
+        first_updated = next(task for task in self.store.list_tasks(self.project.id) if task.id == first_task.id)
+        second_updated = next(task for task in self.store.list_tasks(self.project.id) if task.id == second_task.id)
+        self.assertEqual("abc123def456", first_updated.external_ref_metadata["repo_applyback"]["applied_commit_sha"])
+        self.assertFalse(second_updated.external_ref_metadata.get("repo_applyback"))
 
     def test_objective_review_auto_requeues_restart_safe_failed_remediation(self) -> None:
         fake_router = FakeLLMRouter("{}")
