@@ -306,7 +306,6 @@ body[data-layout="dashboard"] .content {
 }
 
 body[data-view="control-flow"] .sidebar,
-body[data-view="control-flow"] .header,
 body[data-view="control-flow"] #objective-panel,
 body[data-view="control-flow"] #interrogation-panel,
 body[data-view="control-flow"] #execution-panel,
@@ -316,6 +315,14 @@ body[data-view="control-flow"] #step-expand,
 body[data-view="control-flow"] #next-action-saved,
 body[data-view="control-flow"] #workspace-title,
 body[data-view="control-flow"] #workspace-summary {
+  display: none !important;
+}
+
+body[data-view="control-flow"] .header .header-actions {
+  display: none !important;
+}
+
+body[data-view="control-flow"] #workspace-status {
   display: none !important;
 }
 
@@ -469,7 +476,9 @@ body:not([data-view="atomic"]) #supervisor-panel {
 
 /* === Harness dashboard view === */
 body[data-view="harness"] .sidebar { display: none !important; }
-body[data-view="harness"] .header { display: none !important; }
+body[data-view="harness"] .header .header-actions { display: none !important; }
+body[data-view="harness"] #workspace-status { display: none !important; }
+body[data-view="harness"] #workspace-summary { display: none !important; }
 body[data-view="harness"] #next-action-panel { display: none !important; }
 body[data-view="harness"] #objective-panel { display: none !important; }
 body[data-view="harness"] #interrogation-panel { display: none !important; }
@@ -600,6 +609,7 @@ body[data-view="harness"] #harness-dashboard .harness-event-feed {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 0.5rem;
+  cursor: pointer;
 }
 
 .harness-project-card .project-name {
@@ -643,6 +653,69 @@ body[data-view="harness"] #harness-dashboard .harness-event-feed {
 .harness-project-card .objective-name {
   font-size: 0.88rem;
   color: var(--ink);
+}
+
+.harness-project-card .expand-chevron {
+  font-size: 0.7rem;
+  color: var(--muted);
+  transition: transform 0.2s ease;
+}
+
+.harness-project-card.expanded .expand-chevron {
+  transform: rotate(180deg);
+}
+
+.harness-project-card .project-objectives-list {
+  display: none;
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--line);
+}
+
+.harness-project-card.expanded .project-objectives-list {
+  display: block;
+}
+
+.obj-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.4rem;
+  border-radius: 0.35rem;
+  font-size: 0.82rem;
+  text-decoration: none;
+  color: inherit;
+}
+
+.obj-row:hover {
+  background: var(--bg);
+}
+
+.obj-row .obj-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.obj-row.obj-resolved .obj-status-dot { background: #2f6f4f; }
+.obj-row.obj-executing .obj-status-dot { background: #d9b26a; }
+.obj-row.obj-planning .obj-status-dot { background: #6a9fd9; }
+.obj-row.obj-paused .obj-status-dot { background: #999; }
+.obj-row.obj-open .obj-status-dot { background: #dfd3b8; }
+
+.obj-row .obj-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.obj-row .obj-status-label {
+  color: var(--muted);
+  font-size: 0.75rem;
+  flex-shrink: 0;
 }
 
 .harness-event-feed h3 {
@@ -689,6 +762,18 @@ body[data-view="harness"] #harness-dashboard .harness-event-feed {
   color: var(--ink);
   flex: 1;
   min-width: 0;
+}
+
+.harness-feed-item.feed-completed {
+  border-left: 3px solid #2f6f4f;
+}
+
+.harness-feed-item.feed-failed {
+  border-left: 3px solid #b33;
+}
+
+.harness-feed-item.feed-active {
+  border-left: 3px solid #c90;
 }
 
 body[data-view="atomic"] #atomic-panel {
@@ -5315,12 +5400,12 @@ function renderViewNav() {
   if (state.objectiveId) params.set('objective_id', state.objectiveId);
   const suffix = params.toString() ? `?${params.toString()}` : '';
   const links = [
-    { key: 'control-flow', href: `/workspace${suffix}`, label: 'Control Flow' },
+    { key: 'harness', href: '/', label: 'Dashboard' },
+    { key: 'control-flow', href: `/plan${suffix}`, label: 'Plan' },
     { key: 'atomic', href: `/atomic${suffix}`, label: 'Atomic' },
     { key: 'promotion-review', href: `/promotion-review${suffix}`, label: 'Promotion Review' },
     { key: 'settings', href: `/settings${suffix}`, label: 'Settings' },
     { key: 'token-performance', href: `/token-performance${suffix}`, label: 'Token Performance' },
-    { key: 'harness', href: '/harness', label: 'Dashboard' },
   ];
   viewNav.innerHTML = links.map((link) => (
     `<a class="view-nav-link ${state.view === link.key ? 'active' : ''}" data-view-key="${link.key}" href="${link.href}">${escapeHtml(link.label)}</a>`
@@ -6119,18 +6204,31 @@ function renderHarnessDashboard() {
     const supState = p.supervisor?.state || 'idle';
     const supRunning = p.supervisor?.running;
     const supClass = supRunning ? 'running' : supState === 'finished' ? 'finished' : supState === 'error' ? 'error' : 'idle';
-    const obj = p.active_objective;
-    const objLine = obj
-      ? `<div class="objective-name">${escapeHtml(obj.title)} · ${escapeHtml(obj.status)}${obj.task_total ? ` · ${obj.task_counts?.completed || 0}/${obj.task_total} done` : ''}</div>`
-      : '<div class="objective-name" style="color:var(--muted)">No active objective</div>';
-    const atomicParams = new URLSearchParams({ project_id: p.id });
-    if (obj) atomicParams.set('objective_id', obj.id);
-    const atomicLink = `/atomic?${atomicParams.toString()}`;
+    const objectives = p.objectives || [];
+    const objList = objectives.length
+      ? objectives.map((o) => {
+          const statusClass = o.status === 'resolved' ? 'obj-resolved'
+            : o.status === 'executing' ? 'obj-executing'
+            : o.status === 'planning' ? 'obj-planning'
+            : o.status === 'paused' ? 'obj-paused'
+            : 'obj-open';
+          const taskInfo = o.task_total
+            ? ` · ${o.task_counts?.completed || 0}/${o.task_total} tasks`
+            : '';
+          const planLink = `/plan?project_id=${encodeURIComponent(p.id)}&objective_id=${encodeURIComponent(o.id)}`;
+          return `<a href="${planLink}" class="obj-row ${statusClass}">
+            <span class="obj-status-dot"></span>
+            <span class="obj-title">${escapeHtml(o.title)}</span>
+            <span class="obj-status-label">${escapeHtml(o.status)}${taskInfo}</span>
+          </a>`;
+        }).join('')
+      : '<div style="color:var(--muted);font-size:0.8rem;padding:0.3rem 0">No objectives</div>';
     return `
-      <a href="${atomicLink}" class="harness-project-card" style="text-decoration:none;color:inherit">
-        <div class="project-header">
+      <div class="harness-project-card" data-project-id="${escapeHtml(p.id)}">
+        <div class="project-header" onclick="this.parentElement.classList.toggle('expanded')">
           <span class="project-name">${escapeHtml(p.name)}</span>
           <span class="supervisor-pill ${supClass}">${escapeHtml(supRunning ? 'running' : supState)}</span>
+          <span class="expand-chevron">&#9662;</span>
         </div>
         <div class="mini-progress">
           <div class="segment completed" style="width:${ppct(ts.completed || 0)}"></div>
@@ -6139,21 +6237,26 @@ function renderHarnessDashboard() {
           <div class="segment pending" style="width:${ppct(ts.pending || 0)}"></div>
         </div>
         <div class="task-summary">${ts.completed || 0} done · ${ts.active || 0} active · ${ts.failed || 0} failed · ${ts.pending || 0} pending — ${total} total</div>
-        ${objLine}
-      </a>
+        <div class="project-objectives-list">${objList}</div>
+      </div>
     `;
   }).join('');
 
   // Event feed
   const events = harnessData.recent_events || [];
   feedList.innerHTML = events.length
-    ? events.map((e) => `
-        <div class="harness-feed-item">
+    ? events.map((e) => {
+        const typeClass = e.event_type === 'task_completed' ? ' feed-completed'
+          : e.event_type === 'task_failed' ? ' feed-failed'
+          : e.event_type === 'task_active' ? ' feed-active'
+          : '';
+        return `
+        <div class="harness-feed-item${typeClass}">
           <span class="feed-time">${escapeHtml(formatRelativeTime(e.created_at))}</span>
           <span class="feed-project">${escapeHtml(e.project_name)}</span>
           <span class="feed-text">${escapeHtml(e.text)}</span>
-        </div>
-      `).join('')
+        </div>`;
+      }).join('')
     : '<div style="color:var(--muted);padding:0.5rem">No recent events.</div>';
 }
 
@@ -6166,6 +6269,9 @@ async function main() {
     if (tag && ver.commit) tag.textContent = ver.commit;
   } catch (_e) {}
   if (state.view === 'harness') {
+    renderViewNav();
+    const title = document.getElementById('workspace-title');
+    if (title) title.textContent = 'Dashboard';
     await loadHarnessDashboard();
     window.setInterval(loadHarnessDashboard, 3000);
     return;
@@ -6390,7 +6496,7 @@ _FULL_UI_HTML = """
                 </div>
                 <div class="objective-create-actions">
                   <button type="submit">Create objective</button>
-                  <a class="objective-create-cancel" href="/workspace">Cancel</a>
+                  <a class="objective-create-cancel" href="/plan">Cancel</a>
                 </div>
               </form>
             </div>
@@ -9180,25 +9286,27 @@ class HarnessUIDataService:
             for status_key in global_counts:
                 global_counts[status_key] += int(tasks_by_status.get(status_key, 0))
             objectives = self.store.list_objectives(project.id)
+            all_project_tasks = self.store.list_tasks(project.id)
             active_objective = None
+            all_objectives = []
             for obj in objectives:
-                if obj.status.value in ("executing", "planning"):
+                linked_tasks = [t for t in all_project_tasks if t.objective_id == obj.id]
+                task_counts = {"completed": 0, "active": 0, "failed": 0, "pending": 0}
+                for t in linked_tasks:
+                    s = t.status.value if hasattr(t.status, "value") else str(t.status)
+                    if s in task_counts:
+                        task_counts[s] += 1
+                obj_data = {
+                    "id": obj.id,
+                    "title": obj.title,
+                    "status": obj.status.value,
+                    "task_counts": task_counts,
+                    "task_total": len(linked_tasks),
+                }
+                all_objectives.append(obj_data)
+                if active_objective is None and obj.status.value in ("executing", "planning"):
                     gen = self._atomic_generation_state(obj.id)
-                    linked_tasks = [t for t in self.store.list_tasks(project.id) if t.objective_id == obj.id]
-                    task_counts = {"completed": 0, "active": 0, "failed": 0, "pending": 0}
-                    for t in linked_tasks:
-                        s = t.status.value if hasattr(t.status, "value") else str(t.status)
-                        if s in task_counts:
-                            task_counts[s] += 1
-                    active_objective = {
-                        "id": obj.id,
-                        "title": obj.title,
-                        "status": obj.status.value,
-                        "atomic_generation": gen,
-                        "task_counts": task_counts,
-                        "task_total": len(linked_tasks),
-                    }
-                    break
+                    active_objective = {**obj_data, "atomic_generation": gen}
             supervisor = _BACKGROUND_SUPERVISOR.status(project.id)
             projects.append({
                 "id": project.id,
@@ -9210,6 +9318,7 @@ class HarnessUIDataService:
                 "tasks_by_status": dict(tasks_by_status),
                 "task_total": sum(int(v) for v in tasks_by_status.values()),
                 "active_objective": active_objective,
+                "objectives": all_objectives,
             })
         # LLM health from router
         llm_health = []
@@ -9250,6 +9359,37 @@ class HarnessUIDataService:
                     "created_at": record.created_at.isoformat(),
                     "objective_id": record.objective_id or "",
                 })
+            # Include completed and failed task events
+            all_tasks = self.store.list_tasks(project.id)
+            for t in all_tasks:
+                status_val = t.status.value if hasattr(t.status, "value") else str(t.status)
+                if status_val == "completed":
+                    recent_events.append({
+                        "project_id": project.id,
+                        "project_name": project.name,
+                        "text": f"Task completed: {t.title}",
+                        "created_at": t.updated_at.isoformat(),
+                        "objective_id": t.objective_id or "",
+                        "event_type": "task_completed",
+                    })
+                elif status_val == "failed":
+                    recent_events.append({
+                        "project_id": project.id,
+                        "project_name": project.name,
+                        "text": f"Task failed: {t.title}",
+                        "created_at": t.updated_at.isoformat(),
+                        "objective_id": t.objective_id or "",
+                        "event_type": "task_failed",
+                    })
+                elif status_val == "active":
+                    recent_events.append({
+                        "project_id": project.id,
+                        "project_name": project.name,
+                        "text": f"Task started: {t.title}",
+                        "created_at": t.updated_at.isoformat(),
+                        "objective_id": t.objective_id or "",
+                        "event_type": "task_active",
+                    })
         recent_events.sort(key=lambda e: e["created_at"], reverse=True)
         return {
             "global_counts": global_counts,
@@ -11602,6 +11742,9 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         if parsed.path == "/":
+            self._send_html(_HARNESS_HTML)
+            return
+        if parsed.path == "/plan":
             self._send_html(_INDEX_HTML)
             return
         if parsed.path == "/atomic":

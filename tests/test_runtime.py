@@ -181,7 +181,11 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertIs(result, fake_client)
         self.assertEqual(3, client_cls.connect.await_count)
-        fake_workflow_service.describe_namespace.assert_awaited_once()
+        # describe_namespace is only called when temporalio is installed
+        # (DescribeNamespaceRequest is not None); skip assertion otherwise.
+        from accruvia_harness.temporal_backend import DescribeNamespaceRequest
+        if DescribeNamespaceRequest is not None:
+            fake_workflow_service.describe_namespace.assert_awaited_once()
 
     def test_temporal_engine_builder_uses_configured_external_modules(self) -> None:
         plugin_root = Path(self.temp_dir.name) / "plugins"
