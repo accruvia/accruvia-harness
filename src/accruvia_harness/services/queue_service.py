@@ -12,10 +12,12 @@ class QueueService:
         store: SQLiteHarnessStore,
         runner: RunService,
         llm_gate: LLMAvailabilityGate | None = None,
+        post_task_callback=None,
     ) -> None:
         self.store = store
         self.runner = runner
         self.llm_gate = llm_gate
+        self.post_task_callback = post_task_callback
 
     def process_next_task(
         self,
@@ -97,6 +99,8 @@ class QueueService:
                         "backlog_after": backlog_after,
                     }
                 )
+                if self.post_task_callback is not None and updated_task is not None:
+                    self.post_task_callback(updated_task)
                 return {"task": updated_task, "runs": runs}
             finally:
                 self.store.release_task_lease(task.id, worker_id)

@@ -1520,6 +1520,37 @@ class HarnessEngineTests(unittest.TestCase):
         self.assertEqual(ObjectiveStatus.PLANNING, objective_after.status if objective_after else None)
         self.assertEqual(1, len(receipts))
 
+    def test_updating_task_status_recomputes_objective_phase(self) -> None:
+        objective = Objective(
+            id=new_id("objective"),
+            project_id=self.project_id,
+            title="Phase recompute",
+            summary="Objective phase should follow linked task status changes",
+        )
+        self.store.create_objective(objective)
+        task = self.engine.create_task_with_policy(
+            project_id=self.project_id,
+            objective_id=objective.id,
+            title="Pending slice",
+            objective="One bounded slice",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+
+        self.assertEqual(ObjectiveStatus.OPEN, self.store.get_objective(objective.id).status)
+
+        self.store.update_task_status(task.id, TaskStatus.ACTIVE)
+        self.assertEqual(ObjectiveStatus.EXECUTING, self.store.get_objective(objective.id).status)
+
+        self.store.update_task_status(task.id, TaskStatus.COMPLETED)
+        self.assertEqual(ObjectiveStatus.RESOLVED, self.store.get_objective(objective.id).status)
+
     def test_process_next_task_uses_and_releases_lease(self) -> None:
         task = self.engine.import_issue_task(
             project_id=self.project_id,

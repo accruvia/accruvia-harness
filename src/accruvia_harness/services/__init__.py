@@ -11,6 +11,7 @@ from .run_service import RunService
 from .supervisor_service import SupervisorResult, SupervisorService
 from .task_service import TaskService
 from .validation_service import ValidationService
+from .workflow_service import ObjectiveReadiness, WorkflowService
 
 __all__ = [
     "BranchResult",
@@ -32,5 +33,7 @@ __all__ = [
     "SupervisorService",
     "TaskService",
     "ValidationService",
+    "ObjectiveReadiness",
+    "WorkflowService",
     "WinnerResult",
 ]

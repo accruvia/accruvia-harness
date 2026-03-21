@@ -181,16 +181,20 @@ class ProjectTaskStoreMixin:
         return task_from_row(row) if row else None
 
     def update_task_status(self, task_id: str, status: TaskStatus) -> None:
+        objective_id: str | None = None
         with self.connect() as connection:
-            row = connection.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            row = connection.execute("SELECT status, objective_id FROM tasks WHERE id = ?", (task_id,)).fetchone()
             if row is None:
                 raise ValueError(f"Unknown task: {task_id}")
             current = TaskStatus(row["status"])
+            objective_id = row["objective_id"]
             validate_task_transition(current, status)
             connection.execute(
                 "UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?",
                 (status.value, datetime.now(UTC).isoformat(), task_id),
             )
+        if objective_id:
+            self.update_objective_phase(objective_id)
 
     def acquire_task_lease(
         self,

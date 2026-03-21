@@ -40,6 +40,7 @@ from .frustration_triage import triage_frustration
 from .llm import LLMExecutionError, LLMInvocation
 from .services.red_team_service import RedTeamLoopService
 from .services.task_service import TaskService
+from .services.workflow_service import WorkflowService
 from .ui_memory import LocalContextMemoryProvider
 from .ui_responder import (
     ConversationTurn,
@@ -331,6 +332,8 @@ body[data-view="control-flow"] #workspace-status {
 
 body[data-view="control-flow"] #next-action-panel {
   display: block !important;
+  grid-column: 1;
+  grid-row: 1;
   min-height: 100vh;
   border-radius: 0;
   border: none;
@@ -342,6 +345,8 @@ body[data-view="control-flow"] #next-action-panel {
 
 body[data-view="control-flow"] #content-grid {
   display: block;
+  grid-column: 2;
+  grid-row: 1;
   width: 100%;
   margin: 0;
 }
@@ -516,14 +521,18 @@ body[data-view="harness"] #harness-dashboard .harness-llm-health {
   grid-column: 1 / -1;
 }
 
+body[data-view="harness"] #harness-dashboard .harness-objective-board {
+  grid-column: 1 / -1;
+}
+
 body[data-view="harness"] #harness-dashboard .harness-project-cards {
   grid-column: 1;
-  grid-row: 3;
+  grid-row: 4;
 }
 
 body[data-view="harness"] #harness-dashboard .harness-event-feed {
   grid-column: 2;
-  grid-row: 3;
+  grid-row: 4;
 }
 
 .harness-global-status {
@@ -560,6 +569,98 @@ body[data-view="harness"] #harness-dashboard .harness-event-feed {
   gap: 0.5rem;
   margin-bottom: 1.5rem;
   flex-wrap: wrap;
+}
+
+.harness-objective-board {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 0.85rem;
+  margin-bottom: 1rem;
+}
+
+.harness-objective-card {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 0.9rem;
+  background: #fffdf8;
+  text-decoration: none;
+  color: inherit;
+}
+
+.harness-objective-card:hover {
+  border-color: var(--accent);
+  box-shadow: 0 8px 24px rgba(31, 41, 51, 0.08);
+}
+
+.harness-objective-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.harness-objective-project {
+  font-size: 0.72rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.harness-objective-title {
+  color: var(--ink);
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.harness-objective-status {
+  flex-shrink: 0;
+  padding: 0.18rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #f7f2e8;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.harness-objective-status.executing {
+  border-color: #d9b26a;
+  background: #fff4d6;
+  color: #8b5a00;
+}
+
+.harness-objective-status.planning {
+  border-color: #a24c2b;
+  background: #fdf0e7;
+  color: #a24c2b;
+}
+
+.harness-objective-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.harness-objective-metric {
+  padding: 0.18rem 0.5rem;
+  border-radius: 999px;
+  background: #f7f2e8;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.harness-objective-active-tasks {
+  font-size: 0.82rem;
+  color: var(--ink);
+}
+
+.harness-objective-board-empty {
+  padding: 1rem;
+  border: 1px dashed var(--line);
+  border-radius: 0.9rem;
+  background: #fffdf8;
+  color: var(--muted);
 }
 
 .harness-llm-health .llm-badge {
@@ -2307,6 +2408,59 @@ body[data-view="atomic"] .conversation-form {
   margin: 0 0 0.25rem;
 }
 
+.workflow-stage-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin: 0.75rem 0 0.5rem;
+}
+
+.workflow-stage-pill {
+  padding: 0.24rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #f7f2e8;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.workflow-stage-pill.ready {
+  background: #edf9f0;
+  border-color: #8fc8a5;
+  color: #1f6b35;
+}
+
+.workflow-stage-pill.current {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.objective-gate-summary {
+  display: grid;
+  gap: 0.4rem;
+  margin-bottom: 0.85rem;
+}
+
+.objective-gate-card {
+  border: 1px solid var(--line);
+  border-radius: 0.8rem;
+  background: #fffdf8;
+  padding: 0.7rem 0.8rem;
+}
+
+.objective-gate-card .meta {
+  color: var(--muted);
+  font-size: 0.76rem;
+  margin-bottom: 0.2rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.objective-gate-card.blocked {
+  border-color: #d9b26a;
+  background: #fff8e8;
+}
+
 .panel[hidden] {
   display: none !important;
 }
@@ -2881,6 +3035,8 @@ const objectiveGate = document.getElementById('objective-gate');
 const objectiveGateSection = document.getElementById('objective-gate-section');
 const nextActionTitle = document.getElementById('next-action-title');
 const nextActionBody = document.getElementById('next-action-body');
+const workflowStageStrip = document.getElementById('workflow-stage-strip');
+const objectiveGateSummary = document.getElementById('objective-gate-summary');
 const expectationRole = document.getElementById('expectation-role');
 const expectationNeed = document.getElementById('expectation-need');
 const expectationWhy = document.getElementById('expectation-why');
@@ -3681,6 +3837,55 @@ function renderObjectiveCreatePage() {
   }
 }
 
+function renderWorkflowSummary(objective) {
+  if (!workflowStageStrip || !objectiveGateSummary) return;
+  if (!objective) {
+    workflowStageStrip.innerHTML = '';
+    objectiveGateSummary.innerHTML = '';
+    return;
+  }
+  const workflow = objective.workflow || {};
+  const current = workflow.current_stage || 'planning';
+  const stages = [
+    { key: 'planning', label: 'Planning' },
+    { key: 'execution', label: 'Execution' },
+    { key: 'review', label: 'Review' },
+    { key: 'promotion', label: 'Promotion' },
+  ];
+  workflowStageStrip.innerHTML = stages.map((stage) => {
+    const ready = !!workflow[stage.key]?.ready;
+    return `<span class="workflow-stage-pill ${ready ? 'ready' : ''} ${current === stage.key ? 'current' : ''}">${escapeHtml(stage.label)}${ready ? ' ready' : ''}</span>`;
+  }).join('');
+  const blockedChecks = [
+    ...(objective.execution_gate?.checks || []).filter((check) => !check.ok && !String(check.key || '').endsWith('_placeholder')),
+    ...((workflow.review?.checks || []).filter((check) => !check.ok)),
+    ...((workflow.promotion?.checks || []).filter((check) => !check.ok)),
+  ];
+  const unique = [];
+  const seen = new Set();
+  for (const check of blockedChecks) {
+    const key = `${check.key}:${check.label}:${check.detail}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(check);
+  }
+  objectiveGateSummary.innerHTML = unique.length
+    ? unique.slice(0, 3).map((check) => `
+        <div class="objective-gate-card blocked">
+          <div class="meta">Blocking</div>
+          <div><strong>${escapeHtml(check.label || check.key || 'Gate')}</strong></div>
+          <div>${escapeHtml(check.detail || 'This gate is still blocking advancement.')}</div>
+        </div>
+      `).join('')
+    : `
+      <div class="objective-gate-card">
+        <div class="meta">Workflow</div>
+        <div><strong>No blocking gates are visible.</strong></div>
+        <div>The objective has enough durable state to advance to its next automated stage.</div>
+      </div>
+    `;
+}
+
 function renderTokenPerformancePage() {
   if (!tokenPerformancePanel || !tokenPerformanceContent) return;
   tokenPerformancePanel.hidden = state.view !== 'token-performance';
@@ -3978,6 +4183,7 @@ function renderObjectives() {
     objectiveGate.innerHTML = '<div class="empty">No execution gate data yet.</div>';
     nextActionTitle.textContent = 'No objective selected';
     nextActionBody.textContent = 'Create or select an objective to get a guided next step.';
+    renderWorkflowSummary(null);
     expectationRole.textContent = 'You are the Operator';
     expectationNeed.textContent = 'Select or create one objective.';
     expectationWhy.textContent = 'The harness can only guide one active objective at a time.';
@@ -4030,6 +4236,7 @@ function renderObjectives() {
   const expectation = expectationForMode(currentFocusMode(selected));
   nextActionTitle.textContent = nextAction.title;
   nextActionBody.textContent = nextAction.body;
+  renderWorkflowSummary(selected);
   expectationRole.textContent = expectation.role;
   expectationNeed.textContent = expectation.need;
   expectationWhy.textContent = expectation.why;
@@ -4233,7 +4440,11 @@ function renderTasks() {
   for (const task of visibleTasks) {
     const button = document.createElement('button');
     button.className = task.id === state.taskId ? 'active' : '';
-    button.innerHTML = `<span class="title">${escapeHtml(task.title)}</span><span class="meta">${task.status} · ${task.strategy}</span>`;
+    const queueState = task.queue_state || {};
+    const queueSuffix = task.status === 'pending' && queueState.state
+      ? ` · ${queueState.state.replaceAll('_', ' ')}`
+      : '';
+    button.innerHTML = `<span class="title">${escapeHtml(task.title)}</span><span class="meta">${task.status} · ${task.strategy}${escapeHtml(queueSuffix)}</span>`;
     button.addEventListener('click', () => {
       state.taskId = task.id;
       state.runId = ([...task.runs].reverse()[0] || {}).id || null;
@@ -6158,6 +6369,7 @@ function renderHarnessDashboard() {
   if (!harnessData) return;
   const globalStatus = document.getElementById('harness-global-status');
   const llmHealth = document.getElementById('harness-llm-health');
+  const objectiveBoard = document.getElementById('harness-objective-board');
   const projectCards = document.getElementById('harness-project-cards');
   const feedList = document.getElementById('harness-feed-list');
   if (!globalStatus) return;
@@ -6177,7 +6389,7 @@ function renderHarnessDashboard() {
       <div class="segment pending" style="width:${pct(gc.pending || 0)}"></div>
     </div>
     <div class="summary">
-      ${gc.completed || 0} done · ${gc.active || 0} active · ${gc.failed || 0} failed · ${gc.pending || 0} pending — ${gt} total tasks
+      ${gc.completed || 0} done · ${gc.active || 0} active · ${gc.failed || 0} failed · ${gc.pending || 0} pending — ${gt} total tasks · ${(harnessData.active_objectives || []).length} active objectives
     </div>
   `;
 
@@ -6191,6 +6403,38 @@ function renderHarnessDashboard() {
         </span>
       `).join('')
     : '<span style="color:var(--muted);font-size:0.85rem">No LLM backends configured</span>';
+
+  const activeObjectives = harnessData.active_objectives || [];
+  if (objectiveBoard) {
+    objectiveBoard.innerHTML = activeObjectives.length
+      ? activeObjectives.map((objective) => {
+          const params = new URLSearchParams({ project_id: objective.project_id, objective_id: objective.id });
+          const href = `/plan?${params.toString()}`;
+          const counts = objective.task_counts || {};
+          const activeTitles = Array.isArray(objective.active_task_titles) ? objective.active_task_titles : [];
+          const planningChecks = (objective.workflow?.planning?.checks || []).filter((check) => !check.ok);
+          const reviewChecks = (objective.workflow?.review?.checks || []).filter((check) => !check.ok);
+          const blocker = planningChecks[0] || reviewChecks[0] || null;
+          return `
+            <a class="harness-objective-card" href="${href}">
+              <div class="harness-objective-card-header">
+                <div>
+                  <div class="harness-objective-project">${escapeHtml(objective.project_name || '')}</div>
+                  <div class="harness-objective-title">${escapeHtml(objective.title || objective.id)}</div>
+                </div>
+                <span class="harness-objective-status ${escapeHtml(String(objective.status || 'open'))}">${escapeHtml(String(objective.status || 'open'))}</span>
+              </div>
+              <div class="harness-objective-metrics">
+                <span class="harness-objective-metric">${counts.active || 0} active</span>
+                <span class="harness-objective-metric">${counts.pending || 0} pending</span>
+                <span class="harness-objective-metric">${counts.completed || 0}/${objective.task_total || 0} done</span>
+              </div>
+              <div class="harness-objective-active-tasks">${activeTitles.length ? `Running: ${escapeHtml(activeTitles.join(', '))}` : (blocker ? `Blocked: ${escapeHtml(blocker.label || blocker.key || 'gate')}` : 'No task is active right now.')}</div>
+            </a>
+          `;
+        }).join('')
+      : '<div class="harness-objective-board-empty">No objectives currently have active tasks or execution/planning status.</div>';
+  }
 
   // Project cards
   const projects = harnessData.projects || [];
@@ -6240,6 +6484,7 @@ function renderHarnessDashboard() {
           <div class="segment pending" style="width:${ppct(ts.pending || 0)}"></div>
         </div>
         <div class="task-summary">${ts.completed || 0} done · ${ts.active || 0} active · ${ts.failed || 0} failed · ${ts.pending || 0} pending — ${total} total</div>
+        <div class="task-summary">Pending queue: ${(p.pending_queue_states || {}).runnable || 0} runnable · ${(p.pending_queue_states || {}).blocked_by_gate || 0} gate-blocked · ${(p.pending_queue_states || {}).waiting_on_review || 0} waiting on review</div>
         <div class="project-objectives-list">${objList}</div>
       </div>
     `;
@@ -6419,6 +6664,8 @@ _FULL_UI_HTML = """
           </div>
           <h3 id="next-action-title">No objective selected</h3>
           <p id="next-action-body" class="hint">Create or select an objective to get a guided next step.</p>
+          <div id="workflow-stage-strip" class="workflow-stage-strip"></div>
+          <div id="objective-gate-summary" class="objective-gate-summary"></div>
           <div class="expectation-grid">
             <div class="expectation-card">
               <div class="label">Your role</div>
@@ -6624,6 +6871,7 @@ _FULL_UI_HTML = """
           <section id="harness-dashboard" class="panel" hidden>
             <div id="harness-global-status" class="harness-global-status"></div>
             <div id="harness-llm-health" class="harness-llm-health"></div>
+            <div id="harness-objective-board" class="harness-objective-board"></div>
             <div id="harness-project-cards" class="harness-project-cards"></div>
             <div id="harness-event-feed" class="harness-event-feed">
               <h3>Live feed</h3>
@@ -6683,6 +6931,7 @@ class HarnessUIDataService:
         self.query_service = ctx.query_service
         self.workspace_root = ctx.config.workspace_root
         self.task_service = TaskService(self.store)
+        self.workflow_service = WorkflowService(self.store)
         self.memory_provider = LocalContextMemoryProvider(self.store)
         self.auto_resume_atomic_generation = not bool(getattr(ctx, "is_test", False))
         self.auto_resume_objective_review = not bool(getattr(ctx, "is_test", False))
@@ -6699,6 +6948,82 @@ class HarnessUIDataService:
                 }
             )
         return {"projects": projects}
+
+    def reconcile_objective_workflow(self, objective_id: str) -> dict[str, object]:
+        atomic_state = self._atomic_generation_state(objective_id)
+        review_summary = self._promotion_review_for_objective(
+            objective_id,
+            [task for task in self.store.list_tasks(self.store.get_objective(objective_id).project_id) if task.objective_id == objective_id]
+            if self.store.get_objective(objective_id) is not None
+            else [],
+        )
+        review_state = self._objective_review_state(objective_id)
+        return self.workflow_service.reconcile_objective(
+            objective_id,
+            start_atomic=(
+                (lambda oid: self.queue_atomic_generation(oid, async_mode=not bool(getattr(self.ctx, "is_test", False))))
+                if self.auto_resume_atomic_generation
+                else None
+            ),
+            start_review=(
+                (lambda oid: self.queue_objective_review(oid, async_mode=not bool(getattr(self.ctx, "is_test", False))))
+                if self.auto_resume_objective_review
+                else None
+            ),
+            atomic_running=str(atomic_state.get("status") or "") == "running",
+            review_running=str(review_state.get("status") or "") == "running",
+            review_start_allowed=bool(review_summary.get("can_start_new_round", False)),
+        )
+
+    def reconcile_task_workflow(self, task: Task) -> None:
+        if task.objective_id:
+            self.reconcile_objective_workflow(task.objective_id)
+
+    def _workflow_status_for_objective(
+        self,
+        objective: Objective,
+        linked_tasks: list[Task],
+        promotion_review: dict[str, object],
+        repo_promotion: dict[str, object],
+    ) -> dict[str, object]:
+        planning = self.workflow_service.planning_readiness(objective.id)
+        execution = self.workflow_service.execution_readiness(objective.id, linked_tasks)
+        review = self.workflow_service.review_readiness(objective.id, linked_tasks)
+        promotion_checks = [
+            {
+                "key": "review_clear",
+                "label": "Objective review clear",
+                "ok": bool(promotion_review.get("review_clear")),
+                "detail": "" if bool(promotion_review.get("review_clear")) else str(promotion_review.get("next_action") or "Objective review is not clear yet."),
+            },
+            {
+                "key": "repo_promotion_eligible",
+                "label": "Repo promotion eligible",
+                "ok": bool(repo_promotion.get("eligible")),
+                "detail": "" if bool(repo_promotion.get("eligible")) else str(repo_promotion.get("reason") or "Repo promotion is not eligible yet."),
+            },
+        ]
+        promotion = {
+            "stage": "promotion",
+            "ready": all(bool(check["ok"]) for check in promotion_checks),
+            "checks": promotion_checks,
+        }
+        current_stage = (
+            "promotion"
+            if objective.status == ObjectiveStatus.RESOLVED and bool(promotion_review.get("review_rounds"))
+            else "review"
+            if objective.status == ObjectiveStatus.RESOLVED
+            else "execution"
+            if objective.status == ObjectiveStatus.EXECUTING
+            else "planning"
+        )
+        return {
+            "current_stage": current_stage,
+            "planning": {"ready": planning.ready, "checks": planning.checks},
+            "execution": {"ready": execution.ready, "checks": execution.checks},
+            "review": {"ready": review.ready, "checks": review.checks},
+            "promotion": promotion,
+        }
 
     def update_project_repo_settings(
         self,
@@ -6865,6 +7190,8 @@ class HarnessUIDataService:
         if project is None:
             raise ValueError(f"Unknown project: {project_ref}")
         objectives = self.store.list_objectives(project.id)
+        for objective in objectives:
+            self.reconcile_objective_workflow(objective.id)
         if self.auto_resume_atomic_generation:
             for objective in objectives:
                 self._maybe_resume_atomic_generation(objective.id)
@@ -6873,17 +7200,35 @@ class HarnessUIDataService:
                 self._maybe_resume_objective_review(objective.id)
         objectives = self.store.list_objectives(project.id)
         tasks = self.store.list_tasks(project.id)
+        objective_task_map = {objective.id: [task for task in tasks if task.objective_id == objective.id] for objective in objectives}
+        review_map: dict[str, dict[str, object]] = {}
+        repo_promotion_map: dict[str, dict[str, object]] = {}
+        workflow_map: dict[str, dict[str, object]] = {}
+        for objective in objectives:
+            linked_tasks = objective_task_map.get(objective.id, [])
+            review_map[objective.id] = self._promotion_review_for_objective(objective.id, linked_tasks)
+            repo_promotion_map[objective.id] = self._repo_promotion_for_objective(objective.id, linked_tasks)
+            workflow_map[objective.id] = self._workflow_status_for_objective(
+                objective,
+                linked_tasks,
+                review_map[objective.id],
+                repo_promotion_map[objective.id],
+            )
         task_payload = []
         latest_runs_by_task: dict[str, list[Any]] = {}
         for task in tasks:
             runs = self.store.list_runs(task.id)
             promotions = self.store.list_promotions(task.id)
             latest_runs_by_task[task.id] = runs
+            review_ready = False
+            if task.objective_id:
+                review_ready = bool((workflow_map.get(task.objective_id) or {}).get("review", {}).get("ready"))
             task_payload.append(
                 {
                     **serialize_dataclass(task),
                     "runs": [serialize_dataclass(run) for run in runs],
                     "promotions": [serialize_dataclass(promotion) for promotion in promotions],
+                    "queue_state": self.workflow_service.queue_state_for_task(task, review_ready=review_ready),
                 }
             )
         objective_payload = []
@@ -6892,8 +7237,11 @@ class HarnessUIDataService:
             latest_mermaid = self.store.latest_mermaid_artifact(objective.id)
             latest_proposal = self._latest_mermaid_proposal(objective.id)
             gate = objective_execution_gate(self.store, objective.id)
-            linked_tasks = [task for task in tasks if task.objective_id == objective.id]
+            linked_tasks = objective_task_map.get(objective.id, [])
             atomic_generation = self._atomic_generation_state(objective.id)
+            promotion_review = review_map[objective.id]
+            repo_promotion = repo_promotion_map[objective.id]
+            workflow = workflow_map[objective.id]
             objective_payload.append(
                 {
                     **serialize_dataclass(objective),
@@ -6901,6 +7249,7 @@ class HarnessUIDataService:
                         "ready": gate.ready,
                         "checks": gate.gate_checks,
                     },
+                    "workflow": workflow,
                     "intent_model": serialize_dataclass(latest_intent) if latest_intent is not None else None,
                     "interrogation_review": self._interrogation_review(objective.id),
                     "diagram": (
@@ -6915,11 +7264,11 @@ class HarnessUIDataService:
                     "linked_task_count": len(linked_tasks),
                     "atomic_generation": atomic_generation,
                     "atomic_units": self._atomic_units_for_objective(objective.id, linked_tasks, atomic_generation),
-                    "promotion_review": self._promotion_review_for_objective(objective.id, linked_tasks),
-                    "repo_promotion": self._repo_promotion_for_objective(objective.id, linked_tasks),
+                    "promotion_review": promotion_review,
+                    "repo_promotion": repo_promotion,
                     "recommended_view": (
                         "promotion-review"
-                        if objective.status == ObjectiveStatus.RESOLVED
+                        if workflow.get("review", {}).get("ready") or objective.status == ObjectiveStatus.RESOLVED
                         else "atomic"
                     ),
                     "proposed_first_task": self.proposed_first_task(objective.id)
@@ -7162,6 +7511,7 @@ class HarnessUIDataService:
         )
         self.store.create_objective(objective)
         self._create_seed_mermaid(objective)
+        self.reconcile_objective_workflow(objective.id)
         return {"objective": serialize_dataclass(objective)}
 
     def update_intent_model(
@@ -7191,6 +7541,7 @@ class HarnessUIDataService:
             author_type=author_type,
         )
         self.store.create_intent_model(model)
+        self.reconcile_objective_workflow(objective.id)
         return {"intent_model": serialize_dataclass(model)}
 
     def complete_interrogation_review(self, objective_id: str) -> dict[str, object]:
@@ -7203,6 +7554,7 @@ class HarnessUIDataService:
         if review.get("generated_by") == "deterministic":
             review = self._generate_interrogation_review(objective_id)
         self._persist_interrogation_record("interrogation_completed", objective, review)
+        self.reconcile_objective_workflow(objective.id)
         return {"interrogation_review": self._interrogation_review(objective.id)}
 
     def update_mermaid_artifact(
@@ -7266,9 +7618,11 @@ class HarnessUIDataService:
             self.store.update_objective_status(objective.id, ObjectiveStatus.PAUSED)
         elif next_status == MermaidStatus.FINISHED:
             self.store.update_objective_status(objective.id, ObjectiveStatus.PLANNING)
+            self.complete_interrogation_review(objective.id)
             self.queue_atomic_generation(objective.id, async_mode=async_generation)
         else:
             self.store.update_objective_status(objective.id, ObjectiveStatus.INVESTIGATING)
+        self.reconcile_objective_workflow(objective.id)
         return {"diagram": serialize_dataclass(artifact)}
 
     def propose_mermaid_update(self, objective_id: str, *, directive: str) -> dict[str, object] | None:
@@ -7379,6 +7733,7 @@ class HarnessUIDataService:
         )
         self.store.update_objective_status(objective.id, ObjectiveStatus.PLANNING)
         self.queue_atomic_generation(objective.id, async_mode=async_generation)
+        self.reconcile_objective_workflow(objective.id)
         return {"diagram": serialize_dataclass(artifact)}
 
     def reject_mermaid_proposal(self, objective_id: str, proposal_id: str, *, resolution: str = "refine") -> dict[str, object]:
@@ -7419,6 +7774,7 @@ class HarnessUIDataService:
                 metadata={"kind": "mermaid_update", "status": normalized, "proposal_id": proposal.id},
             )
         )
+        self.reconcile_objective_workflow(objective.id)
         return {"rejected": True, "proposal_id": proposal.id, "resolution": normalized}
 
     def proposed_first_task(self, objective_id: str) -> dict[str, object]:
@@ -7468,7 +7824,8 @@ class HarnessUIDataService:
             max_attempts=3,
             required_artifacts=["plan", "report"],
         )
-        self.store.update_objective_status(linked_objective.id, ObjectiveStatus.EXECUTING)
+        self.store.update_objective_phase(linked_objective.id)
+        self.reconcile_objective_workflow(linked_objective.id)
         return {"task": serialize_dataclass(task)}
 
     def queue_atomic_generation(self, objective_id: str, *, async_mode: bool = True) -> dict[str, object]:
@@ -8523,7 +8880,7 @@ class HarnessUIDataService:
                     metadata={"kind": "atomic_generation", "status": "completed", "generation_id": generation_id, "unit_count": len(units)},
                 )
             )
-            self.store.update_objective_status(objective.id, ObjectiveStatus.EXECUTING)
+            self.store.update_objective_phase(objective.id)
             if self.auto_resume_atomic_generation:
                 _BACKGROUND_SUPERVISOR.start(objective.project_id, self.ctx.engine, watch=True)
         except Exception as exc:
@@ -9434,6 +9791,7 @@ class HarnessUIDataService:
         """System-wide harness dashboard data."""
         projects = []
         global_counts = {"completed": 0, "active": 0, "failed": 0, "pending": 0}
+        active_objectives: list[dict[str, object]] = []
         for project in self.store.list_projects():
             metrics = self.store.metrics_snapshot(project.id)
             tasks_by_status = metrics.get("tasks_by_status", {})
@@ -9443,21 +9801,47 @@ class HarnessUIDataService:
             all_project_tasks = self.store.list_tasks(project.id)
             active_objective = None
             all_objectives = []
+            blocked_pending = 0
+            waiting_on_review = 0
+            runnable_pending = 0
             for obj in objectives:
                 linked_tasks = [t for t in all_project_tasks if t.objective_id == obj.id]
+                review = self._promotion_review_for_objective(obj.id, linked_tasks)
+                repo_promotion = self._repo_promotion_for_objective(obj.id, linked_tasks)
+                workflow = self._workflow_status_for_objective(obj, linked_tasks, review, repo_promotion)
                 task_counts = {"completed": 0, "active": 0, "failed": 0, "pending": 0}
                 for t in linked_tasks:
                     s = t.status.value if hasattr(t.status, "value") else str(t.status)
                     if s in task_counts:
                         task_counts[s] += 1
+                    if s == TaskStatus.PENDING.value:
+                        queue_state = self.workflow_service.queue_state_for_task(t, review_ready=bool(workflow.get("review", {}).get("ready")))
+                        state = str(queue_state.get("state") or "")
+                        if state == "blocked_by_gate":
+                            blocked_pending += 1
+                        elif state == "waiting_on_review":
+                            waiting_on_review += 1
+                        elif state == "runnable":
+                            runnable_pending += 1
                 obj_data = {
                     "id": obj.id,
+                    "project_id": project.id,
+                    "project_name": project.name,
                     "title": obj.title,
                     "status": obj.status.value,
                     "task_counts": task_counts,
                     "task_total": len(linked_tasks),
+                    "workflow": workflow,
                 }
                 all_objectives.append(obj_data)
+                active_task_titles = [t.title for t in linked_tasks if t.status == TaskStatus.ACTIVE]
+                if active_task_titles or task_counts["pending"] > 0 or obj.status in {ObjectiveStatus.EXECUTING, ObjectiveStatus.PLANNING}:
+                    active_objectives.append(
+                        {
+                            **obj_data,
+                            "active_task_titles": active_task_titles,
+                        }
+                    )
                 if active_objective is None and obj.status.value in ("executing", "planning"):
                     gen = self._atomic_generation_state(obj.id)
                     active_objective = {**obj_data, "atomic_generation": gen}
@@ -9470,6 +9854,11 @@ class HarnessUIDataService:
                     **supervisor,
                 },
                 "tasks_by_status": dict(tasks_by_status),
+                "pending_queue_states": {
+                    "runnable": runnable_pending,
+                    "blocked_by_gate": blocked_pending,
+                    "waiting_on_review": waiting_on_review,
+                },
                 "task_total": sum(int(v) for v in tasks_by_status.values()),
                 "active_objective": active_objective,
                 "objectives": all_objectives,
@@ -9545,9 +9934,19 @@ class HarnessUIDataService:
                         "event_type": "task_active",
                     })
         recent_events.sort(key=lambda e: e["created_at"], reverse=True)
+        active_objectives.sort(
+            key=lambda item: (
+                -(int((item.get("task_counts") or {}).get("active", 0))),
+                -(int((item.get("task_counts") or {}).get("pending", 0))),
+                0 if item.get("status") == ObjectiveStatus.EXECUTING.value else 1,
+                str(item.get("project_name") or ""),
+                str(item.get("title") or ""),
+            )
+        )
         return {
             "global_counts": global_counts,
             "global_total": sum(global_counts.values()),
+            "active_objectives": active_objectives,
             "projects": projects,
             "llm_health": llm_health,
             "recent_events": recent_events[:50],
@@ -12106,6 +12505,9 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
         if parsed.path == "/":
             self._send_html(_HARNESS_HTML)
             return
+        if parsed.path == "/harness":
+            self._send_redirect("/")
+            return
         if parsed.path == "/plan":
             self._send_html(_INDEX_HTML)
             return
@@ -12126,9 +12528,6 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/workspace":
             self._send_html(_FULL_UI_HTML)
-            return
-        if parsed.path == "/harness":
-            self._send_html(_HARNESS_HTML)
             return
         if parsed.path == "/app.js":
             self._send_text(_APP_JS, content_type="application/javascript; charset=utf-8")
@@ -12415,6 +12814,14 @@ class HarnessUIHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self._write_body(encoded)
 
+    def _send_redirect(self, location: str, *, status: HTTPStatus = HTTPStatus.FOUND) -> None:
+        self.send_response(status)
+        self.send_header("Location", location)
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+        self.end_headers()
+
     def _handle_sse(self) -> None:
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/event-stream")
@@ -12478,6 +12885,8 @@ def start_ui_server(ctx, *, host: str, port: int, open_browser: bool, project_re
         )
         ctx.engine.set_llm_gate(gate)
     data_service = HarnessUIDataService(ctx)
+    if hasattr(ctx, "engine") and hasattr(ctx.engine, "queue"):
+        ctx.engine.queue.post_task_callback = data_service.reconcile_task_workflow
     resolved_port = _resolve_ui_port(host, port)
     event_bus = _EventBus()
     server = ThreadingHTTPServer((host, resolved_port), HarnessUIHandler)
@@ -12543,6 +12952,7 @@ def _auto_start_supervisors(data_service: HarnessUIDataService, ctx) -> None:
         # Resume any stalled atomic generation
         for objective in data_service.store.list_objectives(project.id):
             try:
+                data_service.reconcile_objective_workflow(objective.id)
                 data_service._maybe_resume_atomic_generation(objective.id)
                 data_service._maybe_resume_objective_review(objective.id)
             except Exception:

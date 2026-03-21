@@ -379,6 +379,14 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         self.assertIn('modal-overlay', ui_module._FULL_UI_HTML)
         self.assertIn('modal-status-row', ui_module._FULL_UI_HTML)
 
+    def test_harness_view_surfaces_objective_board_and_canonical_dashboard_route(self) -> None:
+        self.assertIn('data-view="harness"', ui_module._HARNESS_HTML)
+        self.assertIn('harness-objective-board', ui_module._HARNESS_HTML)
+        self.assertIn("href: '/', label: 'Dashboard'", ui_module._APP_JS)
+        self.assertIn("href: `/plan${suffix}`, label: 'Plan'", ui_module._APP_JS)
+        self.assertIn('workflow-stage-strip', ui_module._FULL_UI_HTML)
+        self.assertIn('objective-gate-summary', ui_module._FULL_UI_HTML)
+
     def test_promotion_review_ui_supports_force_promotion_override(self) -> None:
         self.assertIn("promotion-force-approve-btn", ui_module._APP_JS)
         self.assertIn("/promotion/force", ui_module._APP_JS)
@@ -525,6 +533,60 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         self.assertIn("Parent task", diagram)
         self.assertIn("Child task", diagram)
         self.assertIn("-->", diagram)
+
+    def test_project_workspace_surfaces_workflow_readiness_and_task_queue_state(self) -> None:
+        payload = self.service.project_workspace(self.project.id)
+
+        objective_payload = next(item for item in payload["objectives"] if item["id"] == self.objective.id)
+        self.assertIn("workflow", objective_payload)
+        self.assertIn("planning", objective_payload["workflow"])
+        self.assertIn("review", objective_payload["workflow"])
+        child_task = next(item for item in payload["tasks"] if item["id"] == self.child_task.id)
+        self.assertIn("queue_state", child_task)
+        self.assertEqual("running", child_task["queue_state"]["state"])
+
+    def test_harness_overview_surfaces_active_objectives_separately_from_projects(self) -> None:
+        self.store.update_objective_status(self.objective.id, ObjectiveStatus.PLANNING)
+        objective_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            title="Live objective task",
+            objective="Current execution slice",
+            status=TaskStatus.ACTIVE,
+            strategy="atomic_from_mermaid",
+        )
+        self.store.create_task(objective_task)
+
+        overview = self.service.harness_overview()
+
+        self.assertIn("active_objectives", overview)
+        self.assertEqual(1, len(overview["active_objectives"]))
+        active = overview["active_objectives"][0]
+        self.assertEqual(self.objective.id, active["id"])
+        self.assertEqual(self.project.id, active["project_id"])
+        self.assertEqual(self.project.name, active["project_name"])
+        self.assertEqual("planning", active["status"])
+        self.assertEqual(1, active["task_counts"]["active"])
+        self.assertEqual(["Live objective task"], active["active_task_titles"])
+
+    def test_harness_overview_summarizes_pending_queue_states(self) -> None:
+        pending_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            title="Blocked pending task",
+            objective="Wait on planning gate",
+            status=TaskStatus.PENDING,
+            strategy="atomic_from_mermaid",
+        )
+        self.store.create_task(pending_task)
+
+        overview = self.service.harness_overview()
+
+        project = next(item for item in overview["projects"] if item["id"] == self.project.id)
+        self.assertIn("pending_queue_states", project)
+        self.assertEqual(1, project["pending_queue_states"]["blocked_by_gate"])
 
     def test_new_objective_starts_with_guided_next_step_data(self) -> None:
         created = self.service.create_objective(self.project.id, "Harness UI", "Build the local control surface")
@@ -2789,6 +2851,29 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         self.assertTrue(checks["mermaid_finished"]["ok"])
         self.assertEqual("completed", objective_payload["atomic_generation"]["status"])
         self.assertIsInstance(objective_payload["atomic_units"], list)
+
+    def test_mermaid_finished_auto_completes_interrogation(self) -> None:
+        self.service.update_intent_model(
+            self.objective.id,
+            intent_summary="Operator wants stable execution",
+            success_definition="Execution gate passes after mermaid acceptance",
+            non_negotiables=["No manual interrogation step"],
+            frustration_signals=["Tasks stuck behind interrogation gate"],
+        )
+        # Do NOT call complete_interrogation_review manually — mermaid acceptance should do it.
+        self.service.update_mermaid_artifact(
+            self.objective.id,
+            status="finished",
+            summary="Workflow accepted",
+            blocking_reason="",
+            async_generation=False,
+        )
+
+        payload = self.service.project_workspace(self.project.id)
+        objective_payload = next(item for item in payload["objectives"] if item["id"] == self.objective.id)
+        checks = {item["key"]: item for item in objective_payload["execution_gate"]["checks"]}
+        self.assertTrue(checks["interrogation_complete"]["ok"], "Mermaid acceptance should auto-complete interrogation")
+        self.assertTrue(checks["mermaid_finished"]["ok"])
 
     def test_complete_interrogation_review_marks_objective_ready_for_mermaid(self) -> None:
         self.service.update_intent_model(
