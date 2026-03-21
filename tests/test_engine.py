@@ -1914,7 +1914,77 @@ class HarnessEngineTests(unittest.TestCase):
         self.assertIsNotNone(follow_on)
         self.assertEqual(task.id, follow_on.parent_task_id if follow_on else None)
         self.assertEqual(run.id, follow_on.source_run_id if follow_on else None)
-        self.assertEqual("failed", self.store.get_task(task.id).status.value)
+        self.assertEqual("completed", self.store.get_task(task.id).status.value)
+
+    def test_promotion_rejection_does_not_block_objective_resolution(self) -> None:
+        engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-promo-resolve",
+            worker=PromotionBlockedWorker(),
+        )
+        objective = Objective(
+            id=new_id("objective"),
+            project_id=self.project_id,
+            title="Objective with rejected promotion",
+            summary="All tasks complete but one had promotion rejected",
+        )
+        self.store.create_objective(objective)
+        self.store.create_intent_model(
+            IntentModel(
+                id=new_id("intent"),
+                objective_id=objective.id,
+                version=1,
+                intent_summary="Verify promotion rejection flow",
+            )
+        )
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="interrogation_completed",
+                project_id=self.project_id,
+                objective_id=objective.id,
+                content="Interrogation complete",
+            )
+        )
+        self.store.create_mermaid_artifact(
+            MermaidArtifact(
+                id=new_id("diagram"),
+                objective_id=objective.id,
+                diagram_type="workflow_control",
+                version=1,
+                status=MermaidStatus.FINISHED,
+                summary="Accepted flow",
+                content="flowchart TD\nA-->B",
+                required_for_execution=True,
+            )
+        )
+        task = engine.create_task_with_policy(
+            project_id=self.project_id,
+            objective_id=objective.id,
+            title="Promotion blocked task",
+            objective="Task that will have promotion rejected",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+        run = engine.run_once(task.id)
+        result = engine.review_promotion(task.id, run.id)
+
+        self.assertEqual("completed", self.store.get_task(task.id).status.value)
+        # Follow-on task is pending, so objective is PLANNING (not PAUSED as before)
+        phase = self.store.update_objective_phase(objective.id)
+        self.assertEqual(ObjectiveStatus.PLANNING, phase)
+        # Once the follow-on completes, the objective should reach RESOLVED
+        if result.follow_on_task_id:
+            self.store.update_task_status(result.follow_on_task_id, TaskStatus.ACTIVE)
+            self.store.update_task_status(result.follow_on_task_id, TaskStatus.COMPLETED)
+            phase = self.store.update_objective_phase(objective.id)
+            self.assertEqual(ObjectiveStatus.RESOLVED, phase)
 
     def test_blocked_worker_outcome_records_blocked_evaluation(self) -> None:
         engine = HarnessEngine(

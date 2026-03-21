@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import subprocess
 
-from ..domain import Event, PromotionRecord, PromotionStatus, RunStatus, TaskStatus, new_id
+from ..domain import Event, PromotionRecord, PromotionStatus, RunStatus, new_id
 from ..llm import LLMInvocation, LLMRouter, parse_affirmation_response
 from ..store import SQLiteHarnessStore
 from ..validation import PromotionValidator, PromotionValidatorRegistry, ValidationIssue, default_promotion_validators
@@ -123,7 +123,6 @@ class PromotionService:
             },
         )
         self.store.create_promotion(promotion)
-        self.store.update_task_status(task.id, TaskStatus.FAILED)
         self.store.create_event(
             Event(
                 id=new_id("event"),
@@ -273,7 +272,6 @@ class PromotionService:
             created_at=promotion.created_at,
         )
         self.store.update_promotion(promotion)
-        self.store.update_task_status(task.id, TaskStatus.FAILED)
         self.store.create_event(
             Event(
                 id=new_id("event"),

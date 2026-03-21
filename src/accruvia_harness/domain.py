@@ -25,7 +25,7 @@ class TaskStatus(StrEnum):
 VALID_TASK_TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
     TaskStatus.PENDING: frozenset({TaskStatus.ACTIVE, TaskStatus.COMPLETED, TaskStatus.FAILED}),
     TaskStatus.ACTIVE: frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.PENDING}),
-    TaskStatus.COMPLETED: frozenset({TaskStatus.FAILED}),  # promotion rejection
+    TaskStatus.COMPLETED: frozenset(),
     TaskStatus.FAILED: frozenset({TaskStatus.PENDING}),
 }
 
