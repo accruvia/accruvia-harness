@@ -537,6 +537,11 @@ class WorkerTests(unittest.TestCase):
         worker_result = run_agent_worker(env)
         self.assertEqual(0, worker_result)  # Worker returns candidate
 
+        report_path = run_dir / "report.json"
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        report["test_files"] = []
+        report_path.write_text(json.dumps(report), encoding="utf-8")
+
         with patch(
             "accruvia_harness.agent_worker._focused_test_command",
             return_value=["python3", "-c", "import time; time.sleep(2)"],
@@ -583,6 +588,106 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(report["infrastructure_failure"])
         self.assertTrue(report["workspace_contract_failure"])
         self.assertIn("missing expected python targets", report["failure_message"].lower())
+        self.assertIn("workspace contract failed", (run_dir / "compile_output.txt").read_text(encoding="utf-8").lower())
+
+    def test_run_validation_prefers_task_specific_test_files_for_operator_mode(self) -> None:
+        workspace = self.base / "workspace-specific-tests"
+        src_dir = workspace / "src" / "accruvia_harness"
+        tests_dir = workspace / "tests"
+        src_dir.mkdir(parents=True)
+        tests_dir.mkdir(parents=True)
+        (src_dir / "__init__.py").write_text("", encoding="utf-8")
+        (src_dir / "store.py").write_text("VALUE = 1\n", encoding="utf-8")
+        (tests_dir / "test_store.py").write_text(
+            "import unittest\n\n"
+            "from accruvia_harness import store\n\n"
+            "class StoreTests(unittest.TestCase):\n"
+            "    def test_value(self):\n"
+            "        self.assertEqual(1, store.VALUE)\n",
+            encoding="utf-8",
+        )
+        run_dir = self.base / "run-specific-tests"
+        run_dir.mkdir(parents=True)
+        report_path = run_dir / "report.json"
+        report_path.write_text(
+            json.dumps(
+                {
+                    "worker_outcome": "candidate",
+                    "changed_files": ["src/accruvia_harness/store.py", "tests/test_store.py"],
+                    "test_files": ["tests/test_store.py"],
+                    "effective_validation_mode": "lightweight_operator",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        env = {
+            "ACCRUVIA_RUN_DIR": str(run_dir),
+            "ACCRUVIA_PROJECT_WORKSPACE": str(workspace),
+            "ACCRUVIA_TASK_ID": self.task.id,
+            "ACCRUVIA_RUN_ID": self.run.id,
+            "ACCRUVIA_TASK_VALIDATION_MODE": "lightweight_operator",
+        }
+
+        result = run_validation(env)
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(0, result)
+        self.assertEqual("success", report["worker_outcome"])
+        self.assertEqual(
+            ["python3", "-m", "unittest", "-v", "tests.test_store"],
+            report["test_check"]["command"],
+        )
+
+    def test_run_validation_adds_workspace_src_to_pythonpath(self) -> None:
+        workspace = self.base / "workspace-pythonpath"
+        src_dir = workspace / "src" / "accruvia_harness"
+        tests_dir = workspace / "tests"
+        src_dir.mkdir(parents=True)
+        tests_dir.mkdir(parents=True)
+        (src_dir / "__init__.py").write_text("", encoding="utf-8")
+        (src_dir / "context_service.py").write_text("VALUE = 7\n", encoding="utf-8")
+        (tests_dir / "test_context_service.py").write_text(
+            "import unittest\n\n"
+            "from accruvia_harness.context_service import VALUE\n\n"
+            "class ContextServiceTests(unittest.TestCase):\n"
+            "    def test_value(self):\n"
+            "        self.assertEqual(7, VALUE)\n",
+            encoding="utf-8",
+        )
+        run_dir = self.base / "run-pythonpath"
+        run_dir.mkdir(parents=True)
+        report_path = run_dir / "report.json"
+        report_path.write_text(
+            json.dumps(
+                {
+                    "worker_outcome": "candidate",
+                    "changed_files": [
+                        "src/accruvia_harness/context_service.py",
+                        "tests/test_context_service.py",
+                    ],
+                    "test_files": ["tests/test_context_service.py"],
+                    "effective_validation_mode": "lightweight_operator",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        env = {
+            "ACCRUVIA_RUN_DIR": str(run_dir),
+            "ACCRUVIA_PROJECT_WORKSPACE": str(workspace),
+            "ACCRUVIA_TASK_ID": self.task.id,
+            "ACCRUVIA_RUN_ID": self.run.id,
+            "ACCRUVIA_TASK_VALIDATION_MODE": "lightweight_operator",
+            "PYTHONPATH": "",
+        }
+
+        result = run_validation(env)
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(0, result)
+        self.assertTrue(report["compile_check"]["passed"])
+        self.assertTrue(report["test_check"]["passed"])
 
     def test_atomicity_gate_blocks_self_referential_operator_change_before_validation(self) -> None:
         workspace = self.base / "workspace-self-ref"

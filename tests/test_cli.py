@@ -60,6 +60,66 @@ class CLITests(unittest.TestCase):
         self.assertEqual([], payload["projects"])
         self.assertEqual([], payload["tasks"])
 
+    def test_red_team_mermaid_flags_missing_execution_contract_and_ambiguous_gate(self) -> None:
+        spec_path = Path(self.temp_dir.name) / "diagram.md"
+        spec_path.write_text(
+            "# Example\n\n"
+            "```mermaid\n"
+            "flowchart TD\n"
+            "    A --> B{\"Ready?\"}\n"
+            "    B --> C[Run execution]\n"
+            "```\n",
+            encoding="utf-8",
+        )
+
+        completed = self.run_raw(
+            "-m",
+            "accruvia_harness",
+            "--json",
+            "red-team-mermaid",
+            str(spec_path),
+            "--no-llm",
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertFalse(payload["ready_for_human_review"])
+        findings = payload["deterministic_review"]["findings"]
+        severities = {item["severity"] for item in findings}
+        self.assertIn("major", severities)
+        summaries = " ".join(item["summary"] for item in findings)
+        self.assertIn("execution contract", summaries.lower())
+        self.assertIn("gate label", summaries.lower())
+
+    def test_red_team_mermaid_accepts_locked_control_spec(self) -> None:
+        spec_path = Path(self.temp_dir.name) / "diagram.md"
+        spec_path.write_text(
+            "# Example\n\n"
+            "```mermaid\n"
+            "flowchart TD\n"
+            "    A --> B{\"Execution artifacts sufficient for execution?\"}\n"
+            "    B --> C[Run execution]\n"
+            "```\n\n"
+            "## Execution Contract\n\n"
+            "1. Packet assembly happens before gating.\n"
+            "2. This flow is read-only.\n",
+            encoding="utf-8",
+        )
+
+        completed = self.run_raw(
+            "-m",
+            "accruvia_harness",
+            "--json",
+            "red-team-mermaid",
+            str(spec_path),
+            "--no-llm",
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertTrue(payload["ready_for_human_review"])
+        self.assertEqual([], payload["deterministic_review"]["findings"])
+
     def test_doctor_reports_missing_llm_executor_by_default(self) -> None:
         payload = self.run_cli("doctor")
 

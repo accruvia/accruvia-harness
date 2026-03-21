@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -385,6 +386,93 @@ class InterrogationService:
             title=f"Task explanation for {task_id}",
         )
 
+    def red_team_mermaid(
+        self,
+        path: str | Path,
+        *,
+        block_index: int = 0,
+        include_llm: bool = True,
+        model: str | None = None,
+    ) -> dict[str, object]:
+        target_path = Path(path).resolve()
+        if not target_path.exists():
+            raise ValueError(f"Mermaid source not found: {target_path}")
+        text = target_path.read_text(encoding="utf-8")
+        review = _review_mermaid_text(text, path=target_path, block_index=block_index)
+        payload: dict[str, object] = {
+            "path": str(target_path),
+            "block_index": review["block_index"],
+            "block_count": review["block_count"],
+            "source_type": review["source_type"],
+            "ready_for_human_review": review["ready_for_human_review"],
+            "diagram": review["diagram"],
+            "deterministic_review": {
+                "checks": review["checks"],
+                "findings": review["findings"],
+            },
+            "llm_review": {
+                "enabled": False,
+                "available": self.llm_router is not None,
+                "skipped_reason": "disabled_by_flag" if not include_llm else "llm_router_unavailable",
+                "findings": [],
+            },
+        }
+        if include_llm and self.llm_router is not None:
+            llm_review = self._llm_red_team_mermaid(
+                target_path=target_path,
+                review=review,
+                model=model,
+            )
+            payload["llm_review"] = llm_review
+            llm_findings = list(llm_review.get("findings") or [])
+            if any(str(item.get("severity") or "").lower() in {"critical", "major"} for item in llm_findings):
+                payload["ready_for_human_review"] = False
+        return payload
+
+    def red_team_mermaid_text(
+        self,
+        diagram_text: str,
+        *,
+        source_label: str = "inline_mermaid",
+        include_llm: bool = True,
+        model: str | None = None,
+    ) -> dict[str, object]:
+        review = _review_mermaid_text(
+            diagram_text,
+            path=Path(source_label),
+            block_index=0,
+            diagram_only=True,
+        )
+        payload: dict[str, object] = {
+            "path": source_label,
+            "block_index": 0,
+            "block_count": 1,
+            "source_type": "inline_mermaid",
+            "ready_for_human_review": review["ready_for_human_review"],
+            "diagram": review["diagram"],
+            "deterministic_review": {
+                "checks": review["checks"],
+                "findings": review["findings"],
+            },
+            "llm_review": {
+                "enabled": False,
+                "available": self.llm_router is not None,
+                "skipped_reason": "disabled_by_flag" if not include_llm else "llm_router_unavailable",
+                "findings": [],
+            },
+        }
+        if include_llm and self.llm_router is not None:
+            llm_review = self._llm_red_team_mermaid_inline(
+                source_label=source_label,
+                review=review,
+                model=model,
+            )
+            payload["llm_review"] = llm_review
+            llm_findings = list(llm_review.get("findings") or [])
+            if any(str(item.get("severity") or "").lower() in {"critical", "major"} for item in llm_findings):
+                payload["ready_for_human_review"] = False
+        return payload
+
     def _explain(self, subject_type: str, subject_id: str, payload: dict[str, Any], title: str) -> dict[str, object]:
         if self.llm_router is None:
             raise ValueError("No LLM router configured for interrogation")
@@ -456,3 +544,296 @@ class InterrogationService:
             f"Subject Type: {subject_type}\n"
             f"Evidence:\n{json.dumps(payload, indent=2, sort_keys=True)}\n"
         )
+
+    def _llm_red_team_mermaid(
+        self,
+        *,
+        target_path: Path,
+        review: dict[str, object],
+        model: str | None,
+    ) -> dict[str, object]:
+        if self.llm_router is None:
+            return {
+                "enabled": False,
+                "available": False,
+                "skipped_reason": "llm_router_unavailable",
+                "findings": [],
+            }
+        run_dir = self.workspace_root / "interrogation" / "mermaid_red_team" / target_path.stem / new_id("review")
+        run_dir.mkdir(parents=True, exist_ok=True)
+        task = Task(
+            id=new_id("interrogation_task"),
+            project_id="interrogation",
+            title=f"Red-team Mermaid {target_path.name}",
+            objective="Red-team a Mermaid diagram before human review.",
+            status=TaskStatus.COMPLETED,
+        )
+        run = Run(
+            id=new_id("interrogation_run"),
+            task_id=task.id,
+            status=RunStatus.COMPLETED,
+            attempt=1,
+            summary=f"Mermaid red-team review for {target_path}",
+        )
+        prompt = self._build_mermaid_red_team_prompt(target_path=target_path, review=review)
+        invocation = LLMInvocation(task=task, run=run, prompt=prompt, run_dir=run_dir, model=model)
+        execute = getattr(self.llm_router, "execute", None)
+        if execute is not None:
+            result, backend = execute(invocation, telemetry=self.telemetry)
+        else:
+            executor, backend = self.llm_router.resolve()
+            result = executor.execute(invocation)
+        parsed = _parse_red_team_llm_response(result.response_text)
+        return {
+            "enabled": True,
+            "available": True,
+            "backend": backend,
+            "prompt_path": str(result.prompt_path),
+            "response_path": str(result.response_path),
+            "diagnostics": result.diagnostics,
+            "summary": str(parsed.get("summary") or "").strip(),
+            "ready_for_human_review": bool(parsed.get("ready_for_human_review", False)),
+            "findings": list(parsed.get("findings") or []),
+        }
+
+    def _llm_red_team_mermaid_inline(
+        self,
+        *,
+        source_label: str,
+        review: dict[str, object],
+        model: str | None,
+    ) -> dict[str, object]:
+        if self.llm_router is None:
+            return {
+                "enabled": False,
+                "available": False,
+                "skipped_reason": "llm_router_unavailable",
+                "findings": [],
+            }
+        run_dir = self.workspace_root / "interrogation" / "mermaid_red_team" / "inline" / new_id("review")
+        run_dir.mkdir(parents=True, exist_ok=True)
+        task = Task(
+            id=new_id("interrogation_task"),
+            project_id="interrogation",
+            title=f"Red-team Mermaid {source_label}",
+            objective="Red-team a generated Mermaid diagram before human review.",
+            status=TaskStatus.COMPLETED,
+        )
+        run = Run(
+            id=new_id("interrogation_run"),
+            task_id=task.id,
+            status=RunStatus.COMPLETED,
+            attempt=1,
+            summary=f"Mermaid red-team review for {source_label}",
+        )
+        rubric_path = Path(__file__).resolve().parents[2] / "specs" / "mermaid-red-team.md"
+        rubric_text = rubric_path.read_text(encoding="utf-8") if rubric_path.exists() else ""
+        prompt = (
+            "You are red-teaming a generated Mermaid control diagram before human review.\n"
+            "Use the rubric below. Find structural flaws, intent drift, planning blockage, boundary blur, control ambiguity, ownership inflation, and implementer traps.\n"
+            "The source is diagram-only, so do not require surrounding prose or an execution contract unless the missing contract is visible inside the diagram itself.\n"
+            "Return JSON only with keys: summary, ready_for_human_review, findings.\n"
+            "findings must be an array of objects with keys: severity, class, summary, rationale, patch_hint.\n\n"
+            f"Rubric:\n{rubric_text}\n\n"
+            f"Source label: {source_label}\n"
+            f"Deterministic review:\n{json.dumps(review, indent=2, sort_keys=True)}\n"
+        )
+        invocation = LLMInvocation(task=task, run=run, prompt=prompt, run_dir=run_dir, model=model)
+        execute = getattr(self.llm_router, "execute", None)
+        if execute is not None:
+            result, backend = execute(invocation, telemetry=self.telemetry)
+        else:
+            executor, backend = self.llm_router.resolve()
+            result = executor.execute(invocation)
+        parsed = _parse_red_team_llm_response(result.response_text)
+        return {
+            "enabled": True,
+            "available": True,
+            "backend": backend,
+            "prompt_path": str(result.prompt_path),
+            "response_path": str(result.response_path),
+            "diagnostics": result.diagnostics,
+            "summary": str(parsed.get("summary") or "").strip(),
+            "ready_for_human_review": bool(parsed.get("ready_for_human_review", False)),
+            "findings": list(parsed.get("findings") or []),
+        }
+
+    def _build_mermaid_red_team_prompt(self, *, target_path: Path, review: dict[str, object]) -> str:
+        rubric_path = Path(__file__).resolve().parents[2] / "specs" / "mermaid-red-team.md"
+        rubric_text = rubric_path.read_text(encoding="utf-8") if rubric_path.exists() else ""
+        return (
+            "You are red-teaming a Mermaid architecture/control diagram before human review.\n"
+            "Use the rubric below. Find structural flaws, intent drift, planning blockage, boundary blur, control ambiguity, ownership inflation, and implementer traps.\n"
+            "Prefer concrete findings over generic praise. If there are no major issues, say so explicitly.\n"
+            "Return JSON only with keys: summary, ready_for_human_review, findings.\n"
+            "findings must be an array of objects with keys: severity, class, summary, rationale, patch_hint.\n\n"
+            f"Rubric:\n{rubric_text}\n\n"
+            f"Target path: {target_path}\n"
+            f"Deterministic review:\n{json.dumps(review, indent=2, sort_keys=True)}\n"
+        )
+
+
+def _extract_mermaid_blocks(text: str) -> list[dict[str, object]]:
+    blocks: list[dict[str, object]] = []
+    fence_pattern = re.compile(r"```mermaid\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
+    for match in fence_pattern.finditer(text):
+        blocks.append(
+            {
+                "content": match.group(1).strip(),
+                "start": match.start(),
+                "end": match.end(),
+                "kind": "markdown_fence",
+            }
+        )
+    if blocks:
+        return blocks
+    stripped = text.strip()
+    if stripped.startswith(("flowchart", "graph", "sequenceDiagram", "classDiagram", "stateDiagram", "erDiagram", "journey", "mindmap")):
+        return [{"content": stripped, "start": 0, "end": len(text), "kind": "mermaid_file"}]
+    return []
+
+
+def _review_mermaid_text(text: str, *, path: Path, block_index: int, diagram_only: bool = False) -> dict[str, object]:
+    blocks = [{"content": text.strip(), "start": 0, "end": len(text), "kind": "inline_mermaid"}] if diagram_only else _extract_mermaid_blocks(text)
+    if not blocks:
+        raise ValueError(f"No Mermaid block found in {path}")
+    if block_index < 0 or block_index >= len(blocks):
+        raise ValueError(f"Mermaid block index {block_index} is out of range for {path} (found {len(blocks)} blocks)")
+    block = blocks[block_index]
+    diagram = str(block["content"])
+    source_type = str(block["kind"])
+    after_text = text[int(block["end"]):] if not diagram_only else ""
+    lowered_diagram = diagram.lower()
+    lowered_after = after_text.lower()
+    control_keywords = ("execution", "gate", "control", "retry", "planner", "contextservice", "context recorder", "packet")
+    control_like = any(keyword in lowered_diagram for keyword in control_keywords)
+    has_execution_contract = "execution contract" in lowered_after[:4000] or "invariant" in lowered_after[:4000]
+    findings: list[dict[str, object]] = []
+    checks: list[dict[str, object]] = []
+
+    def add_check(name: str, ok: bool, detail: str) -> None:
+        checks.append({"name": name, "ok": ok, "detail": detail})
+
+    def add_finding(severity: str, finding_class: str, summary: str, evidence: str, patch_hint: str) -> None:
+        findings.append(
+            {
+                "severity": severity,
+                "class": finding_class,
+                "summary": summary,
+                "evidence": evidence,
+                "patch_hint": patch_hint,
+            }
+        )
+
+    add_check("has_mermaid_block", True, f"Found {len(blocks)} Mermaid block(s); reviewing block {block_index}.")
+    execution_contract_ok = diagram_only or (not control_like) or has_execution_contract
+    add_check(
+        "has_execution_contract",
+        execution_contract_ok,
+        "Execution contract found near diagram." if has_execution_contract else ("Diagram-only review; contract not required in this pass." if diagram_only else "No nearby execution contract or invariant block found."),
+    )
+    if control_like and not has_execution_contract and not diagram_only:
+        add_finding(
+            "major",
+            "Implementer Trap",
+            "Control Mermaid has no nearby execution contract or invariant block.",
+            "The diagram contains control/execution concepts but the following spec text does not lock implementation semantics locally.",
+            "Add an `Execution Contract` directly below the diagram with read/write, gating order, partial-information, and additive-only rules.",
+        )
+
+    ambiguous_patterns = [
+        ("ready?", "ready without specifying ready for what"),
+        ("sufficient?", "sufficient without specifying sufficient for what"),
+        ("present?", "present without specifying which decision it governs"),
+        ("complete?", "complete without specifying complete for what"),
+        ("valid?", "valid without specifying what validity means"),
+    ]
+    ambiguous_hits = [detail for token, detail in ambiguous_patterns if token in lowered_diagram]
+    add_check(
+        "ambiguous_gate_labels",
+        not ambiguous_hits,
+        "No generic ambiguous gate labels detected." if not ambiguous_hits else "; ".join(ambiguous_hits),
+    )
+    for detail in ambiguous_hits:
+        add_finding(
+            "major",
+            "Control Ambiguity",
+            "Diagram contains a broad gate label that can be misread.",
+            detail,
+            "Rewrite the gate label so it names the exact scope, for example `Execution artifacts sufficient for execution?`.",
+        )
+
+    read_write_blur = (
+        "caller mode" in lowered_diagram
+        and ("mutation flow" in lowered_diagram or "contextrecorder" in lowered_diagram or "write caller" in lowered_diagram)
+        and ("responder" in lowered_diagram or "ui" in lowered_diagram or "investigation" in lowered_diagram)
+        and "read caller mode" not in lowered_diagram
+    )
+    add_check(
+        "read_write_boundary",
+        not read_write_blur,
+        "Read/write paths appear separated." if not read_write_blur else "Mutation appears blended into a generic caller-mode branch.",
+    )
+    if read_write_blur:
+        add_finding(
+            "major",
+            "Boundary Blur",
+            "Mutation flow appears as a caller mode instead of a companion write boundary.",
+            "The diagram mixes read consumers and mutation consumers under the same branch structure.",
+            "Separate read callers from write callers and show mutation through a companion recorder boundary.",
+        )
+
+    if "build_packet(objective_id" in lowered_diagram and ("project" in text.lower() or "operator scope" in text.lower()):
+        add_check("scope_alignment", False, "Entrypoint implies objective-only scope while surrounding spec discusses project/operator scope.")
+        add_finding(
+            "major",
+            "Intent Drift",
+            "Entrypoint scope is narrower than the surrounding design.",
+            "The diagram entrypoint references `objective_id` only even though nearby spec text includes project/operator scope.",
+            "Widen the entrypoint signature or node label so the intended scope is explicit.",
+        )
+    else:
+        add_check("scope_alignment", True, "Entrypoint scope is not obviously narrower than the surrounding spec.")
+
+    ready_for_human_review = not any(item["severity"] in {"critical", "major"} for item in findings)
+    return {
+        "path": str(path),
+        "block_index": block_index,
+        "block_count": len(blocks),
+        "source_type": source_type,
+        "diagram": diagram,
+        "checks": checks,
+        "findings": findings,
+        "ready_for_human_review": ready_for_human_review,
+    }
+
+
+def _parse_red_team_llm_response(text: str) -> dict[str, object]:
+    candidates = [text.strip()]
+    fenced = re.findall(r"```(?:json)?\s*(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
+    candidates.extend(item.strip() for item in fenced if item.strip())
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            findings = parsed.get("findings")
+            return {
+                "summary": str(parsed.get("summary") or "").strip(),
+                "ready_for_human_review": bool(parsed.get("ready_for_human_review", False)),
+                "findings": findings if isinstance(findings, list) else [],
+            }
+    return {
+        "summary": "",
+        "ready_for_human_review": False,
+        "findings": [
+            {
+                "severity": "major",
+                "class": "Implementer Trap",
+                "summary": "LLM review returned an unreadable response.",
+                "rationale": "The critique pass could not be parsed as the required JSON payload.",
+                "patch_hint": "Tighten the review prompt or rerun with `--no-llm` and inspect the raw response artifact.",
+            }
+        ],
+    }

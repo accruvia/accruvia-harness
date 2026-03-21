@@ -38,6 +38,7 @@ _SERVER_STARTED_AT = _dt.datetime.now(_dt.timezone.utc).isoformat()
 from .context_control import objective_execution_gate
 from .frustration_triage import triage_frustration
 from .llm import LLMExecutionError, LLMInvocation
+from .services.red_team_service import RedTeamLoopService
 from .services.task_service import TaskService
 from .ui_memory import LocalContextMemoryProvider
 from .ui_responder import (
@@ -116,6 +117,8 @@ class ObjectiveReviewCoordinator:
 
 
 _OBJECTIVE_REVIEW = ObjectiveReviewCoordinator()
+_MERMAID_RED_TEAM_MAX_ROUNDS = 20
+_RED_TEAM_LOOP = RedTeamLoopService()
 
 _OBJECTIVE_REVIEW_DIMENSIONS = frozenset(
     {
@@ -7290,6 +7293,7 @@ class HarnessUIDataService:
                 "backend": proposal.get("backend", ""),
                 "prompt_path": proposal.get("prompt_path", ""),
                 "response_path": proposal.get("response_path", ""),
+                "red_team_review": proposal.get("red_team_review", ""),
             },
         )
         self.store.create_context_record(record)
@@ -7933,23 +7937,93 @@ class HarnessUIDataService:
                 attempt=1,
                 summary=f"Objective review for {objective.id}",
             )
-            try:
-                result, backend = llm_router.execute(LLMInvocation(task=task, run=run, prompt=prompt, run_dir=run_dir))
+            def _generate_candidate(prompt_text: str, _attempt: int, _history) -> tuple[dict[str, object], dict[str, object]] | None:
+                try:
+                    result, backend = llm_router.execute(LLMInvocation(task=task, run=run, prompt=prompt_text, run_dir=run_dir))
+                except LLMExecutionError:
+                    return None
                 parsed = self._parse_objective_review_response(result.response_text, objective_payload=objective_payload)
+                return (
+                    {
+                        "packets": parsed or [],
+                        "raw_response": result.response_text,
+                        "diagnostics": result.diagnostics if isinstance(result.diagnostics, dict) else {},
+                    },
+                    {
+                        "backend": backend,
+                        "prompt_path": str(result.prompt_path),
+                        "response_path": str(result.response_path),
+                    },
+                )
+
+            def _review_candidate(candidate: dict[str, object], _attempt: int, _history) -> dict[str, object]:
+                packets = list(candidate.get("packets") or [])
+                if packets:
+                    return {
+                        "ready_for_human_review": True,
+                        "deterministic_review": {"findings": []},
+                        "llm_review": {"findings": []},
+                    }
+                return {
+                    "ready_for_human_review": False,
+                    "deterministic_review": {
+                        "findings": [
+                            {
+                                "severity": "major",
+                                "summary": "Objective review packets failed validation against the required packet schema.",
+                            }
+                        ]
+                    },
+                    "llm_review": {"findings": []},
+                }
+
+            def _build_retry_prompt(initial_prompt: str, candidate: dict[str, object], major_findings: list[dict[str, object]], history, attempt: int, max_rounds: int) -> str:
+                history_payload = [
+                    {
+                        "attempt": item.attempt,
+                        "review_ready_for_human_review": item.review_ready_for_human_review,
+                        "major_findings": item.major_findings,
+                    }
+                    for item in history
+                ]
+                return (
+                    f"{initial_prompt}\n"
+                    f"This is objective-review rewrite round {attempt + 1} of {max_rounds}.\n"
+                    "The previous response failed packet validation. Keep the same review context and fix the packet contract.\n"
+                    "Return valid JSON with summary and packets.\n\n"
+                    f"Previous raw response:\n{candidate.get('raw_response', '')}\n\n"
+                    f"Validation findings:\n{json.dumps(major_findings, indent=2, sort_keys=True)}\n\n"
+                    f"Prior round history:\n{json.dumps(history_payload, indent=2, sort_keys=True)}\n"
+                )
+
+            loop_result = _RED_TEAM_LOOP.run(
+                initial_prompt=prompt,
+                max_rounds=20,
+                generate_candidate=_generate_candidate,
+                review_candidate=_review_candidate,
+                build_retry_prompt=_build_retry_prompt,
+                candidate_summary=lambda candidate: f"{len(list(candidate.get('packets') or []))} packets",
+                candidate_content=lambda candidate: str(candidate.get("raw_response") or ""),
+            )
+            if loop_result is not None:
+                parsed = list(loop_result.candidate.get("packets") or []) if isinstance(loop_result.candidate, dict) else []
                 if parsed:
-                    llm_usage, usage_reported, usage_source = self._objective_review_usage_details(result.diagnostics if isinstance(result.diagnostics, dict) else {}, task_id=task.id, run_id=run.id)
+                    backend = str(loop_result.generation_metadata.get("backend") or "")
+                    llm_usage, usage_reported, usage_source = self._objective_review_usage_details(
+                        loop_result.candidate.get("diagnostics") if isinstance(loop_result.candidate, dict) else {},
+                        task_id=task.id,
+                        run_id=run.id,
+                    )
                     for packet in parsed:
                         packet["backend"] = backend
-                        packet["prompt_path"] = str(result.prompt_path)
-                        packet["response_path"] = str(result.response_path)
+                        packet["prompt_path"] = str(loop_result.generation_metadata.get("prompt_path") or "")
+                        packet["response_path"] = str(loop_result.generation_metadata.get("response_path") or "")
                         packet["llm_usage"] = llm_usage
                         packet["llm_usage_reported"] = usage_reported
                         packet["llm_usage_source"] = usage_source
                         packet["review_task_id"] = task.id
                         packet["review_run_id"] = run.id
                     return parsed
-            except LLMExecutionError:
-                pass
         return self._deterministic_objective_review_packets(objective_payload)
 
     def _objective_review_usage_details(
@@ -8631,54 +8705,88 @@ class HarnessUIDataService:
         })
 
         current_units: list[dict[str, str]] = []
-        round_num = 0
         critique_accepted = False
         coverage_accepted = False
         consecutive_stalls = 0
+        review_state: dict[str, object] = {}
 
-        while round_num < hard_ceiling:
-            round_num += 1
+        def _generate_candidate(_prompt: str, attempt: int, history) -> tuple[list[dict[str, str]], dict[str, object]] | None:
             round_start = time.monotonic()
-
+            review_state["round_start"] = round_start
             self._record_atomic_generation_progress(
                 objective, generation_id, diagram_version,
-                phase=f"round {round_num}: {'generate' if round_num == 1 else 'critique + coverage + refine'}",
-                content=f"Atomic decomposition round {round_num}.",
+                phase=f"round {attempt}: {'generate' if attempt == 1 else 'critique + coverage + refine'}",
+                content=f"Atomic decomposition round {attempt}.",
             )
-
-            # ── Round 1: initial generation ──
-            if round_num == 1:
-                current_units = self._llm_generate_units(
+            if attempt == 1:
+                units = self._llm_generate_units(
                     llm_router, task_stub, run_dir, context_block,
                 )
                 round_elapsed = time.monotonic() - round_start
                 self._log_decomposition_telemetry(objective, generation_id, diagram_version, "generate", {
-                    "round": round_num,
-                    "unit_count": len(current_units),
-                    "unit_titles": [u.get("title", "") for u in current_units],
+                    "round": attempt,
+                    "unit_count": len(units),
+                    "unit_titles": [u.get("title", "") for u in units],
                     "elapsed_seconds": round(round_elapsed, 2),
                 })
-                self._write_round_artifact(run_dir, round_num, "generate", current_units)
-                if not current_units:
+                self._write_round_artifact(run_dir, attempt, "generate", units)
+                if not units:
                     self._log_decomposition_telemetry(objective, generation_id, diagram_version, "generate_empty", {
-                        "round": round_num,
+                        "round": attempt,
                         "note": "LLM returned zero units, falling back to regex",
                     })
-                    break
-                continue
-
+                return units, {}
+            units = self._llm_refine_units(
+                llm_router, task_stub, run_dir, context_block, current_units,
+                dict(review_state.get("critique") or {}),
+                dict(review_state.get("coverage") or {}),
+                red_team_history=[
+                    {
+                        "attempt": item.attempt,
+                        "candidate_summary": item.candidate_summary,
+                        "candidate_content": item.candidate_content,
+                        "review_ready_for_human_review": item.review_ready_for_human_review,
+                        "major_findings": item.major_findings,
+                    }
+                    for item in history
+                ],
+                attempt=attempt,
+                max_rounds=hard_ceiling,
+            )
+            refine_elapsed = time.monotonic() - round_start
             previous_titles = [u.get("title") for u in current_units]
+            new_titles = [u.get("title") for u in units]
+            units_changed = new_titles != previous_titles
+            review_state["units_changed"] = units_changed
+            self._log_decomposition_telemetry(objective, generation_id, diagram_version, "refine", {
+                "round": attempt,
+                "unit_count_before": len(previous_titles),
+                "unit_count_after": len(units),
+                "units_changed": units_changed,
+                "unit_titles": new_titles,
+                "elapsed_seconds": round(refine_elapsed, 2),
+            })
+            self._write_round_artifact(run_dir, attempt, "refine", units)
+            return units, {}
 
-            # ── Step A: atomicity critique ──
+        def _review_candidate(units: list[dict[str, str]], attempt: int, _history) -> dict[str, object]:
+            nonlocal critique_accepted, coverage_accepted, consecutive_stalls, current_units
+            current_units = units
+            if attempt == 1:
+                return {
+                    "ready_for_human_review": False,
+                    "deterministic_review": {"findings": [{"severity": "major", "summary": "Initial generation requires critique and coverage review."}]},
+                    "llm_review": {"findings": []},
+                }
             critique_start = time.monotonic()
             critique = self._llm_critique_units(
                 llm_router, task_stub, run_dir, context_block, current_units,
             )
             critique_elapsed = time.monotonic() - critique_start
             critique_accepted = bool(critique.get("accepted", False))
-
+            review_state["critique"] = critique
             self._log_decomposition_telemetry(objective, generation_id, diagram_version, "critique", {
-                "round": round_num,
+                "round": attempt,
                 "accepted": critique_accepted,
                 "problem_count": len(critique.get("problems", [])),
                 "problems": critique.get("problems", []),
@@ -8688,18 +8796,17 @@ class HarnessUIDataService:
                 "unit_count": len(current_units),
                 "elapsed_seconds": round(critique_elapsed, 2),
             })
-            self._write_round_artifact(run_dir, round_num, "critique", critique)
+            self._write_round_artifact(run_dir, attempt, "critique", critique)
 
-            # ── Step B: coverage / gap analysis ──
             coverage_start = time.monotonic()
             coverage = self._llm_coverage_analysis(
                 llm_router, task_stub, run_dir, context_block, current_units,
             )
             coverage_elapsed = time.monotonic() - coverage_start
             coverage_accepted = bool(coverage.get("complete", False))
-
+            review_state["coverage"] = coverage
             self._log_decomposition_telemetry(objective, generation_id, diagram_version, "coverage", {
-                "round": round_num,
+                "round": attempt,
                 "complete": coverage_accepted,
                 "gap_count": len(coverage.get("gaps", [])),
                 "gaps": coverage.get("gaps", []),
@@ -8709,74 +8816,113 @@ class HarnessUIDataService:
                 "unit_count": len(current_units),
                 "elapsed_seconds": round(coverage_elapsed, 2),
             })
-            self._write_round_artifact(run_dir, round_num, "coverage", coverage)
+            self._write_round_artifact(run_dir, attempt, "coverage", coverage)
 
-            # ── Check: both pass → done ──
-            if critique_accepted and coverage_accepted:
+            accepted = critique_accepted and coverage_accepted
+            if accepted:
                 self._record_atomic_generation_progress(
                     objective, generation_id, diagram_version,
-                    phase=f"accepted at round {round_num}",
-                    content=f"Both critique and coverage passed after {round_num} rounds.",
+                    phase=f"accepted at round {attempt}",
+                    content=f"Both critique and coverage passed after {attempt} rounds.",
                 )
                 self._log_decomposition_telemetry(objective, generation_id, diagram_version, "both_accepted", {
-                    "round": round_num,
+                    "round": attempt,
                     "unit_count": len(current_units),
                 })
-                break
-
-            # ── Step C: refine (fix critique issues + fill gaps) ──
-            refine_start = time.monotonic()
-            current_units = self._llm_refine_units(
-                llm_router, task_stub, run_dir, context_block, current_units,
-                critique, coverage,
-            )
-            refine_elapsed = time.monotonic() - refine_start
-
-            new_titles = [u.get("title") for u in current_units]
-            units_changed = new_titles != previous_titles
-            self._log_decomposition_telemetry(objective, generation_id, diagram_version, "refine", {
-                "round": round_num,
-                "unit_count_before": len(previous_titles),
-                "unit_count_after": len(current_units),
-                "units_changed": units_changed,
-                "unit_titles": new_titles,
-                "elapsed_seconds": round(refine_elapsed, 2),
-            })
-            self._write_round_artifact(run_dir, round_num, "refine", current_units)
-
-            round_elapsed = time.monotonic() - round_start
-            self._log_decomposition_telemetry(objective, generation_id, diagram_version, "round_complete", {
-                "round": round_num,
-                "total_round_seconds": round(round_elapsed, 2),
-                "unit_count": len(current_units),
-                "critique_accepted": critique_accepted,
-                "coverage_accepted": coverage_accepted,
-            })
-
-            # Stall detection: consecutive rounds with no change
+            units_changed = bool(review_state.get("units_changed", True))
             if not units_changed:
                 consecutive_stalls += 1
                 self._log_decomposition_telemetry(objective, generation_id, diagram_version, "stall_detected", {
-                    "round": round_num,
+                    "round": attempt,
                     "consecutive_stalls": consecutive_stalls,
                     "note": "Refinement produced identical unit titles.",
                 })
                 if consecutive_stalls >= 3:
                     self._log_decomposition_telemetry(objective, generation_id, diagram_version, "stall_exit", {
-                        "round": round_num,
+                        "round": attempt,
                         "consecutive_stalls": consecutive_stalls,
                         "note": "Three consecutive stalls. Accepting current state.",
                     })
-                    break
+                    accepted = True
             else:
                 consecutive_stalls = 0
+            round_elapsed = time.monotonic() - float(review_state.get("round_start") or time.monotonic())
+            self._log_decomposition_telemetry(objective, generation_id, diagram_version, "round_complete", {
+                "round": attempt,
+                "total_round_seconds": round(round_elapsed, 2),
+                "unit_count": len(current_units),
+                "critique_accepted": critique_accepted,
+                "coverage_accepted": coverage_accepted,
+            })
+            findings: list[dict[str, object]] = []
+            if not critique_accepted:
+                findings.extend({"severity": "major", "summary": problem} for problem in list(critique.get("problems", []))[:20])
+            if not coverage_accepted:
+                findings.extend(
+                    {
+                        "severity": "major",
+                        "summary": str(gap.get("description") or "Coverage gap"),
+                    }
+                    for gap in list(coverage.get("gaps", []))[:20]
+                )
+                findings.extend(
+                    {"severity": "major", "summary": f"Uncovered Mermaid node: {node}"}
+                    for node in list(coverage.get("uncovered_mermaid_nodes", []))[:20]
+                )
+                findings.extend(
+                    {"severity": "major", "summary": f"Uncovered intent concern: {concern}"}
+                    for concern in list(coverage.get("uncovered_intent_concerns", []))[:20]
+                )
+            return {
+                "ready_for_human_review": accepted,
+                "deterministic_review": {"findings": findings},
+                "llm_review": {"findings": []},
+                "critique": critique,
+                "coverage": coverage,
+            }
+
+        def _build_retry_prompt(initial_prompt: str, units: list[dict[str, str]], major_findings: list[dict[str, object]], history, attempt: int, max_rounds: int) -> str:
+            history_payload = [
+                {
+                    "attempt": item.attempt,
+                    "candidate_summary": item.candidate_summary,
+                    "review_ready_for_human_review": item.review_ready_for_human_review,
+                    "major_findings": item.major_findings,
+                }
+                for item in history
+            ]
+            return json.dumps(
+                {
+                    "kind": "atomic_refine",
+                    "initial_prompt": initial_prompt,
+                    "current_units": units,
+                    "major_findings": major_findings,
+                    "history": history_payload,
+                    "attempt": attempt,
+                    "max_rounds": max_rounds,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+
+        loop_result = _RED_TEAM_LOOP.run(
+            initial_prompt=context_block,
+            max_rounds=hard_ceiling,
+            generate_candidate=_generate_candidate,
+            review_candidate=_review_candidate,
+            build_retry_prompt=_build_retry_prompt,
+            candidate_summary=lambda units: f"{len(units)} units",
+            candidate_content=lambda units: json.dumps(units, indent=2, sort_keys=True),
+        )
+        if loop_result is not None:
+            current_units = list(loop_result.candidate)
 
         # Session summary telemetry
         self._log_decomposition_telemetry(objective, generation_id, diagram_version, "session_end", {
-            "total_rounds": round_num,
+            "total_rounds": len(loop_result.history) if loop_result is not None else 0,
             "critique_accepted": critique_accepted,
             "coverage_accepted": coverage_accepted,
-            "hit_ceiling": round_num >= hard_ceiling,
+            "hit_ceiling": bool(loop_result is not None and len(loop_result.history) >= hard_ceiling and not (critique_accepted and coverage_accepted)),
             "stall_exit": consecutive_stalls >= 3,
             "final_unit_count": len(current_units),
             "final_unit_titles": [u.get("title", "") for u in current_units],
@@ -9000,6 +9146,10 @@ class HarnessUIDataService:
         self, llm_router, task_stub: Task, run_dir: Path,
         context_block: str, units: list[dict[str, str]],
         critique: dict[str, object], coverage: dict[str, object],
+        *,
+        red_team_history: list[dict[str, object]] | None = None,
+        attempt: int = 0,
+        max_rounds: int = 0,
     ) -> list[dict[str, str]]:
         units_json = json.dumps(units, indent=2)
         problems = json.dumps(critique.get("problems", []), indent=2)
@@ -9009,12 +9159,14 @@ class HarnessUIDataService:
         uncovered_nodes = json.dumps(coverage.get("uncovered_mermaid_nodes", []), indent=2)
         uncovered_intents = json.dumps(coverage.get("uncovered_intent_concerns", []), indent=2)
         redundant = json.dumps(coverage.get("redundant_units", []), indent=2)
+        history_json = json.dumps(red_team_history or [], indent=2)
         prompt = (
             "You are refining atomic implementation units based on TWO review passes:\n"
             "an atomicity critique and a coverage/gap analysis.\n\n"
             "DEFINITION OF ATOMIC:\n"
             "The smallest possible unit of work — one function, one page of code, one reviewable diff.\n"
             "If a unit is too broad, SPLIT it into multiple smaller units rather than making one unit do more.\n\n"
+            f"This is refinement round {attempt} of {max_rounds}.\n"
             "You MUST do ALL of the following:\n"
             "1. Fix every PROBLEM from the critique. Apply every SUGGESTION.\n"
             "2. SPLIT every unit listed in units_needing_split into the suggested sub-units.\n"
@@ -9023,6 +9175,7 @@ class HarnessUIDataService:
             "5. REMOVE or MERGE redundant units flagged by coverage.\n"
             "6. Each unit must name the exact file, class, and function to modify or create.\n"
             "7. Prefer more smaller units over fewer larger ones.\n\n"
+            "Use the full context again. Do not optimize only for the latest finding if that would regress earlier rounds.\n\n"
             "Return JSON only: {\"units\": [...]}\n"
             "Same schema: title, objective, rationale, strategy, files_involved\n\n"
             f"Current units:\n{units_json}\n\n"
@@ -9035,6 +9188,7 @@ class HarnessUIDataService:
             f"Uncovered Mermaid nodes:\n{uncovered_nodes}\n\n"
             f"Uncovered intent concerns:\n{uncovered_intents}\n\n"
             f"Redundant units:\n{redundant}\n\n"
+            f"Prior round history:\n{history_json}\n\n"
             f"Context:\n{context_block}\n"
         )
         try:
@@ -9829,15 +9983,81 @@ class HarnessUIDataService:
             attempt=1,
             summary=f"UI reply for {objective_id or project_id}",
         )
-        try:
-            result, backend = llm_router.execute(
-                LLMInvocation(task=task, run=run, prompt=prompt, run_dir=run_dir)
+        def _generate_candidate(prompt_text: str, _attempt: int, _history) -> tuple[dict[str, object], dict[str, object]] | None:
+            try:
+                result, backend = llm_router.execute(
+                    LLMInvocation(task=task, run=run, prompt=prompt_text, run_dir=run_dir)
+                )
+            except LLMExecutionError:
+                return None
+            parsed = self._parse_ui_responder_response(result.response_text)
+            return (
+                {
+                    "parsed": parsed,
+                    "raw_response": result.response_text,
+                },
+                {
+                    "backend": backend,
+                    "prompt_path": str(result.prompt_path),
+                    "response_path": str(result.response_path),
+                },
             )
-        except LLMExecutionError:
+
+        def _review_candidate(candidate: dict[str, object], _attempt: int, _history) -> dict[str, object]:
+            parsed = candidate.get("parsed")
+            if isinstance(parsed, dict):
+                return {
+                    "ready_for_human_review": True,
+                    "deterministic_review": {"findings": []},
+                    "llm_review": {"findings": []},
+                }
+            return {
+                "ready_for_human_review": False,
+                "deterministic_review": {
+                    "findings": [
+                        {
+                            "severity": "major",
+                            "summary": "UI responder response failed the required JSON contract.",
+                        }
+                    ]
+                },
+                "llm_review": {"findings": []},
+            }
+
+        def _build_retry_prompt(initial_prompt: str, candidate: dict[str, object], major_findings: list[dict[str, object]], history, attempt: int, max_rounds: int) -> str:
+            history_payload = [
+                {
+                    "attempt": item.attempt,
+                    "review_ready_for_human_review": item.review_ready_for_human_review,
+                    "major_findings": item.major_findings,
+                }
+                for item in history
+            ]
+            return (
+                f"{initial_prompt}\n"
+                f"This is UI responder rewrite round {attempt + 1} of {max_rounds}.\n"
+                "The previous response failed validation. Keep the full context and answer the operator directly.\n"
+                "Return valid JSON with reply, recommended_action, evidence_refs, and mode_shift.\n\n"
+                f"Previous raw response:\n{candidate.get('raw_response', '')}\n\n"
+                f"Validation findings:\n{json.dumps(major_findings, indent=2, sort_keys=True)}\n\n"
+                f"Prior round history:\n{json.dumps(history_payload, indent=2, sort_keys=True)}\n"
+            )
+
+        loop_result = _RED_TEAM_LOOP.run(
+            initial_prompt=prompt,
+            max_rounds=20,
+            generate_candidate=_generate_candidate,
+            review_candidate=_review_candidate,
+            build_retry_prompt=_build_retry_prompt,
+            candidate_summary=lambda candidate: str((candidate.get("parsed") or {}).get("reply") or "invalid ui responder response"),
+            candidate_content=lambda candidate: str(candidate.get("raw_response") or ""),
+        )
+        if loop_result is None:
             return None
-        parsed = self._parse_ui_responder_response(result.response_text)
-        if parsed is None:
+        parsed = loop_result.candidate.get("parsed") if isinstance(loop_result.candidate, dict) else None
+        if not isinstance(parsed, dict):
             return None
+        backend = str(loop_result.generation_metadata.get("backend") or "")
         return ResponderResult(
             reply=parsed["reply"],
             recommended_action=parsed["recommended_action"],
@@ -9845,8 +10065,8 @@ class HarnessUIDataService:
             mode_shift=parsed["mode_shift"],
             retrieved_memories=packet.retrieved_memories,
             llm_backend=backend,
-            prompt_path=str(result.prompt_path),
-            response_path=str(result.response_path),
+            prompt_path=str(loop_result.generation_metadata.get("prompt_path") or ""),
+            response_path=str(loop_result.generation_metadata.get("response_path") or ""),
         )
 
     def _interrogation_review(self, objective_id: str) -> dict[str, object]:
@@ -9901,14 +10121,79 @@ class HarnessUIDataService:
             attempt=1,
             summary=f"LLM red-team for objective {objective.id}",
         )
-        try:
-            result, backend = llm_router.execute(LLMInvocation(task=task, run=run, prompt=prompt, run_dir=run_dir))
-        except LLMExecutionError:
-            return deterministic
+        def _generate_candidate(prompt_text: str, _attempt: int, _history) -> tuple[dict[str, object], dict[str, object]] | None:
+            try:
+                result, backend = llm_router.execute(LLMInvocation(task=task, run=run, prompt=prompt_text, run_dir=run_dir))
+            except LLMExecutionError:
+                return None
+            parsed = self._parse_interrogation_response(result.response_text)
+            return (
+                {
+                    "parsed": parsed,
+                    "raw_response": result.response_text,
+                },
+                {
+                    "backend": backend,
+                    "prompt_path": str(result.prompt_path),
+                    "response_path": str(result.response_path),
+                },
+            )
 
-        parsed = self._parse_interrogation_response(result.response_text)
-        if parsed is None:
+        def _review_candidate(candidate: dict[str, object], _attempt: int, _history) -> dict[str, object]:
+            parsed = candidate.get("parsed")
+            if isinstance(parsed, dict):
+                return {
+                    "ready_for_human_review": True,
+                    "deterministic_review": {"findings": []},
+                    "llm_review": {"findings": []},
+                }
+            return {
+                "ready_for_human_review": False,
+                "deterministic_review": {
+                    "findings": [
+                        {
+                            "severity": "major",
+                            "summary": "Interrogation review response failed the required JSON contract.",
+                        }
+                    ]
+                },
+                "llm_review": {"findings": []},
+            }
+
+        def _build_retry_prompt(initial_prompt: str, candidate: dict[str, object], major_findings: list[dict[str, object]], history, attempt: int, max_rounds: int) -> str:
+            history_payload = [
+                {
+                    "attempt": item.attempt,
+                    "review_ready_for_human_review": item.review_ready_for_human_review,
+                    "major_findings": item.major_findings,
+                }
+                for item in history
+            ]
+            return (
+                f"{initial_prompt}\n"
+                f"This is interrogation-review rewrite round {attempt + 1} of {max_rounds}.\n"
+                "The previous response failed validation. Keep the full context and fix the contract.\n"
+                "Return valid JSON with summary, plan_elements, and questions.\n\n"
+                f"Previous raw response:\n{candidate.get('raw_response', '')}\n\n"
+                f"Validation findings:\n{json.dumps(major_findings, indent=2, sort_keys=True)}\n\n"
+                f"Prior round history:\n{json.dumps(history_payload, indent=2, sort_keys=True)}\n"
+            )
+
+        loop_result = _RED_TEAM_LOOP.run(
+            initial_prompt=prompt,
+            max_rounds=20,
+            generate_candidate=_generate_candidate,
+            review_candidate=_review_candidate,
+            build_retry_prompt=_build_retry_prompt,
+            candidate_summary=lambda candidate: str((candidate.get("parsed") or {}).get("summary") or "invalid interrogation response"),
+            candidate_content=lambda candidate: str(candidate.get("raw_response") or ""),
+        )
+        if loop_result is None:
             return deterministic
+        parsed = loop_result.candidate.get("parsed") if isinstance(loop_result.candidate, dict) else None
+        if not isinstance(parsed, dict):
+            return deterministic
+        backend = str(loop_result.generation_metadata.get("backend") or "")
         return {
             "completed": False,
             "summary": parsed["summary"],
@@ -9916,8 +10201,8 @@ class HarnessUIDataService:
             "questions": parsed["questions"],
             "generated_by": "llm",
             "backend": backend,
-            "prompt_path": str(result.prompt_path),
-            "response_path": str(result.response_path),
+            "prompt_path": str(loop_result.generation_metadata.get("prompt_path") or ""),
+            "response_path": str(loop_result.generation_metadata.get("response_path") or ""),
         }
 
     def _deterministic_interrogation_review(self, objective_id: str) -> dict[str, object]:
@@ -10569,7 +10854,7 @@ class HarnessUIDataService:
             if anchor_label and not rewrite_requested
             else "You may revise the full diagram as needed to satisfy the operator's requested process change."
         )
-        prompt = (
+        base_prompt = (
             "You are updating a Mermaid flowchart for the accrivia-harness UI.\n"
             "Revise the workflow_control Mermaid to reflect the operator's requested process changes.\n"
             "Preserve valid parts of the current diagram, and avoid unnecessary rewrites.\n"
@@ -10601,17 +10886,94 @@ class HarnessUIDataService:
             attempt=1,
             summary=f"Mermaid proposal for {objective.id}",
         )
-        try:
-            result, backend = llm_router.execute(LLMInvocation(task=task, run=run, prompt=prompt, run_dir=run_dir))
-        except LLMExecutionError:
+        latest_review: dict[str, object] | None = None
+        def _generate_candidate(prompt: str, _attempt: int, _history) -> tuple[dict[str, str], dict[str, object]] | None:
+            try:
+                result, backend = llm_router.execute(LLMInvocation(task=task, run=run, prompt=prompt, run_dir=run_dir))
+            except LLMExecutionError:
+                return None
+            parsed = self._parse_mermaid_update_response(result.response_text)
+            if parsed is None:
+                return None
+            parsed["backend"] = backend
+            parsed["prompt_path"] = str(result.prompt_path)
+            parsed["response_path"] = str(result.response_path)
+            return parsed, {
+                "backend": backend,
+                "prompt_path": str(result.prompt_path),
+                "response_path": str(result.response_path),
+            }
+
+        review_fn = getattr(interrogation_service, "red_team_mermaid_text", None)
+
+        def _review_candidate(candidate: dict[str, str], _attempt: int, _history) -> dict[str, object]:
+            if review_fn is None:
+                return {"ready_for_human_review": True, "deterministic_review": {"findings": []}, "llm_review": {"findings": []}}
+            return review_fn(
+                candidate["content"],
+                source_label=f"objective_{objective_id}_workflow_control",
+                include_llm=True,
+            )
+
+        def _build_retry_prompt(
+            initial_prompt: str,
+            candidate: dict[str, str],
+            major_findings: list[dict[str, object]],
+            history,
+            attempt: int,
+            max_rounds: int,
+        ) -> str:
+            history_payload = [
+                {
+                    "attempt": item.attempt,
+                    "candidate_summary": item.candidate_summary,
+                    "candidate_content": item.candidate_content,
+                    "review_ready_for_human_review": item.review_ready_for_human_review,
+                    "major_findings": item.major_findings,
+                }
+                for item in history
+            ]
+            return (
+                f"{base_prompt}\n"
+                f"This is automatic Mermaid red-team rewrite round {attempt + 1} of {max_rounds}.\n"
+                "The previous Mermaid candidate failed the automatic red-team review.\n"
+                "Revise the diagram to resolve these findings while preserving the operator's intent.\n"
+                "Use the full context again; do not narrow yourself to only the last finding.\n"
+                "Do not explain the findings. Fix the Mermaid.\n\n"
+                f"Rejected candidate:\n{candidate['content']}\n\n"
+                f"Red-team findings:\n{json.dumps(major_findings, indent=2, sort_keys=True)}\n\n"
+                f"Prior round history:\n{json.dumps(history_payload, indent=2, sort_keys=True)}\n"
+            )
+
+        loop_result = _RED_TEAM_LOOP.run(
+            initial_prompt=base_prompt,
+            max_rounds=_MERMAID_RED_TEAM_MAX_ROUNDS,
+            generate_candidate=_generate_candidate,
+            review_candidate=_review_candidate if review_fn is not None else None,
+            build_retry_prompt=_build_retry_prompt if review_fn is not None else None,
+        )
+        if loop_result is None:
             return None
-        parsed = self._parse_mermaid_update_response(result.response_text)
-        if parsed is None:
-            return None
-        parsed["backend"] = backend
-        parsed["prompt_path"] = str(result.prompt_path)
-        parsed["response_path"] = str(result.response_path)
-        return parsed
+        latest_review = loop_result.latest_review
+        candidate = dict(loop_result.candidate)
+        if latest_review is not None:
+            candidate["red_team_review"] = json.dumps(latest_review, indent=2, sort_keys=True)
+        if loop_result.history:
+            candidate["red_team_history"] = json.dumps(
+                [
+                    {
+                        "attempt": item.attempt,
+                        "candidate_summary": item.candidate_summary,
+                        "candidate_content": item.candidate_content,
+                        "review_ready_for_human_review": item.review_ready_for_human_review,
+                        "major_findings": item.major_findings,
+                    }
+                    for item in loop_result.history
+                ],
+                indent=2,
+                sort_keys=True,
+            )
+        return candidate
 
     def _parse_mermaid_update_response(self, text: str) -> dict[str, str] | None:
         stripped = text.strip()

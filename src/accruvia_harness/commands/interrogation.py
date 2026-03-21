@@ -60,6 +60,16 @@ def handle_interrogation_command(args, ctx: CLIContext) -> bool:
         ensure_llm_ready(args, ctx, reason="Task explanation")
         emit(ctx.interrogation_service.explain_task(args.task_id))
         return True
+    if args.command == "red-team-mermaid":
+        emit(
+            ctx.interrogation_service.red_team_mermaid(
+                args.path,
+                block_index=args.block_index,
+                include_llm=not args.no_llm,
+                model=args.model,
+            )
+        )
+        return True
     if args.command == "events":
         emit({"events": [serialize_dataclass(i) for i in store.list_events(args.entity_type, args.entity_id)]})
         return True

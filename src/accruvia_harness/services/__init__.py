@@ -5,6 +5,7 @@ from .github_task_service import GitHubTaskService
 from .gitlab_task_service import GitLabTaskService
 from .promotion_service import PromotionReviewResult, PromotionService
 from .queue_service import QueueService
+from .red_team_service import RedTeamLoopResult, RedTeamLoopService, RedTeamRound
 from .review_watcher_service import ReviewWatcherResult, ReviewWatcherService
 from .run_service import RunService
 from .supervisor_service import SupervisorResult, SupervisorService
@@ -21,6 +22,9 @@ __all__ = [
     "PromotionReviewResult",
     "PromotionService",
     "QueueService",
+    "RedTeamLoopResult",
+    "RedTeamLoopService",
+    "RedTeamRound",
     "ReviewWatcherResult",
     "ReviewWatcherService",
     "RunService",

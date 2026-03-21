@@ -28,7 +28,7 @@ from accruvia_harness.domain import (
     TaskStatus,
     new_id,
 )
-from accruvia_harness.interrogation import HarnessQueryService
+from accruvia_harness.interrogation import HarnessQueryService, InterrogationService
 from accruvia_harness.llm import LLMExecutionResult
 from accruvia_harness.services.repository_promotion_service import PromotionApplyResult
 from accruvia_harness.store import SQLiteHarnessStore
@@ -49,12 +49,45 @@ class FakeLLMRouter:
         prompt_path = invocation.run_dir / "llm_prompt.txt"
         response_path = invocation.run_dir / "llm_response.md"
         if "Return JSON only with keys: summary, content." in invocation.prompt:
-            response_text = json.dumps(
-                {
-                    "summary": "Move red-team to start during intake before draft planning.",
-                    "content": "flowchart TD\nA[Objective Intake]-->B[Red-Team Intake]\nB-->C[Draft Planning Elements]\nC-->D[Mermaid Draft]",
-                }
-            )
+            if "The previous Mermaid candidate failed the automatic red-team review." in invocation.prompt:
+                response_text = json.dumps(
+                    {
+                        "summary": "Clarify execution readiness and keep read/write boundaries explicit.",
+                        "content": "flowchart TD\nA[Read Caller]-->B[ContextService.build_packet(project_id, objective_id, mode)]\nW[Write Caller]-->M[ContextRecorder]\nM-->N[Rebuild Packet]\nN-->B\nB-->C{Execution artifacts sufficient for execution?}\nC-->D[Run execution]",
+                    }
+                )
+            else:
+                response_text = json.dumps(
+                    {
+                        "summary": "Move red-team to start during intake before draft planning.",
+                        "content": "flowchart TD\nA[Objective Intake]-->B[Red-Team Intake]\nB-->C[Draft Planning Elements]\nC-->D[Mermaid Draft]",
+                    }
+                )
+        elif "Return JSON only with keys: summary, ready_for_human_review, findings." in invocation.prompt:
+            if "Execution artifacts sufficient for execution?" in invocation.prompt or "Write Caller" in invocation.prompt:
+                response_text = json.dumps(
+                    {
+                        "summary": "No major issue remains.",
+                        "ready_for_human_review": True,
+                        "findings": [],
+                    }
+                )
+            else:
+                response_text = json.dumps(
+                    {
+                        "summary": "The diagram is still too implicit.",
+                        "ready_for_human_review": False,
+                        "findings": [
+                            {
+                                "severity": "major",
+                                "class": "Control Ambiguity",
+                                "summary": "Execution readiness is not explicit enough.",
+                                "rationale": "A literal implementer could miss the execution gate semantics.",
+                                "patch_hint": "Add an explicit execution-readiness gate and separate write flow.",
+                            }
+                        ],
+                    }
+                )
         elif "Return JSON only with keys: summary, packets." in invocation.prompt:
             response_text = json.dumps(
                 {
@@ -195,6 +228,40 @@ class ZeroUsageObjectiveReviewRouter(FakeLLMRouter):
                     "total_tokens": 0,
                     "cost_usd": 0.0,
                     "latency_ms": 0.0,
+                },
+            ),
+            "fake-ui-llm",
+        )
+
+
+class SequenceLLMRouter(FakeLLMRouter):
+    def __init__(self, responses: list[str]) -> None:
+        super().__init__(responses[0] if responses else "")
+        self.responses = list(responses)
+        self.index = 0
+
+    def execute(self, invocation, telemetry=None):
+        self.last_prompt = invocation.prompt
+        self.prompts.append(invocation.prompt)
+        invocation.run_dir.mkdir(parents=True, exist_ok=True)
+        prompt_path = invocation.run_dir / "llm_prompt.txt"
+        response_path = invocation.run_dir / "llm_response.md"
+        response_text = self.responses[min(self.index, len(self.responses) - 1)]
+        self.index += 1
+        prompt_path.write_text(invocation.prompt, encoding="utf-8")
+        response_path.write_text(response_text, encoding="utf-8")
+        return (
+            LLMExecutionResult(
+                backend="fake-ui-llm",
+                response_text=response_text,
+                prompt_path=prompt_path,
+                response_path=response_path,
+                diagnostics={
+                    "prompt_tokens": 120,
+                    "completion_tokens": 80,
+                    "total_tokens": 200,
+                    "cost_usd": 0.0123,
+                    "latency_ms": 987,
                 },
             ),
             "fake-ui-llm",
@@ -800,6 +867,166 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         self.assertEqual("finished", objective_payload["diagram"]["status"])
         checks = {item["key"]: item for item in objective_payload["execution_gate"]["checks"]}
         self.assertTrue(checks["mermaid_finished"]["ok"])
+
+    def test_mermaid_generation_runs_automatic_red_team_loop_before_proposal(self) -> None:
+        fake_router = FakeLLMRouter(
+            json.dumps(
+                {
+                    "reply": "I will propose a Mermaid update for review.",
+                    "recommended_action": "review_mermaid",
+                    "evidence_refs": ["mermaid"],
+                    "mode_shift": "none",
+                }
+            )
+        )
+        base_interrogation = InterrogationService(
+            query_service=self.query_service,
+            workspace_root=self.workspace_root,
+            llm_router=fake_router,
+        )
+        self.ctx.interrogation_service = SimpleNamespace(
+            llm_router=fake_router,
+            red_team_mermaid_text=base_interrogation.red_team_mermaid_text,
+        )
+        self.service = HarnessUIDataService(self.ctx)
+        self.service.update_intent_model(
+            self.objective.id,
+            intent_summary="Make execution readiness explicit",
+            success_definition="Generated Mermaid separates read and write paths and names the execution gate explicitly",
+            non_negotiables=["Read and write boundaries stay explicit"],
+            frustration_signals=["Ambiguous control flow"],
+        )
+
+        result = self.service.add_operator_comment(
+            self.project.id,
+            "Update the mermaid to make execution readiness explicit and keep mutation separate.",
+            "shaun",
+            self.objective.id,
+        )
+
+        proposal = result["mermaid_proposal"]
+        assert proposal is not None
+        self.assertIn("Execution artifacts sufficient for execution?", proposal["content"])
+        record = self.store.list_context_records(objective_id=self.objective.id, record_type="mermaid_update_proposed")[-1]
+        self.assertTrue(str(record.metadata.get("red_team_review") or "").strip())
+        self.assertGreaterEqual(len(fake_router.prompts), 3)
+
+    def test_generate_interrogation_review_retries_until_response_is_valid(self) -> None:
+        router = SequenceLLMRouter(
+            [
+                "{\"summary\":\"bad\"}",
+                json.dumps(
+                    {
+                        "summary": "Interrogation review generated.",
+                        "plan_elements": ["Desired outcome: clarify execution path"],
+                        "questions": ["What ambiguity remains before Mermaid review?"],
+                    }
+                ),
+            ]
+        )
+        self.ctx.interrogation_service = SimpleNamespace(llm_router=router)
+        self.service = HarnessUIDataService(self.ctx)
+        self.service.update_intent_model(
+            self.objective.id,
+            intent_summary="Clarify execution path",
+            success_definition="Operator can see how planning moves to execution",
+            non_negotiables=["No hidden execution gating"],
+            frustration_signals=["Ambiguous planning"],
+        )
+
+        review = self.service._generate_interrogation_review(self.objective.id)
+
+        self.assertEqual("llm", review["generated_by"])
+        self.assertEqual("Interrogation review generated.", review["summary"])
+        self.assertEqual(2, len(router.prompts))
+        self.assertIn("failed validation", router.prompts[-1].lower())
+
+    def test_generate_objective_review_packets_retries_until_packets_validate(self) -> None:
+        router = SequenceLLMRouter(
+            [
+                json.dumps({"summary": "bad", "packets": [{"reviewer": "QA agent", "dimension": "unit_test_coverage"}]}),
+                json.dumps(
+                    {
+                        "summary": "Objective review generated.",
+                        "packets": [
+                            {
+                                "reviewer": "QA agent",
+                                "dimension": "unit_test_coverage",
+                                "verdict": "concern",
+                                "progress_status": "new_concern",
+                                "severity": "medium",
+                                "owner_scope": "objective review evidence",
+                                "summary": "Unit coverage should be reviewed from completed task evidence.",
+                                "findings": ["A persisted QA packet is still required."],
+                                "evidence": ["Completed task reports exist but packet evidence is not yet recorded."],
+                                "required_artifact_type": "objective_review_packet",
+                                "artifact_schema": {
+                                    "type": "objective_review_packet",
+                                    "description": "Persist a QA review packet that cites completed task test artifacts.",
+                                    "required_fields": ["review_id", "reviewer", "dimension", "verdict", "artifacts"],
+                                },
+                                "closure_criteria": "A recorded QA review packet must cite completed-task test evidence and conclude the concern is resolved or pass.",
+                                "evidence_required": "A persisted QA review packet referencing completed task test artifacts.",
+                                "repeat_reason": "",
+                            }
+                        ],
+                    }
+                ),
+            ]
+        )
+        self.ctx.interrogation_service = SimpleNamespace(llm_router=router)
+        self.service = HarnessUIDataService(self.ctx)
+
+        packets = self.service._generate_objective_review_packets(self.objective.id, "review_test")
+
+        self.assertEqual(1, len(packets))
+        self.assertEqual("QA agent", packets[0]["reviewer"])
+        self.assertEqual(2, len(router.prompts))
+        self.assertIn("failed packet validation", router.prompts[-1].lower())
+
+    def test_ui_responder_retries_until_response_is_valid(self) -> None:
+        router = SequenceLLMRouter(
+            [
+                "{\"reply\":\"\"}",
+                json.dumps(
+                    {
+                        "reply": "The next step is Mermaid review because interrogation is complete but execution planning is not locked yet.",
+                        "recommended_action": "review_mermaid",
+                        "evidence_refs": ["interrogation_review", "mermaid"],
+                        "mode_shift": "none",
+                    }
+                ),
+            ]
+        )
+        self.ctx.interrogation_service = SimpleNamespace(llm_router=router)
+        self.service = HarnessUIDataService(self.ctx)
+        self.service._interrogation_review = lambda _objective_id: {
+            "completed": True,
+            "summary": "Interrogation already completed.",
+            "plan_elements": ["Desired outcome: clarify the operator path"],
+            "questions": [],
+            "generated_by": "deterministic",
+            "backend": None,
+        }
+        self.service.update_intent_model(
+            self.objective.id,
+            intent_summary="Clarify the operator path from interrogation to Mermaid review",
+            success_definition="The harness answers directly what stage the operator is in",
+            non_negotiables=["Do not hide the current stage"],
+            frustration_signals=["Ambiguous next step"],
+        )
+
+        result = self.service.add_operator_comment(
+            self.project.id,
+            "What stage am I in right now?",
+            "shaun",
+            self.objective.id,
+        )
+
+        self.assertIn("mermaid review", result["reply"]["text"].lower())
+        self.assertEqual("review_mermaid", result["reply"]["recommended_action"])
+        self.assertEqual(2, len(router.prompts))
+        self.assertIn("failed validation", router.prompts[-1].lower())
 
     def test_queue_atomic_generation_derives_units_for_latest_finished_mermaid(self) -> None:
         self.service.update_intent_model(

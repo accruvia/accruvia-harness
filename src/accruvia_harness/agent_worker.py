@@ -44,6 +44,27 @@ def _focused_test_command(validation_mode: str) -> list[str]:
     ]
 
 
+def _python_test_module_from_path(path: str) -> str | None:
+    normalized = path.strip().replace("\\", "/")
+    if not normalized.startswith("tests/") or not normalized.endswith(".py"):
+        return None
+    module = normalized[:-3].replace("/", ".")
+    if module.endswith(".__init__"):
+        module = module[: -len(".__init__")]
+    return module if module.startswith("tests.") else None
+
+
+def _task_specific_test_command(test_files: list[str], validation_mode: str) -> list[str]:
+    modules: list[str] = []
+    for path in test_files:
+        module = _python_test_module_from_path(path)
+        if module and module not in modules:
+            modules.append(module)
+    if modules:
+        return ["python3", "-m", "unittest", "-v", *modules]
+    return _focused_test_command(validation_mode)
+
+
 def _agent_test_timeout_seconds(environ: Mapping[str, str]) -> int:
     raw_value = str(
         environ.get("ACCRUVIA_AGENT_TEST_TIMEOUT_SECONDS")
@@ -74,23 +95,29 @@ def _agent_test_startup_timeout_seconds(environ: Mapping[str, str]) -> int:
     return parsed if parsed > 0 else DEFAULT_AGENT_TEST_STARTUP_TIMEOUT_SECONDS
 
 
-def _validation_policy(validation_mode: str, environ: Mapping[str, str]) -> ValidationPolicy:
+def _validation_policy(
+    validation_mode: str,
+    environ: Mapping[str, str],
+    *,
+    test_files: list[str] | None = None,
+) -> ValidationPolicy:
     execution_timeout_seconds = _agent_test_timeout_seconds(environ)
     startup_timeout_seconds = _agent_test_startup_timeout_seconds(environ)
+    command = _task_specific_test_command(test_files or [], validation_mode)
     if validation_mode == "lightweight_repair":
         return ValidationPolicy(
-            command=_focused_test_command(validation_mode),
+            command=command,
             startup_timeout_seconds=min(startup_timeout_seconds, 20),
             execution_timeout_seconds=min(execution_timeout_seconds, 45),
         )
     if validation_mode == "lightweight_operator":
         return ValidationPolicy(
-            command=_focused_test_command(validation_mode),
+            command=command,
             startup_timeout_seconds=min(startup_timeout_seconds, 20),
             execution_timeout_seconds=min(execution_timeout_seconds, 60),
         )
     return ValidationPolicy(
-        command=_focused_test_command(validation_mode),
+        command=command,
         startup_timeout_seconds=startup_timeout_seconds,
         execution_timeout_seconds=execution_timeout_seconds,
     )
@@ -112,10 +139,12 @@ def _run_bounded_process(
     *,
     cwd: Path,
     timeout_seconds: int,
+    env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     process = subprocess.Popen(
         args,
         cwd=cwd,
+        env=dict(env) if env is not None else None,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -162,10 +191,12 @@ def _run_validation_process(
     cwd: Path,
     startup_timeout_seconds: int,
     execution_timeout_seconds: int,
+    env: Mapping[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], str | None]:
     process = subprocess.Popen(
         args,
         cwd=cwd,
+        env=dict(env) if env is not None else None,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -230,6 +261,17 @@ def _workspace_contract_issues(
         issues.append("Workspace is missing the tests/ directory required by validation.")
 
     return issues
+
+
+def _validation_subprocess_env(workspace: Path, environ: Mapping[str, str]) -> dict[str, str]:
+    validation_env = dict(os.environ)
+    validation_env.update(environ)
+    src_path = str((workspace / "src").resolve())
+    existing_pythonpath = str(validation_env.get("PYTHONPATH", "")).strip()
+    validation_env["PYTHONPATH"] = (
+        src_path if not existing_pythonpath else src_path + os.pathsep + existing_pythonpath
+    )
+    return validation_env
 
 
 def select_worker_llm_command(environ: Mapping[str, str]) -> tuple[str, str]:
@@ -530,7 +572,7 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
         "validation_mode": validation_mode,
         "worker_outcome": "candidate",
         "changed_files": all_changed,
-        "test_files": test_files or ["tests/test_phase1.py"],
+        "test_files": test_files,
         "summary": summary_text,
         "command": llm_command,
         "atomicity_gate": {
@@ -581,45 +623,18 @@ def run_validation(environ: Mapping[str, str] | None = None) -> int:
     if not isinstance(all_changed, list):
         all_changed = []
     effective_validation_mode = str(payload.get("effective_validation_mode") or validation_mode)
-
-    compile_timed_out = False
-    git_timed_out = False
-    compile_failure_message = ""
-    git_failure_message = ""
-    python_files = "\n".join(path for path in all_changed if path.endswith(".py"))
-
-    _validation_start = time.monotonic()
-
-    if python_files:
-        try:
-            compile_completed = _run_bounded_process(
-                ["python3", "-m", "py_compile", *python_files.splitlines()],
-                cwd=workspace,
-                timeout_seconds=compile_timeout_seconds,
-            )
-            compile_output_path.write_text(
-                (compile_completed.stdout or "") + (compile_completed.stderr or ""),
-                encoding="utf-8",
-            )
-            compile_rc = compile_completed.returncode
-        except subprocess.TimeoutExpired as exc:
-            compile_timed_out = True
-            compile_rc = 124
-            compile_failure_message = (
-                f"Compile validation exceeded {compile_timeout_seconds} seconds and was terminated."
-            )
-            compile_output_path.write_text(
-                compile_failure_message + "\n" + _coerce_subprocess_output(exc.stdout) + _coerce_subprocess_output(exc.stderr),
-                encoding="utf-8",
-            )
-    else:
-        compile_output_path.write_text("No Python files changed.\n", encoding="utf-8")
-        compile_rc = 0
-
-    validation_policy = _validation_policy(effective_validation_mode, env)
+    test_files = [path for path in payload.get("test_files", []) if isinstance(path, str)]
+    validation_policy = _validation_policy(
+        effective_validation_mode,
+        env,
+        test_files=test_files,
+    )
     test_command = validation_policy.command
     test_timeout_seconds = validation_policy.execution_timeout_seconds
     test_startup_timeout_seconds = validation_policy.startup_timeout_seconds
+    validation_env = _validation_subprocess_env(workspace, env)
+    _validation_start = time.monotonic()
+
     workspace_contract_issues = _workspace_contract_issues(
         workspace,
         changed_files=[path for path in all_changed if isinstance(path, str)],
@@ -660,11 +675,46 @@ def run_validation(environ: Mapping[str, str] | None = None) -> int:
         )
         report_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
         return 1
+
+    compile_timed_out = False
+    git_timed_out = False
+    compile_failure_message = ""
+    git_failure_message = ""
+    python_files = "\n".join(path for path in all_changed if path.endswith(".py"))
+
+    if python_files:
+        try:
+            compile_completed = _run_bounded_process(
+                ["python3", "-m", "py_compile", *python_files.splitlines()],
+                cwd=workspace,
+                timeout_seconds=compile_timeout_seconds,
+                env=validation_env,
+            )
+            compile_output_path.write_text(
+                (compile_completed.stdout or "") + (compile_completed.stderr or ""),
+                encoding="utf-8",
+            )
+            compile_rc = compile_completed.returncode
+        except subprocess.TimeoutExpired as exc:
+            compile_timed_out = True
+            compile_rc = 124
+            compile_failure_message = (
+                f"Compile validation exceeded {compile_timeout_seconds} seconds and was terminated."
+            )
+            compile_output_path.write_text(
+                compile_failure_message + "\n" + _coerce_subprocess_output(exc.stdout) + _coerce_subprocess_output(exc.stderr),
+                encoding="utf-8",
+            )
+    else:
+        compile_output_path.write_text("No Python files changed.\n", encoding="utf-8")
+        compile_rc = 0
+
     test_completed, test_timeout_category = _run_validation_process(
         test_command,
         cwd=workspace,
         startup_timeout_seconds=test_startup_timeout_seconds,
         execution_timeout_seconds=test_timeout_seconds,
+        env=validation_env,
     )
     test_timed_out = test_timeout_category is not None
     timeout_summary = ""
