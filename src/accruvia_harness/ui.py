@@ -12,11 +12,10 @@ import threading
 import time
 import datetime as _dt
 from dataclasses import dataclass
+import asyncio
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 from queue import Queue, Empty
 
@@ -12542,372 +12541,243 @@ class _EventBus:
                     pass
 
 
-class HarnessUIHandler(BaseHTTPRequestHandler):
-    server_version = "AccruviaHarnessUI/0.1"
+def _build_fastapi_app(data_service: HarnessUIDataService, event_bus: _EventBus):
+    """Build a FastAPI application wired to the given data service and event bus."""
+    from fastapi import FastAPI, Request
+    from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 
-    @property
-    def data_service(self) -> HarnessUIDataService:
-        return self.server.data_service  # type: ignore[attr-defined]
+    class _JSONResponse(JSONResponse):
+        def render(self, content) -> bytes:
+            return json.dumps(content, indent=2, sort_keys=True).encode("utf-8")
 
-    @property
-    def event_bus(self) -> _EventBus:
-        return self.server.event_bus  # type: ignore[attr-defined]
+    app = FastAPI(title="Accruvia Harness", default_response_class=_JSONResponse)
+    _NOCACHE = {"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache", "Expires": "0"}
 
-    def do_GET(self) -> None:  # noqa: N802
-        parsed = urlparse(self.path)
-        if parsed.path == "/":
-            self._send_html(_HARNESS_HTML)
-            return
-        if parsed.path == "/harness":
-            self._send_redirect("/")
-            return
-        if parsed.path == "/plan":
-            self._send_html(_INDEX_HTML)
-            return
-        if parsed.path == "/atomic":
-            self._send_html(_ATOMIC_HTML)
-            return
-        if parsed.path == "/promotion-review":
-            self._send_html(_PROMOTION_REVIEW_HTML)
-            return
-        if parsed.path == "/token-performance":
-            self._send_html(_TOKEN_PERFORMANCE_HTML)
-            return
-        if parsed.path == "/settings":
-            self._send_html(_SETTINGS_HTML)
-            return
-        if parsed.path == "/objectives/new":
-            self._send_html(_OBJECTIVE_CREATE_HTML)
-            return
-        if parsed.path == "/workspace":
-            self._send_html(_FULL_UI_HTML)
-            return
-        if parsed.path == "/app.js":
-            self._send_text(_APP_JS, content_type="application/javascript; charset=utf-8")
-            return
-        if parsed.path == "/app.css":
-            self._send_text(_APP_CSS, content_type="text/css; charset=utf-8")
-            return
-        if parsed.path == "/api/projects":
-            self._send_json(self.data_service.list_projects())
-            return
-        if parsed.path.startswith("/api/projects/") and parsed.path.endswith("/workspace"):
-            project_ref = parsed.path[len("/api/projects/") : -len("/workspace")].strip("/")
-            self._dispatch_json(lambda: self.data_service.project_workspace(project_ref))
-            return
-        if parsed.path == "/api/version":
-            self._send_json({"commit": _GIT_COMMIT, "started_at": _SERVER_STARTED_AT})
-            return
-        if parsed.path == "/api/harness":
-            self._send_json(self.data_service.harness_overview())
-            return
-        if parsed.path.startswith("/api/objectives/") and parsed.path.endswith("/intent"):
-            self._send_json({"error": "Method not allowed"}, status=HTTPStatus.METHOD_NOT_ALLOWED)
-            return
-        if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/cli-output"):
-            run_id = parsed.path[len("/api/runs/") : -len("/cli-output")].strip("/")
-            self._dispatch_json(lambda: self.data_service.run_cli_output(run_id))
-            return
-        if parsed.path.startswith("/api/projects/") and parsed.path.endswith("/supervisor"):
-            project_id = parsed.path[len("/api/projects/") : -len("/supervisor")].strip("/")
-            self._send_json(self.data_service.supervisor_status(project_id))
-            return
-        if parsed.path == "/api/events":
-            self._handle_sse()
-            return
-        self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
-
-    def do_POST(self) -> None:  # noqa: N802
-        parsed = urlparse(self.path)
-        if parsed.path.startswith("/api/projects/") and parsed.path.endswith("/repo-settings"):
-            project_id = parsed.path[len("/api/projects/") : -len("/repo-settings")].strip("/")
-            payload = self._read_json_body()
-            self._dispatch_json(
-                lambda: self.data_service.update_project_repo_settings(
-                    project_id,
-                    promotion_mode=str(payload.get("promotion_mode") or ""),
-                    repo_provider=str(payload.get("repo_provider") or ""),
-                    repo_name=str(payload.get("repo_name") or ""),
-                    base_branch=str(payload.get("base_branch") or ""),
-                ),
-                notify=True,
-            )
-            return
-        if parsed.path.startswith("/api/projects/") and parsed.path.endswith("/objectives"):
-            project_ref = parsed.path[len("/api/projects/") : -len("/objectives")].strip("/")
-            payload = self._read_json_body()
-            self._dispatch_json(
-                lambda: self.data_service.create_objective(
-                    project_ref,
-                    str(payload.get("title") or ""),
-                    str(payload.get("summary") or ""),
-                ),
-                status=HTTPStatus.CREATED,
-                notify=True,
-            )
-            return
-        if parsed.path.startswith("/api/projects/") and parsed.path.endswith("/comments"):
-            project_ref = parsed.path[len("/api/projects/") : -len("/comments")].strip("/")
-            payload = self._read_json_body()
-            self._dispatch_json(
-                lambda: self.data_service.add_operator_comment(
-                    project_ref,
-                    str(payload.get("text") or ""),
-                    str(payload.get("author") or ""),
-                    str(payload.get("objective_id") or "").strip() or None,
-                ),
-                status=HTTPStatus.CREATED,
-                notify=True,
-            )
-            return
-        if parsed.path.startswith("/api/objectives/") and parsed.path.endswith("/tasks"):
-            objective_id = parsed.path[len("/api/objectives/") : -len("/tasks")].strip("/")
-            self._dispatch_json(
-                lambda: self.data_service.create_linked_task(objective_id),
-                status=HTTPStatus.CREATED,
-                notify=True,
-            )
-            return
-        if parsed.path.startswith("/api/objectives/") and parsed.path.endswith("/interrogation"):
-            objective_id = parsed.path[len("/api/objectives/") : -len("/interrogation")].strip("/")
-            self._dispatch_json(
-                lambda: self.data_service.complete_interrogation_review(objective_id),
-                status=HTTPStatus.CREATED,
-                notify=True,
-            )
-            return
-        if parsed.path.startswith("/api/objectives/") and parsed.path.endswith("/promotion/force"):
-            objective_id = parsed.path[len("/api/objectives/") : -len("/promotion/force")].strip("/")
-            payload = self._read_json_body()
-            self._dispatch_json(
-                lambda: self.data_service.force_promote_objective_review(
-                    objective_id,
-                    rationale=str(payload.get("rationale") or ""),
-                    author=str(payload.get("author") or "operator"),
-                ),
-                status=HTTPStatus.CREATED,
-                notify=True,
-            )
-            return
-        if parsed.path.startswith("/api/objectives/") and parsed.path.endswith("/promote"):
-            objective_id = parsed.path[len("/api/objectives/") : -len("/promote")].strip("/")
-            self._dispatch_json(
-                lambda: self.data_service.promote_objective_to_repo(objective_id),
-                notify=True,
-            )
-            return
-        if parsed.path.startswith("/api/tasks/") and parsed.path.endswith("/promote"):
-            task_id = parsed.path[len("/api/tasks/") : -len("/promote")].strip("/")
-            self._dispatch_json(
-                lambda: self.data_service.promote_atomic_unit_to_repo(task_id),
-                notify=True,
-            )
-            return
-        if parsed.path.startswith("/api/objectives/") and parsed.path.endswith("/mermaid/proposal/accept"):
-            objective_id = parsed.path[len("/api/objectives/") : -len("/mermaid/proposal/accept")].strip("/")
-            payload = self._read_json_body()
-            self._dispatch_json(
-                lambda: self.data_service.accept_mermaid_proposal(objective_id, str(payload.get("proposal_id") or "")),
-                status=HTTPStatus.CREATED,
-                notify=True,
-            )
-            return
-        if parsed.path.startswith("/api/objectives/") and parsed.path.endswith("/mermaid/proposal/reject"):
-            objective_id = parsed.path[len("/api/objectives/") : -len("/mermaid/proposal/reject")].strip("/")
-            payload = self._read_json_body()
-            self._dispatch_json(
-                lambda: self.data_service.reject_mermaid_proposal(
-                    objective_id,
-                    str(payload.get("proposal_id") or ""),
-                    resolution=str(payload.get("resolution") or "refine"),
-                ),
-                status=HTTPStatus.CREATED,
-                notify=True,
-            )
-            return
-        if parsed.path.startswith("/api/tasks/") and parsed.path.endswith("/run"):
-            task_id = parsed.path[len("/api/tasks/") : -len("/run")].strip("/")
-            self._dispatch_json(
-                lambda: self.data_service.run_task(task_id),
-                status=HTTPStatus.CREATED,
-                notify=True,
-            )
-            return
-        if parsed.path.startswith("/api/projects/") and parsed.path.endswith("/supervise"):
-            project_id = parsed.path[len("/api/projects/") : -len("/supervise")].strip("/")
-            self._dispatch_json(
-                lambda: self.data_service.start_supervisor(project_id),
-                status=HTTPStatus.CREATED,
-                notify=True,
-            )
-            return
-        if parsed.path.startswith("/api/projects/") and parsed.path.endswith("/supervise/stop"):
-            project_id = parsed.path[len("/api/projects/") : -len("/supervise/stop")].strip("/")
-            self._dispatch_json(
-                lambda: self.data_service.stop_supervisor(project_id),
-                notify=True,
-            )
-            return
-        if parsed.path == "/api/cli/command":
-            payload = self._read_json_body()
-            self._dispatch_json(
-                lambda: self.data_service.run_cli_command(str(payload.get("command") or "")),
-                status=HTTPStatus.CREATED,
-                notify=True,
-            )
-            return
-        if parsed.path.startswith("/api/projects/") and parsed.path.endswith("/frustrations"):
-            project_ref = parsed.path[len("/api/projects/") : -len("/frustrations")].strip("/")
-            payload = self._read_json_body()
-            self._dispatch_json(
-                lambda: self.data_service.add_operator_frustration(
-                    project_ref,
-                    str(payload.get("text") or ""),
-                    str(payload.get("author") or ""),
-                    str(payload.get("objective_id") or "").strip() or None,
-                ),
-                status=HTTPStatus.CREATED,
-                notify=True,
-            )
-            return
-        if parsed.path.startswith("/api/tasks/") and parsed.path.endswith("/retry"):
-            task_id = parsed.path[len("/api/tasks/") : -len("/retry")].strip("/")
-            self._dispatch_json(
-                lambda: self.data_service.retry_task(task_id),
-                notify=True,
-            )
-            return
-        if parsed.path.startswith("/api/projects/") and parsed.path.endswith("/retry-failed"):
-            project_id = parsed.path[len("/api/projects/") : -len("/retry-failed")].strip("/")
-            self._dispatch_json(
-                lambda: self.data_service.retry_all_failed(project_id),
-                notify=True,
-            )
-            return
-        self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
-
-    def do_PUT(self) -> None:  # noqa: N802
-        parsed = urlparse(self.path)
-        if parsed.path.startswith("/api/objectives/") and parsed.path.endswith("/mermaid"):
-            objective_id = parsed.path[len("/api/objectives/") : -len("/mermaid")].strip("/")
-            payload = self._read_json_body()
-            self._dispatch_json(
-                lambda: self.data_service.update_mermaid_artifact(
-                    objective_id,
-                    status=str(payload.get("status") or ""),
-                    summary=str(payload.get("summary") or ""),
-                    blocking_reason=str(payload.get("blocking_reason") or ""),
-                ),
-                notify=True,
-            )
-            return
-        if parsed.path.startswith("/api/objectives/") and parsed.path.endswith("/intent"):
-            objective_id = parsed.path[len("/api/objectives/") : -len("/intent")].strip("/")
-            payload = self._read_json_body()
-            self._dispatch_json(
-                lambda: self.data_service.update_intent_model(
-                    objective_id,
-                    intent_summary=str(payload.get("intent_summary") or ""),
-                    success_definition=str(payload.get("success_definition") or ""),
-                    non_negotiables=list(payload.get("non_negotiables") or []),
-                    frustration_signals=list(payload.get("frustration_signals") or []),
-                ),
-                notify=True,
-            )
-            return
-        self._send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
-
-    def log_message(self, _format: str, *args) -> None:
-        return
-
-    def _dispatch_json(self, fn, *, status: HTTPStatus = HTTPStatus.OK, notify: bool = False) -> None:
+    def _dispatch(fn, *, status_code: int = 200, notify: bool = False):
         try:
             payload = fn()
         except ValueError as exc:
-            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
-            return
+            return _JSONResponse({"error": str(exc)}, status_code=400)
         except Exception as exc:
-            self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
-            return
-        self._send_json(payload, status=status)
+            return _JSONResponse({"error": str(exc)}, status_code=500)
         if notify:
-            self.event_bus.publish("workspace-changed")
+            event_bus.publish("workspace-changed")
+        return _JSONResponse(payload, status_code=status_code)
 
-    def _read_json_body(self) -> dict[str, object]:
-        content_length = int(self.headers.get("Content-Length", "0") or 0)
-        if content_length <= 0:
-            return {}
-        raw = self.rfile.read(content_length)
-        if not raw:
-            return {}
-        return json.loads(raw.decode("utf-8"))
+    @app.middleware("http")
+    async def nocache_middleware(request, call_next):
+        response = await call_next(request)
+        for k, v in _NOCACHE.items():
+            response.headers[k] = v
+        return response
 
-    def _send_json(self, payload: dict[str, object], *, status: HTTPStatus = HTTPStatus.OK) -> None:
-        body = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
-        self.send_header("Pragma", "no-cache")
-        self.send_header("Expires", "0")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self._write_body(body)
+    # --- HTML pages ---
+    @app.get("/", response_class=HTMLResponse)
+    def index():
+        return _HARNESS_HTML
 
-    def _send_html(self, body: str) -> None:
-        self._send_text(body, content_type="text/html; charset=utf-8")
+    @app.get("/harness")
+    def harness_redirect():
+        return RedirectResponse(url="/")
 
-    def _send_text(self, body: str, *, content_type: str) -> None:
-        encoded = body.encode("utf-8")
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
-        self.send_header("Pragma", "no-cache")
-        self.send_header("Expires", "0")
-        self.send_header("Content-Length", str(len(encoded)))
-        self.end_headers()
-        self._write_body(encoded)
+    @app.get("/plan", response_class=HTMLResponse)
+    def plan_page():
+        return _INDEX_HTML
 
-    def _send_redirect(self, location: str, *, status: HTTPStatus = HTTPStatus.FOUND) -> None:
-        self.send_response(status)
-        self.send_header("Location", location)
-        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
-        self.send_header("Pragma", "no-cache")
-        self.send_header("Expires", "0")
-        self.end_headers()
+    @app.get("/atomic", response_class=HTMLResponse)
+    def atomic_page():
+        return _ATOMIC_HTML
 
-    def _handle_sse(self) -> None:
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "keep-alive")
-        self.send_header("X-Accel-Buffering", "no")
-        self.end_headers()
-        q = self.event_bus.subscribe()
-        try:
-            while True:
-                try:
-                    event = q.get(timeout=15)
-                except Empty:
-                    # Send keepalive comment
-                    self.wfile.write(b":\n\n")
-                    self.wfile.flush()
-                    continue
-                if event is None:
-                    break
-                self.wfile.write(f"data: {event}\n\n".encode("utf-8"))
-                self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            pass
-        finally:
-            self.event_bus.unsubscribe(q)
+    @app.get("/promotion-review", response_class=HTMLResponse)
+    def promotion_review_page():
+        return _PROMOTION_REVIEW_HTML
 
-    def _write_body(self, body: bytes) -> None:
-        try:
-            self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError, OSError) as exc:
-            if isinstance(exc, OSError) and exc.errno not in {errno.EPIPE, errno.ECONNRESET}:
-                raise
-            return
+    @app.get("/token-performance", response_class=HTMLResponse)
+    def token_performance_page():
+        return _TOKEN_PERFORMANCE_HTML
+
+    @app.get("/settings", response_class=HTMLResponse)
+    def settings_page():
+        return _SETTINGS_HTML
+
+    @app.get("/objectives/new", response_class=HTMLResponse)
+    def objective_create_page():
+        return _OBJECTIVE_CREATE_HTML
+
+    @app.get("/workspace", response_class=HTMLResponse)
+    def workspace_page():
+        return _FULL_UI_HTML
+
+    @app.get("/app.js")
+    def app_js():
+        return Response(content=_APP_JS, media_type="application/javascript; charset=utf-8")
+
+    @app.get("/app.css")
+    def app_css():
+        return Response(content=_APP_CSS, media_type="text/css; charset=utf-8")
+
+    # --- API GET routes ---
+    @app.get("/api/projects")
+    def list_projects():
+        return data_service.list_projects()
+
+    @app.get("/api/projects/{project_ref}/workspace")
+    def project_workspace(project_ref: str):
+        return _dispatch(lambda: data_service.project_workspace(project_ref))
+
+    @app.get("/api/version")
+    def version():
+        return {"commit": _GIT_COMMIT, "started_at": _SERVER_STARTED_AT}
+
+    @app.get("/api/harness")
+    def harness_overview():
+        return data_service.harness_overview()
+
+    @app.get("/api/runs/{run_id}/cli-output")
+    def run_cli_output(run_id: str):
+        return _dispatch(lambda: data_service.run_cli_output(run_id))
+
+    @app.get("/api/projects/{project_id}/supervisor")
+    def supervisor_status(project_id: str):
+        return data_service.supervisor_status(project_id)
+
+    @app.get("/api/events")
+    async def sse_events():
+        async def event_stream():
+            q = event_bus.subscribe()
+            try:
+                while True:
+                    try:
+                        event = await asyncio.to_thread(q.get, timeout=15)
+                    except Empty:
+                        yield ":\n\n"
+                        continue
+                    if event is None:
+                        break
+                    yield f"data: {event}\n\n"
+            except (asyncio.CancelledError, GeneratorExit):
+                pass
+            finally:
+                event_bus.unsubscribe(q)
+        return StreamingResponse(event_stream(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
+
+    # --- API POST routes ---
+    @app.post("/api/projects/{project_id}/repo-settings")
+    async def update_repo_settings(project_id: str, request):
+        payload = await request.json()
+        return _dispatch(lambda: data_service.update_project_repo_settings(
+            project_id, promotion_mode=str(payload.get("promotion_mode") or ""),
+            repo_provider=str(payload.get("repo_provider") or ""), repo_name=str(payload.get("repo_name") or ""),
+            base_branch=str(payload.get("base_branch") or ""),
+        ), notify=True)
+
+    @app.post("/api/projects/{project_ref}/objectives", status_code=201)
+    async def create_objective(project_ref: str, request):
+        payload = await request.json()
+        return _dispatch(lambda: data_service.create_objective(
+            project_ref, str(payload.get("title") or ""), str(payload.get("summary") or ""),
+        ), status_code=201, notify=True)
+
+    @app.post("/api/projects/{project_ref}/comments", status_code=201)
+    async def add_comment(project_ref: str, request):
+        payload = await request.json()
+        return _dispatch(lambda: data_service.add_operator_comment(
+            project_ref, str(payload.get("text") or ""), str(payload.get("author") or ""),
+            str(payload.get("objective_id") or "").strip() or None,
+        ), status_code=201, notify=True)
+
+    @app.post("/api/projects/{project_ref}/frustrations", status_code=201)
+    async def add_frustration(project_ref: str, request):
+        payload = await request.json()
+        return _dispatch(lambda: data_service.add_operator_frustration(
+            project_ref, str(payload.get("text") or ""), str(payload.get("author") or ""),
+            str(payload.get("objective_id") or "").strip() or None,
+        ), status_code=201, notify=True)
+
+    @app.post("/api/objectives/{objective_id}/tasks", status_code=201)
+    def create_linked_task(objective_id: str):
+        return _dispatch(lambda: data_service.create_linked_task(objective_id), status_code=201, notify=True)
+
+    @app.post("/api/objectives/{objective_id}/interrogation", status_code=201)
+    def complete_interrogation(objective_id: str):
+        return _dispatch(lambda: data_service.complete_interrogation_review(objective_id), status_code=201, notify=True)
+
+    @app.post("/api/objectives/{objective_id}/promotion/force", status_code=201)
+    async def force_promote(objective_id: str, request):
+        payload = await request.json()
+        return _dispatch(lambda: data_service.force_promote_objective_review(
+            objective_id, rationale=str(payload.get("rationale") or ""), author=str(payload.get("author") or "operator"),
+        ), status_code=201, notify=True)
+
+    @app.post("/api/objectives/{objective_id}/promote")
+    def promote_objective(objective_id: str):
+        return _dispatch(lambda: data_service.promote_objective_to_repo(objective_id), notify=True)
+
+    @app.post("/api/tasks/{task_id}/promote")
+    def promote_task(task_id: str):
+        return _dispatch(lambda: data_service.promote_atomic_unit_to_repo(task_id), notify=True)
+
+    @app.post("/api/objectives/{objective_id}/mermaid/proposal/accept", status_code=201)
+    async def accept_mermaid(objective_id: str, request):
+        payload = await request.json()
+        return _dispatch(lambda: data_service.accept_mermaid_proposal(
+            objective_id, str(payload.get("proposal_id") or ""),
+        ), status_code=201, notify=True)
+
+    @app.post("/api/objectives/{objective_id}/mermaid/proposal/reject", status_code=201)
+    async def reject_mermaid(objective_id: str, request):
+        payload = await request.json()
+        return _dispatch(lambda: data_service.reject_mermaid_proposal(
+            objective_id, str(payload.get("proposal_id") or ""),
+            resolution=str(payload.get("resolution") or "refine"),
+        ), status_code=201, notify=True)
+
+    @app.post("/api/tasks/{task_id}/run", status_code=201)
+    def run_task(task_id: str):
+        return _dispatch(lambda: data_service.run_task(task_id), status_code=201, notify=True)
+
+    @app.post("/api/tasks/{task_id}/retry")
+    def retry_task(task_id: str):
+        return _dispatch(lambda: data_service.retry_task(task_id), notify=True)
+
+    @app.post("/api/projects/{project_id}/supervise", status_code=201)
+    def start_supervisor(project_id: str):
+        return _dispatch(lambda: data_service.start_supervisor(project_id), status_code=201, notify=True)
+
+    @app.post("/api/projects/{project_id}/supervise/stop")
+    def stop_supervisor(project_id: str):
+        return _dispatch(lambda: data_service.stop_supervisor(project_id), notify=True)
+
+    @app.post("/api/cli/command", status_code=201)
+    async def cli_command(request):
+        payload = await request.json()
+        return _dispatch(lambda: data_service.run_cli_command(str(payload.get("command") or "")), status_code=201, notify=True)
+
+    @app.post("/api/projects/{project_id}/retry-failed")
+    def retry_all_failed(project_id: str):
+        return _dispatch(lambda: data_service.retry_all_failed(project_id), notify=True)
+
+    # --- API PUT routes ---
+    @app.put("/api/objectives/{objective_id}/mermaid")
+    async def update_mermaid(objective_id: str, request):
+        payload = await request.json()
+        return _dispatch(lambda: data_service.update_mermaid_artifact(
+            objective_id, status=str(payload.get("status") or ""),
+            summary=str(payload.get("summary") or ""), blocking_reason=str(payload.get("blocking_reason") or ""),
+        ), notify=True)
+
+    @app.put("/api/objectives/{objective_id}/intent")
+    async def update_intent(objective_id: str, request):
+        payload = await request.json()
+        return _dispatch(lambda: data_service.update_intent_model(
+            objective_id, intent_summary=str(payload.get("intent_summary") or ""),
+            success_definition=str(payload.get("success_definition") or ""),
+            non_negotiables=list(payload.get("non_negotiables") or []),
+            frustration_signals=list(payload.get("frustration_signals") or []),
+        ), notify=True)
+
+    return app
 
 
 def _verify_install_path() -> None:
@@ -12942,9 +12812,7 @@ def start_ui_server(ctx, *, host: str, port: int, open_browser: bool, project_re
         ctx.engine.queue.post_task_callback = data_service.reconcile_task_workflow
     resolved_port = _resolve_ui_port(host, port)
     event_bus = _EventBus()
-    server = ThreadingHTTPServer((host, resolved_port), HarnessUIHandler)
-    server.data_service = data_service  # type: ignore[attr-defined]
-    server.event_bus = event_bus  # type: ignore[attr-defined]
+    app = _build_fastapi_app(data_service, event_bus)
     url = f"http://{host}:{resolved_port}/"
     if project_ref:
         project_id = resolve_project_ref(ctx, project_ref)
@@ -12981,15 +12849,15 @@ def start_ui_server(ctx, *, host: str, port: int, open_browser: bool, project_re
     change_thread.start()
 
     _auto_start_supervisors(data_service, ctx)
+    import uvicorn
     try:
-        server.serve_forever()
+        uvicorn.run(app, host=host, port=resolved_port, log_level="warning")
     except KeyboardInterrupt:
         pass
     finally:
         _stop_change_detector.set()
         for project in data_service.store.list_projects():
             _BACKGROUND_SUPERVISOR.stop(project.id)
-        server.server_close()
 
 
 def _auto_start_supervisors(data_service: HarnessUIDataService, ctx) -> None:
