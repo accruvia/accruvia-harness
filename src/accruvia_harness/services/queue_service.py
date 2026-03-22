@@ -23,7 +23,7 @@ class QueueService:
         self,
         project_id: str | None = None,
         worker_id: str = "local-worker",
-        lease_seconds: int = 300,
+        lease_seconds: int = 3600,
         exclude_task_ids: set[str] | None = None,
         progress_callback=None,
     ) -> dict[str, object] | None:
@@ -110,7 +110,7 @@ class QueueService:
         limit: int,
         project_id: str | None = None,
         worker_id: str = "local-worker",
-        lease_seconds: int = 300,
+        lease_seconds: int = 3600,
     ) -> list[dict[str, object]]:
         processed: list[dict[str, object]] = []
         seen_task_ids: set[str] = set()
