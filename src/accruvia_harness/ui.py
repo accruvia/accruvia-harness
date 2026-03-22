@@ -11862,8 +11862,14 @@ class HarnessUIDataService:
             )
             remediation_counts = {"total": len(remediation_tasks), "completed": 0, "active": 0, "pending": 0, "failed": 0}
             for task in remediation_tasks:
-                if task.status.value in remediation_counts:
-                    remediation_counts[task.status.value] += 1
+                effective = task.status.value
+                if effective == "failed":
+                    metadata = task.external_ref_metadata if isinstance(task.external_ref_metadata, dict) else {}
+                    disposition = metadata.get("failed_task_disposition") if isinstance(metadata.get("failed_task_disposition"), dict) else None
+                    if disposition and str(disposition.get("kind") or "") == "waive_obsolete":
+                        effective = "completed"
+                if effective in remediation_counts:
+                    remediation_counts[effective] += 1
             needs_remediation = verdict_counts["concern"] > 0 or verdict_counts["remediation_required"] > 0
             status = "running"
             if failed is not None:
