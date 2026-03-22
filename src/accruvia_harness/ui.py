@@ -8158,9 +8158,11 @@ class HarnessUIDataService:
         try:
             linked_tasks = [task for task in self.store.list_tasks(objective.project_id) if task.objective_id == objective.id]
             previous_review = self._promotion_review_for_objective(objective_id, linked_tasks)
-            prior_round = (previous_review.get("review_rounds") or [None])[0]
-            if isinstance(prior_round, dict) and prior_round.get("review_id"):
-                self._record_objective_review_worker_responses(objective, prior_round)
+            prior_rounds = previous_review.get("review_rounds") or []
+            for prior_round in prior_rounds:
+                if isinstance(prior_round, dict) and prior_round.get("review_id") and str(prior_round.get("review_id") or "") != review_id:
+                    self._record_objective_review_worker_responses(objective, prior_round)
+                    break
             packets = self._generate_objective_review_packets(objective_id, review_id)
             packet_record_ids: list[str] = []
             for packet in packets:
@@ -10809,12 +10811,25 @@ class HarnessUIDataService:
             "summary: short paragraph\n"
             "findings: array of short strings\n"
             "evidence: array of short strings\n"
-            "required_artifact_type: REQUIRED for concern and remediation_required. Name the exact artifact type that must be produced.\n"
+            "required_artifact_type: REQUIRED for concern and remediation_required. Must be one of the artifact types the harness can actually produce: "
+            "plan, report, test_execution_report, ui_workflow_test_report, ui_workflow_e2e_trace_report, "
+            "stale_recovery_test_evidence, completed_task_reconciliation_report, workflow_implementation_evidence_bundle. "
+            "Do NOT invent artifact types that are not in this list — the remediation worker can only produce these types.\n"
             "artifact_schema: REQUIRED for concern and remediation_required. JSON object with at least type, description, and required_fields.\n"
             "closure_criteria: REQUIRED for concern and remediation_required. Must be concrete and measurable.\n"
             "evidence_required: REQUIRED for concern and remediation_required. Must name the artifact or proof required to clear the finding.\n"
             "repeat_reason: REQUIRED when verdict is concern or remediation_required and progress_status is improving, still_blocking, or resolved.\n"
-            "Reject vague language. Do not say 'improve testing' or 'more evidence' without a measurable closure target.\n\n"
+            "Reject vague language. Do not say 'improve testing' or 'more evidence' without a measurable closure target.\n"
+            "\n"
+            "CONVERSATION RULES — read worker responses as replies to your prior demands:\n"
+            "Previous review rounds include worker_responses from remediation tasks. These are the worker's replies to your evidence contracts.\n"
+            "If a worker produced the artifact you asked for, check whether it satisfies your closure criteria. If it does, mark the dimension resolved/pass.\n"
+            "If a worker produced a DIFFERENT artifact type than you demanded, read their response as pushback — they may be telling you the demanded type is not achievable. "
+            "Consider whether the substitute artifact adequately demonstrates the same concern is addressed. If so, accept it and move to pass.\n"
+            "If a worker completed the task but produced no matching artifact, treat that as the worker saying the demand is infeasible. "
+            "Revise your required_artifact_type to something from the producible list above, or accept existing evidence and move to pass.\n"
+            "Do NOT repeat the same still_blocking concern for more than 3 consecutive rounds without revising your evidence contract. "
+            "If you have demanded the same artifact 3+ times and the worker keeps producing something else, your demand is wrong — revise it or accept what was produced.\n\n"
             f"Objective title: {objective.title}\n"
             f"Objective summary: {objective.summary}\n"
             f"Objective status: {objective.status.value}\n"
