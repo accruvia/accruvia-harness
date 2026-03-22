@@ -1030,7 +1030,13 @@ class HarnessUIDataServiceTests(unittest.TestCase):
                                 "closure_criteria": "A recorded QA review packet must cite completed-task test evidence and conclude the concern is resolved or pass.",
                                 "evidence_required": "A persisted QA review packet referencing completed task test artifacts.",
                                 "repeat_reason": "",
-                            }
+                            },
+                            {"reviewer": "Intent agent", "dimension": "intent_fidelity", "verdict": "pass", "progress_status": "not_applicable", "summary": "Intent aligned.", "findings": [], "evidence": []},
+                            {"reviewer": "E2E agent", "dimension": "integration_e2e_coverage", "verdict": "pass", "progress_status": "not_applicable", "summary": "E2E covered.", "findings": [], "evidence": []},
+                            {"reviewer": "Security agent", "dimension": "security", "verdict": "pass", "progress_status": "not_applicable", "summary": "No issues.", "findings": [], "evidence": []},
+                            {"reviewer": "DevOps agent", "dimension": "devops", "verdict": "pass", "progress_status": "not_applicable", "summary": "No issues.", "findings": [], "evidence": []},
+                            {"reviewer": "Atomic agent", "dimension": "atomic_fidelity", "verdict": "pass", "progress_status": "not_applicable", "summary": "Atomic aligned.", "findings": [], "evidence": []},
+                            {"reviewer": "Arch agent", "dimension": "code_structure", "verdict": "pass", "progress_status": "not_applicable", "summary": "Structure sound.", "findings": [], "evidence": []},
                         ],
                     }
                 ),
@@ -1041,10 +1047,11 @@ class HarnessUIDataServiceTests(unittest.TestCase):
 
         packets = self.service._generate_objective_review_packets(self.objective.id, "review_test")
 
-        self.assertEqual(1, len(packets))
-        self.assertEqual("QA agent", packets[0]["reviewer"])
+        self.assertEqual(7, len(packets))
+        dimensions = {p["dimension"] for p in packets}
+        self.assertEqual({"intent_fidelity", "unit_test_coverage", "integration_e2e_coverage", "security", "devops", "atomic_fidelity", "code_structure"}, dimensions)
         self.assertEqual(2, len(router.prompts))
-        self.assertIn("failed packet validation", router.prompts[-1].lower())
+        self.assertIn("failed", router.prompts[-1].lower())
 
     def test_ui_responder_retries_until_response_is_valid(self) -> None:
         router = SequenceLLMRouter(

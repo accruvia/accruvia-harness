@@ -8158,6 +8158,9 @@ class HarnessUIDataService:
         try:
             linked_tasks = [task for task in self.store.list_tasks(objective.project_id) if task.objective_id == objective.id]
             previous_review = self._promotion_review_for_objective(objective_id, linked_tasks)
+            prior_round = (previous_review.get("review_rounds") or [None])[0]
+            if isinstance(prior_round, dict) and prior_round.get("review_id"):
+                self._record_objective_review_worker_responses(objective, prior_round)
             packets = self._generate_objective_review_packets(objective_id, review_id)
             packet_record_ids: list[str] = []
             for packet in packets:
@@ -8315,22 +8318,37 @@ class HarnessUIDataService:
 
             def _review_candidate(candidate: dict[str, object], _attempt: int, _history) -> dict[str, object]:
                 packets = list(candidate.get("packets") or [])
-                if packets:
+                if not packets:
                     return {
-                        "ready_for_human_review": True,
-                        "deterministic_review": {"findings": []},
+                        "ready_for_human_review": False,
+                        "deterministic_review": {
+                            "findings": [
+                                {
+                                    "severity": "major",
+                                    "summary": "Objective review packets failed validation against the required packet schema.",
+                                }
+                            ]
+                        },
+                        "llm_review": {"findings": []},
+                    }
+                covered = {str(p.get("dimension") or "") for p in packets}
+                missing = _OBJECTIVE_REVIEW_DIMENSIONS - covered
+                if missing:
+                    return {
+                        "ready_for_human_review": False,
+                        "deterministic_review": {
+                            "findings": [
+                                {
+                                    "severity": "major",
+                                    "summary": f"Response is missing required review dimensions: {', '.join(sorted(missing))}. All 7 dimensions must appear.",
+                                }
+                            ]
+                        },
                         "llm_review": {"findings": []},
                     }
                 return {
-                    "ready_for_human_review": False,
-                    "deterministic_review": {
-                        "findings": [
-                            {
-                                "severity": "major",
-                                "summary": "Objective review packets failed validation against the required packet schema.",
-                            }
-                        ]
-                    },
+                    "ready_for_human_review": True,
+                    "deterministic_review": {"findings": []},
                     "llm_review": {"findings": []},
                 }
 
@@ -10780,9 +10798,10 @@ class HarnessUIDataService:
             "Do not treat an actively running review/remediation cycle as proof of failure on its own.\n"
             "If the current lifecycle is still in progress, distinguish missing implementation from missing final evidence.\n"
             "Return JSON only with keys: summary, packets.\n"
-            "packets must be an array. Each packet must contain reviewer, dimension, verdict, progress_status, severity, owner_scope, summary, findings, evidence, required_artifact_type, artifact_schema, closure_criteria, evidence_required.\n"
+            "packets must be an array with EXACTLY 7 packets — one for each dimension listed below. Every dimension MUST appear. If a dimension has no findings, return it with verdict pass.\n"
+            "Each packet must contain reviewer, dimension, verdict, progress_status, severity, owner_scope, summary, findings, evidence, required_artifact_type, artifact_schema, closure_criteria, evidence_required.\n"
             "reviewer: short reviewer name\n"
-            "dimension: one of intent_fidelity, unit_test_coverage, integration_e2e_coverage, security, devops, atomic_fidelity, code_structure\n"
+            "dimension: REQUIRED dimensions (all 7 must appear): intent_fidelity, unit_test_coverage, integration_e2e_coverage, security, devops, atomic_fidelity, code_structure\n"
             "verdict: one of pass, concern, remediation_required\n"
             "progress_status: one of new_concern, still_blocking, improving, resolved, not_applicable\n"
             "severity: one of low, medium, high\n"
