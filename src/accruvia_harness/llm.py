@@ -52,6 +52,20 @@ def _coerce_metric_number(value: object) -> float:
         return 0.0
 
 
+def _try_parse_cli_json_output(stdout: str) -> dict[str, object] | None:
+    """Try to parse stdout as a CLI JSON envelope (e.g. claude --output-format json)."""
+    stripped = stdout.strip()
+    if not stripped.startswith("{"):
+        return None
+    try:
+        payload = json.loads(stripped)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if isinstance(payload, dict) and "result" in payload and "usage" in payload:
+        return payload
+    return None
+
+
 def _coerce_subprocess_output(value: object) -> str:
     if value is None:
         return ""
@@ -211,6 +225,30 @@ class CommandLLMExecutor:
                 metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 metadata = {}
+
+        if not metadata:
+            cli_json = _try_parse_cli_json_output(completed.stdout)
+            if cli_json is not None:
+                if not (response_path.exists() and response_path.stat().st_size > 0):
+                    response_text = str(cli_json.get("result") or "")
+                    response_path.write_text(response_text, encoding="utf-8")
+                usage = cli_json.get("usage") if isinstance(cli_json.get("usage"), dict) else {}
+                model_usage = cli_json.get("modelUsage") if isinstance(cli_json.get("modelUsage"), dict) else {}
+                metadata = {
+                    "model": str(cli_json.get("model") or next(iter(model_usage), "") or ""),
+                    "cost_usd": float(cli_json.get("total_cost_usd") or 0.0),
+                    "prompt_tokens": int(usage.get("input_tokens") or 0),
+                    "completion_tokens": int(usage.get("output_tokens") or 0),
+                    "total_tokens": int(usage.get("input_tokens") or 0) + int(usage.get("output_tokens") or 0),
+                    "latency_ms": float(cli_json.get("duration_api_ms") or cli_json.get("duration_ms") or 0.0),
+                    "cache_creation_tokens": int(usage.get("cache_creation_input_tokens") or 0),
+                    "cache_read_tokens": int(usage.get("cache_read_input_tokens") or 0),
+                    "session_id": str(cli_json.get("session_id") or ""),
+                }
+                try:
+                    metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+                except OSError:
+                    pass
 
         if completed.returncode != 0:
             raise LLMExecutionError(
