@@ -8568,7 +8568,13 @@ class HarnessUIDataService:
         artifact_type = str(evidence_contract.get("required_artifact_type") or "review_artifact")
         artifact_schema = evidence_contract.get("artifact_schema") if isinstance(evidence_contract.get("artifact_schema"), dict) else {}
         required_fields = [str(item).strip() for item in list(artifact_schema.get("required_fields") or []) if str(item).strip()]
-        lines = [f"Produce the required review evidence artifact `{artifact_type}` for this objective-promotion finding."]
+        lines = [
+            f"A promotion reviewer raised findings that must be addressed before this objective can be promoted.",
+            f"Read the findings below carefully. They describe concrete problems the reviewer found in the actual codebase.",
+            f"Your job is to FIX the problems described in the findings — write code, refactor, add tests — whatever the findings require.",
+            f"After making the fixes, produce a `{artifact_type}` artifact documenting what you changed and proving the closure criteria are met.",
+            f"Do NOT fabricate evidence. If the reviewer says a function doesn't exist, you must CREATE it, not write a report claiming it exists.",
+        ]
         if summary:
             lines.append(f"Reviewer summary: {summary}")
         if findings:
@@ -8580,7 +8586,7 @@ class HarnessUIDataService:
             lines.append(f"Evidence required: {evidence_contract['evidence_required']}")
         if required_fields:
             lines.append("Artifact schema fields: " + ", ".join(required_fields))
-        lines.append("Do not answer this generically. Produce the exact artifact type named above.")
+        lines.append("Address the findings FIRST by making real code changes, THEN produce the evidence artifact showing what you did.")
         return "\n".join(lines)
 
     def _record_objective_review_cycle_artifact(

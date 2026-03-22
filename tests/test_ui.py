@@ -1328,7 +1328,7 @@ class HarnessUIDataServiceTests(unittest.TestCase):
             if task["objective_id"] == self.objective.id and task["strategy"] == "objective_review_remediation"
         ]
         self.assertEqual(1, len(remediation_tasks))
-        self.assertIn("Produce the required review evidence artifact `objective_review_packet`", remediation_tasks[0]["objective"])
+        self.assertIn("produce a `objective_review_packet` artifact", remediation_tasks[0]["objective"])
 
     def test_queue_objective_review_marks_usage_unreported_when_backend_returns_zero_usage(self) -> None:
         fake_router = ZeroUsageObjectiveReviewRouter("{}")
