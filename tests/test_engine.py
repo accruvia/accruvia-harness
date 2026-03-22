@@ -2079,7 +2079,7 @@ class HarnessEngineTests(unittest.TestCase):
         task = engine.create_task_with_policy(
             project_id=self.project_id,
             title="Executor failure",
-            objective="Do not burn retry budget on infrastructure failures",
+            objective="Retry infrastructure failures within attempt budget",
             priority=100,
             parent_task_id=None,
             source_run_id=None,
@@ -2094,9 +2094,8 @@ class HarnessEngineTests(unittest.TestCase):
 
         decision = self.store.list_decisions(run.id)[0]
         self.assertEqual("blocked", run.status.value)
-        self.assertEqual("fail", decision.action.value)
-        self.assertEqual("failed", self.store.get_task(task.id).status.value)
-        # Infrastructure failure info is now recorded in attempt_metadata
+        self.assertEqual("retry", decision.action.value, "Infrastructure failures should retry, not fail immediately")
+        self.assertEqual("pending", self.store.get_task(task.id).status.value, "Task should be pending for retry")
         updated_task = self.store.get_task(task.id)
         self.assertIn("infrastructure_failure", updated_task.attempt_metadata)
 
@@ -2109,7 +2108,7 @@ class HarnessEngineTests(unittest.TestCase):
         task = engine.create_task_with_policy(
             project_id=self.project_id,
             title="Executor exit failure",
-            objective="Persist actionable failure evidence for executor exits",
+            objective="Persist actionable failure evidence and retry",
             priority=100,
             parent_task_id=None,
             source_run_id=None,
@@ -2131,10 +2130,41 @@ class HarnessEngineTests(unittest.TestCase):
         report_artifact = next(artifact for artifact in artifacts if artifact.kind == "report")
         self.assertTrue(Path(report_artifact.path).exists())
         self.assertTrue(evaluations[0].details["infrastructure_failure"])
-        self.assertEqual("fail", decisions[0].action.value)
-        # Infrastructure failure info is now recorded in attempt_metadata instead of child tasks
+        self.assertEqual("retry", decisions[0].action.value, "Infrastructure failures should retry within budget")
         updated_task = self.store.get_task(task.id)
         self.assertIn("infrastructure_failure", updated_task.attempt_metadata)
+
+    def test_infrastructure_failure_only_fails_when_budget_exhausted(self) -> None:
+        engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-infra-exhaust",
+            worker=InfrastructureBlockedWorker(),
+        )
+        task = engine.create_task_with_policy(
+            project_id=self.project_id,
+            title="Infra exhaust test",
+            objective="Infrastructure failures must exhaust full retry budget before failing",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=2,
+            required_artifacts=["plan", "report"],
+        )
+
+        # Attempt 1: should retry
+        run1 = engine.run_once(task.id)
+        decision1 = self.store.list_decisions(run1.id)[0]
+        self.assertEqual("retry", decision1.action.value)
+        self.assertEqual("pending", self.store.get_task(task.id).status.value)
+
+        # Attempt 2: budget exhausted, should fail
+        run2 = engine.run_once(task.id)
+        decision2 = self.store.list_decisions(run2.id)[0]
+        self.assertEqual("fail", decision2.action.value)
+        self.assertEqual("failed", self.store.get_task(task.id).status.value)
 
     def test_executor_repair_task_does_not_spawn_recursive_repair_follow_on(self) -> None:
         engine = HarnessEngine(

@@ -154,7 +154,7 @@ class Task:
     validation_mode: str = "default_focused"
     scope: dict[str, Any] = field(default_factory=dict)
     strategy: str = "default"
-    max_attempts: int = 3
+    max_attempts: int = 10
     max_branches: int = 1
     required_artifacts: list[str] = field(default_factory=lambda: ["plan", "report"])
     attempt_metadata: dict[str, Any] = field(default_factory=dict)

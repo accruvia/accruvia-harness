@@ -157,9 +157,14 @@ class DefaultAnalyzer:
 class DefaultDecider:
     def decide(self, analysis: AnalyzeResult, run: Run, task: Task) -> DecideResult:
         if bool(analysis.details.get("infrastructure_failure")):
+            if run.attempt < task.max_attempts:
+                return DecideResult(
+                    action=DecisionAction.RETRY,
+                    rationale="Infrastructure failure detected; retrying since attempt budget remains.",
+                )
             return DecideResult(
                 action=DecisionAction.FAIL,
-                rationale="Executor/infrastructure failure captured; retry suppressed in favor of bounded remediation.",
+                rationale="Infrastructure failure persisted through all attempts.",
             )
         if analysis.verdict == EvaluationVerdict.ACCEPTABLE:
             return DecideResult(
