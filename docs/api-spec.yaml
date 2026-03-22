@@ -1,0 +1,672 @@
+openapi: 3.0.3
+info:
+  title: Accruvia Harness API
+  description: |
+    AI-powered development orchestration system. Objectives get decomposed into
+    atomic tasks, executed by LLM workers, validated, and promoted through a
+    7-dimension review board. The UI provides real-time visibility into the
+    full lifecycle: planning → interrogation → mermaid review → atomic
+    decomposition → execution → promotion review → repo promotion.
+  version: 0.1.0
+
+servers:
+  - url: http://localhost:9100
+    description: Local development
+
+paths:
+  /api/version:
+    get:
+      summary: Server version and commit
+      tags: [System]
+      responses:
+        '200':
+          description: Version info
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  commit: { type: string }
+                  version: { type: string }
+
+  /api/harness:
+    get:
+      summary: Global harness overview — all projects with metrics
+      tags: [Dashboard]
+      description: |
+        Returns portfolio-level summary: project count, per-project metrics
+        (pending/active/completed/failed task counts), and global aggregates.
+        This is the landing page data.
+      responses:
+        '200':
+          description: Portfolio summary
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  project_count: { type: integer }
+                  projects:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ProjectSummary'
+
+  /api/projects:
+    get:
+      summary: List all projects
+      tags: [Projects]
+      responses:
+        '200':
+          description: Project list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  projects:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Project'
+
+  /api/projects/{projectId}/workspace:
+    get:
+      summary: Full project workspace — objectives, tasks, reviews, workflow state
+      tags: [Projects]
+      description: |
+        The primary data endpoint. Returns everything needed to render the
+        project dashboard: all objectives with their execution gates, task
+        lists with run history, promotion review state with report cards,
+        workflow readiness checks, and supervisor status. Also triggers
+        automatic review resume and atomic generation for eligible objectives.
+      parameters:
+        - $ref: '#/components/parameters/projectId'
+      responses:
+        '200':
+          description: Full workspace payload
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectWorkspace'
+
+  /api/projects/{projectId}/objectives:
+    post:
+      summary: Create a new objective
+      tags: [Objectives]
+      parameters:
+        - $ref: '#/components/parameters/projectId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, summary]
+              properties:
+                title: { type: string }
+                summary: { type: string }
+                priority: { type: integer, default: 100 }
+      responses:
+        '200':
+          description: Created objective
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  objective:
+                    $ref: '#/components/schemas/Objective'
+
+  /api/projects/{projectId}/comments:
+    post:
+      summary: Post an operator comment (triggers responder + optional mermaid update)
+      tags: [Conversation]
+      description: |
+        The primary operator interaction point. Comments can be general or
+        anchored to a specific objective. The harness AI responds, and if
+        the comment references a mermaid diagram change, triggers async
+        mermaid proposal generation. Also checks if interrogation should
+        auto-complete based on answered questions.
+      parameters:
+        - $ref: '#/components/parameters/projectId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body: { type: string }
+                objective_id: { type: string }
+                author: { type: string }
+      responses:
+        '200':
+          description: Responder reply with optional mermaid proposal
+
+  /api/projects/{projectId}/supervise:
+    post:
+      summary: Start the background supervisor for task execution
+      tags: [Execution]
+      description: |
+        Starts the supervisor loop which acquires pending tasks, executes
+        them via LLM workers, validates output, and makes retry/promote/fail
+        decisions. Runs continuously until stopped.
+      parameters:
+        - $ref: '#/components/parameters/projectId'
+      responses:
+        '200':
+          description: Supervisor state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SupervisorState'
+
+  /api/projects/{projectId}/supervise/stop:
+    post:
+      summary: Stop the background supervisor
+      tags: [Execution]
+      parameters:
+        - $ref: '#/components/parameters/projectId'
+      responses:
+        '200':
+          description: Supervisor stopped
+
+  /api/projects/{projectId}/supervisor:
+    get:
+      summary: Get current supervisor state
+      tags: [Execution]
+      parameters:
+        - $ref: '#/components/parameters/projectId'
+      responses:
+        '200':
+          description: Supervisor state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SupervisorState'
+
+  /api/projects/{projectId}/retry-failed:
+    post:
+      summary: Retry all failed tasks in the project
+      tags: [Execution]
+      parameters:
+        - $ref: '#/components/parameters/projectId'
+      responses:
+        '200':
+          description: Retry results
+
+  /api/projects/{projectId}/repo-settings:
+    post:
+      summary: Update project repository settings
+      tags: [Projects]
+      parameters:
+        - $ref: '#/components/parameters/projectId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                promotion_mode: { type: string, enum: [direct_main, branch_only, branch_and_pr] }
+                base_branch: { type: string }
+                repo_name: { type: string }
+                repo_provider: { type: string }
+      responses:
+        '200':
+          description: Updated project
+
+  /api/objectives/{objectiveId}/intent:
+    put:
+      summary: Create or update the intent model for an objective
+      tags: [Objectives]
+      description: |
+        Defines the operator's success criteria, non-negotiables, and
+        frustration signals. Required before the execution gate opens.
+      parameters:
+        - $ref: '#/components/parameters/objectiveId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [intent_summary]
+              properties:
+                intent_summary: { type: string }
+                success_definition: { type: string }
+                non_negotiables: { type: array, items: { type: string } }
+                frustration_signals: { type: array, items: { type: string } }
+      responses:
+        '200':
+          description: Created intent model
+
+  /api/objectives/{objectiveId}/interrogation:
+    post:
+      summary: Complete the interrogation review
+      tags: [Objectives]
+      description: |
+        Marks interrogation as complete. The LLM red-teams the objective
+        and generates clarifying questions. Auto-completes when sufficient
+        operator comments answer the questions.
+      parameters:
+        - $ref: '#/components/parameters/objectiveId'
+      responses:
+        '200':
+          description: Interrogation review result
+
+  /api/objectives/{objectiveId}/mermaid:
+    put:
+      summary: Update mermaid diagram status (draft → paused → finished)
+      tags: [Objectives]
+      description: |
+        Controls the mermaid workflow diagram lifecycle. Setting status to
+        "finished" auto-completes interrogation and triggers atomic
+        decomposition. Setting to "paused" pauses the objective.
+      parameters:
+        - $ref: '#/components/parameters/objectiveId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [draft, investigating, paused, finished] }
+                summary: { type: string }
+                blocking_reason: { type: string }
+      responses:
+        '200':
+          description: Updated mermaid artifact
+
+  /api/objectives/{objectiveId}/mermaid/proposal/accept:
+    post:
+      summary: Accept a proposed mermaid diagram update
+      tags: [Objectives]
+      parameters:
+        - $ref: '#/components/parameters/objectiveId'
+      responses:
+        '200':
+          description: Proposal accepted and promoted to current version
+
+  /api/objectives/{objectiveId}/mermaid/proposal/reject:
+    post:
+      summary: Reject or rewind a mermaid proposal
+      tags: [Objectives]
+      parameters:
+        - $ref: '#/components/parameters/objectiveId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                hard_rewind: { type: boolean, description: Rewind to last approved version }
+      responses:
+        '200':
+          description: Proposal rejected
+
+  /api/objectives/{objectiveId}/promote:
+    post:
+      summary: Promote objective code to repository
+      tags: [Promotion]
+      description: |
+        Triggers repo-level promotion: syncs completed task outputs to a
+        branch, runs pre-push checks, and either merges to main or opens
+        a PR depending on project promotion_mode.
+      parameters:
+        - $ref: '#/components/parameters/objectiveId'
+      responses:
+        '200':
+          description: Promotion result
+
+  /api/objectives/{objectiveId}/promotion/force:
+    post:
+      summary: Force-approve an objective review (operator override)
+      tags: [Promotion]
+      description: |
+        Overrides the review board's verdict and marks the objective as
+        promotion-approved regardless of outstanding concerns.
+      parameters:
+        - $ref: '#/components/parameters/objectiveId'
+      responses:
+        '200':
+          description: Override applied
+
+  /api/tasks/{taskId}/run:
+    post:
+      summary: Manually trigger a single task execution
+      tags: [Execution]
+      parameters:
+        - $ref: '#/components/parameters/taskId'
+      responses:
+        '200':
+          description: Run result
+
+  /api/tasks/{taskId}/retry:
+    post:
+      summary: Retry a failed task
+      tags: [Execution]
+      parameters:
+        - $ref: '#/components/parameters/taskId'
+      responses:
+        '200':
+          description: Task reset to pending
+
+  /api/tasks/{taskId}/promote:
+    post:
+      summary: Promote a single task's code output
+      tags: [Promotion]
+      parameters:
+        - $ref: '#/components/parameters/taskId'
+      responses:
+        '200':
+          description: Task promotion result
+
+  /api/runs/{runId}/cli-output:
+    get:
+      summary: Get worker stdout/stderr for a specific run
+      tags: [Execution]
+      parameters:
+        - $ref: '#/components/parameters/runId'
+      responses:
+        '200':
+          description: CLI output text
+
+  /api/events:
+    get:
+      summary: Server-Sent Events stream for real-time updates
+      tags: [System]
+      description: |
+        SSE endpoint for live feed. Emits events when tasks complete,
+        reviews finish, supervisor state changes, etc. The UI uses this
+        for real-time dashboard updates without polling.
+      responses:
+        '200':
+          description: SSE stream
+
+  /api/cli/command:
+    post:
+      summary: Execute a CLI command through the UI
+      tags: [System]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                command: { type: string }
+      responses:
+        '200':
+          description: Command output
+
+components:
+  parameters:
+    projectId:
+      name: projectId
+      in: path
+      required: true
+      schema: { type: string }
+    objectiveId:
+      name: objectiveId
+      in: path
+      required: true
+      schema: { type: string }
+    taskId:
+      name: taskId
+      in: path
+      required: true
+      schema: { type: string }
+    runId:
+      name: runId
+      in: path
+      required: true
+      schema: { type: string }
+
+  schemas:
+    Project:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string }
+        adapter_name: { type: string }
+        workspace_policy: { type: string, enum: [isolated_required, shared_allowed] }
+        promotion_mode: { type: string, enum: [direct_main, branch_only, branch_and_pr] }
+        max_concurrent_tasks: { type: integer }
+        base_branch: { type: string }
+        repo_name: { type: string, nullable: true }
+        repo_provider: { type: string, nullable: true }
+
+    ProjectSummary:
+      type: object
+      properties:
+        project: { $ref: '#/components/schemas/Project' }
+        metrics:
+          type: object
+          properties:
+            tasks_by_status:
+              type: object
+              properties:
+                pending: { type: integer }
+                active: { type: integer }
+                completed: { type: integer }
+                failed: { type: integer }
+
+    Objective:
+      type: object
+      properties:
+        id: { type: string }
+        project_id: { type: string }
+        title: { type: string }
+        summary: { type: string }
+        priority: { type: integer }
+        status: { type: string, enum: [open, investigating, planning, executing, paused, resolved] }
+        created_at: { type: string, format: date-time }
+
+    ProjectWorkspace:
+      type: object
+      description: |
+        The main dashboard payload. Contains everything needed to render
+        the full project view including objective lifecycle state.
+      properties:
+        project: { $ref: '#/components/schemas/Project' }
+        objectives:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              title: { type: string }
+              status: { type: string }
+              execution_gate:
+                type: object
+                description: Gate checks that must pass before tasks execute
+                properties:
+                  ready: { type: boolean }
+                  checks:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        key: { type: string }
+                        label: { type: string }
+                        ok: { type: boolean }
+                        detail: { type: string }
+              interrogation_review:
+                type: object
+                properties:
+                  completed: { type: boolean }
+                  summary: { type: string }
+                  questions: { type: array, items: { type: string } }
+              mermaid:
+                type: object
+                properties:
+                  status: { type: string, enum: [draft, investigating, paused, finished] }
+                  content: { type: string, description: Mermaid diagram source }
+                  version: { type: integer }
+                  proposal: { type: object, nullable: true }
+              atomic_generation:
+                type: object
+                properties:
+                  status: { type: string, enum: [idle, running, completed, failed] }
+              promotion_review:
+                type: object
+                description: |
+                  The 7-dimension review board state. Each review round
+                  produces packets from 7 reviewers grading the objective.
+                properties:
+                  ready: { type: boolean }
+                  phase: { type: string }
+                  can_start_new_round: { type: boolean }
+                  review_clear: { type: boolean }
+                  objective_review_state:
+                    type: object
+                    properties:
+                      status: { type: string, enum: [idle, running, completed] }
+                      review_id: { type: string }
+                  verdict_counts:
+                    type: object
+                    properties:
+                      pass: { type: integer }
+                      concern: { type: integer }
+                      remediation_required: { type: integer }
+                  review_rounds:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        review_id: { type: string }
+                        round_number: { type: integer }
+                        status: { type: string, enum: [running, remediating, ready_for_rerun, needs_remediation, passed, failed] }
+                        packets:
+                          type: array
+                          items:
+                            $ref: '#/components/schemas/ReviewPacket'
+                        remediation_counts:
+                          type: object
+                          properties:
+                            total: { type: integer }
+                            completed: { type: integer }
+                            active: { type: integer }
+                            pending: { type: integer }
+                            failed: { type: integer }
+                        worker_responses:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              dimension: { type: string }
+                              exact_artifact_produced: { type: object }
+                              closure_mapping: { type: string }
+              workflow_status:
+                type: object
+                properties:
+                  planning:
+                    type: object
+                    properties:
+                      ready: { type: boolean }
+                      checks: { type: array }
+                  execution:
+                    type: object
+                    properties:
+                      ready: { type: boolean }
+                      checks: { type: array }
+                  review:
+                    type: object
+                    properties:
+                      ready: { type: boolean }
+                      checks: { type: array }
+        tasks:
+          type: array
+          items:
+            $ref: '#/components/schemas/Task'
+        supervisor:
+          $ref: '#/components/schemas/SupervisorState'
+
+    Task:
+      type: object
+      properties:
+        id: { type: string }
+        title: { type: string }
+        objective: { type: string, description: Task objective/instructions }
+        status: { type: string, enum: [pending, active, completed, failed] }
+        strategy: { type: string }
+        max_attempts: { type: integer }
+        objective_id: { type: string, nullable: true }
+        parent_task_id: { type: string, nullable: true }
+        validation_profile: { type: string }
+        runs:
+          type: array
+          items:
+            $ref: '#/components/schemas/Run'
+
+    Run:
+      type: object
+      properties:
+        id: { type: string }
+        task_id: { type: string }
+        status: { type: string, enum: [planning, working, validating, analyzing, deciding, completed, failed, blocked, disposed] }
+        attempt: { type: integer }
+        summary: { type: string }
+        artifacts:
+          type: array
+          items:
+            type: object
+            properties:
+              kind: { type: string }
+              path: { type: string }
+        evaluation:
+          type: object
+          nullable: true
+          properties:
+            verdict: { type: string, enum: [acceptable, incomplete, failed, blocked] }
+            confidence: { type: number }
+        decision:
+          type: object
+          nullable: true
+          properties:
+            action: { type: string, enum: [promote, retry, fail, branch] }
+            rationale: { type: string }
+
+    ReviewPacket:
+      type: object
+      description: |
+        A single reviewer's assessment of one dimension. 7 packets per
+        review round, one for each dimension.
+      properties:
+        reviewer: { type: string, description: "Short reviewer name (e.g. QA agent)" }
+        dimension:
+          type: string
+          enum: [intent_fidelity, unit_test_coverage, integration_e2e_coverage, security, devops, atomic_fidelity, code_structure]
+        verdict: { type: string, enum: [pass, concern, remediation_required] }
+        progress_status: { type: string, enum: [new_concern, still_blocking, improving, resolved, not_applicable] }
+        severity: { type: string, enum: [low, medium, high, ""] }
+        summary: { type: string }
+        findings: { type: array, items: { type: string } }
+        evidence: { type: array, items: { type: string } }
+        required_artifact_type: { type: string }
+        closure_criteria: { type: string }
+        evidence_required: { type: string }
+        repeat_reason: { type: string }
+        llm_usage:
+          type: object
+          properties:
+            cost_usd: { type: number }
+            prompt_tokens: { type: integer }
+            completion_tokens: { type: integer }
+            total_tokens: { type: integer }
+            latency_ms: { type: number }
+
+    SupervisorState:
+      type: object
+      properties:
+        started: { type: boolean }
+        supervisor:
+          type: object
+          properties:
+            state: { type: string, enum: [running, stopping, stopped] }
+            started_at: { type: string, format: date-time }
+            processed_count: { type: integer }
+            last_event: { type: string }
+            last_event_at: { type: string, format: date-time }
