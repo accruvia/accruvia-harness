@@ -59,6 +59,7 @@ def _discover_required_artifacts(
     existing: list[tuple[str, str, str]],
 ) -> list[tuple[str, str, str]]:
     seen_kinds = {kind for kind, _, _ in existing}
+    report_path = next((path for kind, path, _ in existing if kind == "report"), "")
     discovered: list[tuple[str, str, str]] = []
     for kind in task.required_artifacts:
         if kind in seen_kinds:
@@ -72,6 +73,9 @@ def _discover_required_artifacts(
                     break
             if kind in seen_kinds:
                 break
+        if kind not in seen_kinds and kind not in ("plan", "report") and report_path and Path(report_path).is_file():
+            discovered.append((kind, report_path, f"Aliased report as required artifact '{kind}'"))
+            seen_kinds.add(kind)
     return discovered
 
 
