@@ -1858,11 +1858,12 @@ class HarnessEngineTests(unittest.TestCase):
 
         summary = service.cleanup_stale_run_workspaces()
 
-        self.assertEqual(1, summary["removed"])
+        self.assertEqual(0, summary["removed"])
         self.assertEqual(0, summary["removed_orphaned"])
         self.assertEqual(1, summary["skipped_active"])
         self.assertEqual(1, summary["skipped_artifact_backed"])
-        self.assertFalse((runs_root / completed_run.id / "workspace").exists())
+        self.assertEqual(1, summary["skipped_unpromoted"])
+        self.assertTrue((runs_root / completed_run.id / "workspace").exists(), "Unpromoted completed run workspace must be preserved")
         self.assertTrue((runs_root / active_run.id / "workspace").exists())
         self.assertTrue((runs_root / kept_run.id / "workspace").exists())
 

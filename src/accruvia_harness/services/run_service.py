@@ -89,6 +89,7 @@ class RunService:
             "removed_orphaned": 0,
             "skipped_active": 0,
             "skipped_artifact_backed": 0,
+            "skipped_unpromoted": 0,
             "missing_run": 0,
         }
         if not runs_root.exists():
@@ -115,9 +116,20 @@ class RunService:
             if self._workspace_contains_referenced_artifacts(run.id, workspace_dir):
                 summary["skipped_artifact_backed"] += 1
                 continue
+            if run.status == RunStatus.COMPLETED and not self._run_is_promoted(run):
+                summary["skipped_unpromoted"] += 1
+                continue
             self._remove_workspace_dir(run.id, workspace_dir)
             summary["removed"] += 1
         return summary
+
+    def _run_is_promoted(self, run) -> bool:
+        """Check if this run's task has been promoted (code changes landed on main)."""
+        task = self.store.get_task(run.task_id)
+        if task is None:
+            return False
+        promotions = self.store.list_promotions(task.id)
+        return any(p.status.value == "approved" for p in promotions)
 
     def _workspace_contains_referenced_artifacts(self, run_id: str, workspace_dir: Path) -> bool:
         workspace_resolved = workspace_dir.resolve()
