@@ -79,6 +79,40 @@ def _discover_required_artifacts(
     return discovered
 
 
+def _capture_worker_model_usage(stdout: str, run_dir: Path) -> None:
+    """Extract model usage from CLI JSON output (e.g. claude --output-format json) and write llm_metadata.json."""
+    from .llm import _try_parse_cli_json_output
+
+    cli_json = _try_parse_cli_json_output(stdout)
+    if cli_json is None:
+        return
+    usage = cli_json.get("usage") if isinstance(cli_json.get("usage"), dict) else {}
+    model_usage = cli_json.get("modelUsage") if isinstance(cli_json.get("modelUsage"), dict) else {}
+    metadata = {
+        "model": str(next(iter(model_usage), "") or ""),
+        "cost_usd": float(cli_json.get("total_cost_usd") or 0.0),
+        "prompt_tokens": int(usage.get("input_tokens") or 0),
+        "completion_tokens": int(usage.get("output_tokens") or 0),
+        "total_tokens": int(usage.get("input_tokens") or 0) + int(usage.get("output_tokens") or 0),
+        "latency_ms": float(cli_json.get("duration_api_ms") or cli_json.get("duration_ms") or 0.0),
+        "cache_creation_tokens": int(usage.get("cache_creation_input_tokens") or 0),
+        "cache_read_tokens": int(usage.get("cache_read_input_tokens") or 0),
+        "session_id": str(cli_json.get("session_id") or ""),
+        "model_usage_breakdown": {
+            model: {
+                "input_tokens": int(u.get("inputTokens") or 0),
+                "output_tokens": int(u.get("outputTokens") or 0),
+                "cost_usd": float(u.get("costUSD") or 0.0),
+            }
+            for model, u in model_usage.items()
+        },
+    }
+    try:
+        (run_dir / "llm_metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def _default_agent_worker_command() -> str:
     script_path = Path(__file__).resolve().parents[2] / "bin" / "accruvia-codex-worker"
     if script_path.exists():
@@ -373,6 +407,7 @@ class CommandWorker:
         stdout_path.write_text(completed.stdout, encoding="utf-8")
         stderr_path = run_dir / "worker.stderr.txt"
         stderr_path.write_text(completed.stderr, encoding="utf-8")
+        _capture_worker_model_usage(completed.stdout, run_dir)
         report_path = run_dir / "report.json"
         payload: dict[str, object] = {}
         if report_path.exists():
