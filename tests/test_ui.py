@@ -1518,7 +1518,38 @@ class HarnessUIDataServiceTests(unittest.TestCase):
 
         self.assertEqual("needs_remediation", latest_round["status"])
         self.assertEqual(1, latest_round["remediation_counts"]["failed"])
+        self.assertEqual(0, review["unresolved_failed_count"])
+        self.assertEqual(1, review["historical_failed_count"])
+        self.assertEqual("historical", review["failed_tasks"][0]["effective_status"])
         self.assertFalse(review["can_start_new_round"])
+
+    def test_atomicity_overview_treats_promotion_stage_failures_as_historical(self) -> None:
+        fake_router = FakeLLMRouter("{}")
+        self.ctx.interrogation_service = SimpleNamespace(llm_router=fake_router)
+        self.service = HarnessUIDataService(self.ctx)
+        completed_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            title="Review-ready task",
+            objective="Execution is complete",
+            status=TaskStatus.COMPLETED,
+        )
+        self.store.create_task(completed_task)
+        self.store.update_objective_status(self.objective.id, ObjectiveStatus.RESOLVED)
+
+        self.service.queue_objective_review(self.objective.id, async_mode=False)
+        remediation_task = next(
+            task for task in self.store.list_tasks(self.project.id)
+            if task.objective_id == self.objective.id and task.strategy == "objective_review_remediation"
+        )
+        self.store.update_task_status(remediation_task.id, TaskStatus.FAILED)
+
+        payload = self.service.harness_atomicity_overview()
+        objective_payload = next(item for item in payload["objectives"] if item["id"] == self.objective.id)
+
+        self.assertEqual(0, objective_payload["unresolved_failed_count"])
+        self.assertEqual("historical", objective_payload["failed_tasks"][0]["effective_status"])
 
     def test_force_promote_objective_review_waives_failed_remediation_and_marks_review_clear(self) -> None:
         fake_router = FakeLLMRouter("{}")
@@ -1684,9 +1715,11 @@ class HarnessUIDataServiceTests(unittest.TestCase):
 
         payload = self.service.project_workspace(self.project.id)
         objective_payload = next(item for item in payload["objectives"] if item["id"] == self.objective.id)
-        self.assertFalse(objective_payload["promotion_review"]["review_clear"])
+        self.assertTrue(objective_payload["promotion_review"]["review_clear"])
+        self.assertEqual(0, objective_payload["promotion_review"]["unresolved_failed_count"])
+        self.assertEqual("historical", objective_payload["promotion_review"]["failed_tasks"][0]["effective_status"])
         self.assertTrue(objective_payload["repo_promotion"]["eligible"])
-        self.assertIn("Operator override is active", objective_payload["repo_promotion"]["reason"])
+        self.assertIn("ready to promote", objective_payload["repo_promotion"]["reason"])
 
         result = self.service.promote_objective_to_repo(self.objective.id)
         self.assertEqual("approved", result["promotion"]["status"])

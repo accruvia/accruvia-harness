@@ -12458,18 +12458,38 @@ class HarnessUIDataService:
             status = task.status.value
             if status in counts:
                 counts[status] += 1
+        promotion_started = any(
+            [
+                review_start_records,
+                review_completed_records,
+                review_failed_records,
+                review_packet_records,
+                review_cycle_artifact_records,
+                worker_response_records,
+                reviewer_rebuttal_records,
+                override_records,
+            ]
+        )
         failed_entries: list[dict[str, object]] = []
         unresolved_failed_count = 0
         waived_failed_count = 0
+        historical_failed_count = 0
         for task in linked_tasks:
             if task.status.value != "failed":
                 continue
             waiver = waivers_by_task.get(task.id)
             metadata = task.external_ref_metadata if isinstance(task.external_ref_metadata, dict) else {}
             disposition = metadata.get("failed_task_disposition") if isinstance(metadata.get("failed_task_disposition"), dict) else None
-            effective_status = "waived" if waiver or (disposition and str(disposition.get("kind") or "") == "waive_obsolete") else "blocking"
+            if waiver or (disposition and str(disposition.get("kind") or "") == "waive_obsolete"):
+                effective_status = "waived"
+            elif promotion_started:
+                effective_status = "historical"
+            else:
+                effective_status = "blocking"
             if effective_status == "waived":
                 waived_failed_count += 1
+            elif effective_status == "historical":
+                historical_failed_count += 1
             else:
                 unresolved_failed_count += 1
             failed_entries.append(
@@ -12751,6 +12771,7 @@ class HarnessUIDataService:
             "verdict_counts": verdict_counts,
             "task_counts": counts,
             "waived_failed_count": waived_failed_count,
+            "historical_failed_count": historical_failed_count,
             "unresolved_failed_count": unresolved_failed_count,
             "review_packet_count": len(all_review_packets),
             "objective_review_packet_count": sum(int((round_row.get("packet_count") or 0)) for round_row in review_rounds),
