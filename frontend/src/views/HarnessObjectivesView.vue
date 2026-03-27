@@ -118,6 +118,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useApi } from '../composables/useApi'
 import HarnessSectionNav from '../components/HarnessSectionNav.vue'
+import { filterObjectives, sortObjectives } from '../lib/objectivesBoard'
 
 const { data: harness, fetch: fetchHarness } = useApi<any>('/api/harness')
 const selectedId = ref('')
@@ -126,18 +127,12 @@ const objectiveQuery = ref('')
 
 const objectives = computed(() => {
   const projects = harness.value?.projects || []
-  return projects
+  return sortObjectives(projects
     .flatMap((project: any) => (project.objectives || []).map((objective: any) => ({
       ...objective,
       project_id: project.id,
       project_name: project.name,
-    })))
-    .sort((left: any, right: any) => {
-      const rank: Record<string, number> = { executing: 0, planning: 1, investigating: 2, open: 3, paused: 4, resolved: 5 }
-      const delta = (rank[left.status] ?? 99) - (ranksafe(rank, right.status))
-      if (delta !== 0) return delta
-      return String(left.title || '').localeCompare(String(right.title || ''))
-    })
+    }))))
 })
 
 const selectedObjective = computed(() => {
@@ -151,19 +146,8 @@ const projectOptions = computed(() => {
 })
 
 const filteredObjectives = computed(() => {
-  const query = objectiveQuery.value.trim().toLowerCase()
-  return objectives.value.filter((objective: any) => {
-    const matchesProject = !selectedProjectFilter.value || objective.project_name === selectedProjectFilter.value
-    if (!matchesProject) return false
-    if (!query) return true
-    const haystack = `${objective.title || ''} ${objective.project_name || ''} ${objective.status || ''}`.toLowerCase()
-    return haystack.includes(query)
-  })
+  return filterObjectives(objectives.value, selectedProjectFilter.value, objectiveQuery.value)
 })
-
-function ranksafe(rank: Record<string, number>, status: string) {
-  return rank[status] ?? 99
-}
 
 function statusColor(status: string) {
   const colors: Record<string, string> = {

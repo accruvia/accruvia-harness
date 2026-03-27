@@ -147,6 +147,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useApi } from '../composables/useApi'
 import HarnessSectionNav from '../components/HarnessSectionNav.vue'
+import { dashboardEventLink, projectDashboardState, projectTaskStatus, unresolvedObjectiveCount } from '../lib/dashboardState'
 
 const { data: version, fetch: fetchVersion } = useApi<any>('/api/version')
 const { data: harness, fetch: fetchHarness } = useApi<any>('/api/harness')
@@ -175,17 +176,11 @@ const objectivesById = computed(() => {
 })
 
 function taskStatus(project: any) {
-  const status = project?.tasks_by_status || {}
-  return {
-    completed: status.completed || 0,
-    active: status.active || 0,
-    pending: status.pending || 0,
-    failed: status.failed || 0,
-  }
+  return projectTaskStatus(project)
 }
 
 function unresolvedCount(project: any) {
-  return (project.objectives || []).filter((objective: any) => objective.status !== 'resolved').length
+  return unresolvedObjectiveCount(project)
 }
 
 const attentionItems = computed(() => {
@@ -453,21 +448,7 @@ const operatorSummary = computed(() => {
 })
 
 function projectState(project: any) {
-  const tasks = taskStatus(project)
-  const unresolved = unresolvedCount(project)
-  if (tasks.active > 0) {
-    return { tone: 'info', label: 'Running', detail: 'The harness is actively executing work in this project.' }
-  }
-  if (tasks.pending > 0) {
-    return { tone: 'warning', label: 'Queued', detail: 'This project has pending work waiting for execution or review.' }
-  }
-  if (unresolved > 0) {
-    return { tone: 'warning', label: 'Needs attention', detail: `${unresolved} unresolved objectives remain even though no work is currently running.` }
-  }
-  if (tasks.failed > 0) {
-    return { tone: 'surface-variant', label: 'History to review', detail: 'Execution is complete, but the project contains failed task history.' }
-  }
-  return { tone: 'success', label: 'Quiet', detail: 'No active or queued work is present for this project.' }
+  return projectDashboardState(project)
 }
 
 function formatTimestamp(value: string) {
@@ -488,17 +469,7 @@ function formatTimestamp(value: string) {
 }
 
 function eventLinkProps(event: any) {
-  if (!event.project_id || !event.objective_id) return {}
-  if (event.task_id) {
-    return {
-      to: {
-        name: 'objective-atomic',
-        params: { projectId: event.project_id, objectiveId: event.objective_id },
-        query: { taskId: event.task_id },
-      },
-    }
-  }
-  return { to: { name: 'objective', params: { projectId: event.project_id, objectiveId: event.objective_id } } }
+  return dashboardEventLink(event)
 }
 
 async function refreshHarness() {
