@@ -3,8 +3,23 @@ import { createRouter, createWebHistory } from 'vue-router'
 const routes = [
   {
     path: '/',
+    name: 'harness-objectives',
+    component: () => import('../views/HarnessObjectivesView.vue'),
+  },
+  {
+    path: '/dashboard',
     name: 'dashboard',
     component: () => import('../views/DashboardView.vue'),
+  },
+  {
+    path: '/atomicity',
+    name: 'harness-atomicity',
+    component: () => import('../views/HarnessAtomicityView.vue'),
+  },
+  {
+    path: '/promotion',
+    name: 'harness-promotion',
+    component: () => import('../views/HarnessPromotionView.vue'),
   },
   {
     path: '/projects/:projectId',

@@ -18,10 +18,31 @@
           :to="{ name: 'dashboard' }"
         />
         <v-list-item
-          v-if="projectId"
           prepend-icon="$formatListBulleted"
           title="Objectives"
+          :to="{ name: 'harness-objectives' }"
+        />
+        <v-list-item
+          prepend-icon="$sourceBranch"
+          title="Atomicity"
+          :to="{ name: 'harness-atomicity' }"
+        />
+        <v-list-item
+          prepend-icon="$rocketLaunch"
+          title="Promotion"
+          :to="{ name: 'harness-promotion' }"
+        />
+        <v-list-item
+          v-if="projectId"
+          prepend-icon="$formatListBulleted"
+          title="Project Objectives"
           :to="{ name: 'project', params: { projectId } }"
+        />
+        <v-list-item
+          v-if="projectId && objectiveId"
+          prepend-icon="$bookOpenVariant"
+          title="Objective Overview"
+          :to="{ name: 'objective', params: { projectId, objectiveId } }"
         />
         <v-list-item
           v-if="projectId"
@@ -37,20 +58,14 @@
         />
         <v-list-item
           v-if="projectId && objectiveId"
-          prepend-icon="$bookOpenVariant"
-          title="Overview"
-          :to="{ name: 'objective', params: { projectId, objectiveId } }"
-        />
-        <v-list-item
-          v-if="projectId && objectiveId"
           prepend-icon="$sourceBranch"
-          title="Atomicity"
+          title="Objective Atomicity"
           :to="{ name: 'objective-atomic', params: { projectId, objectiveId } }"
         />
         <v-list-item
           v-if="projectId && objectiveId"
           prepend-icon="$rocketLaunch"
-          title="Promotion"
+          title="Objective Promotion"
           :to="{ name: 'objective-promotion', params: { projectId, objectiveId } }"
         />
         <v-list-item
