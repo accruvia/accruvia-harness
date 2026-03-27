@@ -3,8 +3,8 @@
     <div class="d-flex align-center mb-6">
       <v-btn icon="$arrowLeft" variant="text" size="small" :to="{ name: 'dashboard' }" />
       <div class="ml-3">
-        <div class="text-caption text-on-surface-variant text-uppercase">Active Project</div>
-        <h1 class="text-h4 font-weight-bold text-on-surface">{{ projectName }}</h1>
+        <div class="page-kicker">Active project</div>
+        <h1 class="page-title">{{ projectName }}</h1>
       </div>
       <v-spacer />
       <v-btn
@@ -27,11 +27,9 @@
       <!-- Objectives Board -->
       <v-col cols="12" lg="9">
         <div class="d-flex align-center justify-space-between flex-wrap ga-3 mb-4">
-          <h2 class="text-subtitle-2 text-uppercase text-on-surface-variant tracking-wide">
-            Objectives Tracking Board
-          </h2>
+          <h2 class="section-title">Objectives tracking board</h2>
           <label class="sort-control">
-            <span class="text-caption text-uppercase text-on-surface-variant">Sort By</span>
+            <span class="sort-label">Sort by</span>
             <select v-model="sortMode">
               <option value="active-first">Active First</option>
               <option value="resolved-first">Resolved First</option>
@@ -53,14 +51,14 @@
             class="pa-4"
           >
             <div class="d-flex align-center mb-2">
-              <v-chip :color="statusColor(obj.status)" size="x-small" label class="mr-3 text-uppercase font-mono">
+              <v-chip :color="statusColor(obj.status)" size="x-small" variant="tonal" class="mr-3">
                 {{ objectiveStateLabel(obj.status) }}
               </v-chip>
-              <h3 class="text-subtitle-1 font-weight-medium text-on-surface">{{ obj.title }}</h3>
+              <h3 class="objective-title">{{ obj.title }}</h3>
             </div>
 
             <div class="mb-3">
-              <div class="text-caption text-uppercase text-on-surface-variant">Harness Activity</div>
+              <div class="panel-label">Harness activity</div>
               <div class="d-flex align-center ga-2 flex-wrap mt-1">
                 <v-chip :color="objectiveActivity(obj).tone" size="x-small" variant="tonal">
                   {{ objectiveActivity(obj).label }}
@@ -131,7 +129,7 @@
         <!-- Live Activity -->
         <v-card color="surface-light" class="pa-4">
           <div class="d-flex align-center mb-3">
-            <div class="text-caption text-uppercase text-on-surface-variant">Live Activity</div>
+            <div class="section-title">Live activity</div>
             <v-spacer />
             <v-chip color="success" size="x-small" variant="tonal" prepend-icon="$accessPoint">LIVE</v-chip>
           </div>
@@ -459,6 +457,32 @@ onDeactivated(() => disconnect())
   gap: 0.65rem;
 }
 
+.page-kicker,
+.sort-label,
+.panel-label {
+  font-size: 0.78rem;
+  color: rgb(var(--v-theme-on-surface-variant));
+}
+
+.page-title {
+  margin-top: 0.15rem;
+  font-size: 2rem;
+  font-weight: 650;
+  color: rgb(var(--v-theme-on-surface));
+}
+
+.section-title {
+  font-size: 0.96rem;
+  font-weight: 600;
+  color: rgb(var(--v-theme-on-surface-variant));
+}
+
+.objective-title {
+  font-size: 1.02rem;
+  font-weight: 600;
+  color: rgb(var(--v-theme-on-surface));
+}
+
 .sort-control select {
   border: 1px solid rgba(125, 94, 67, 0.2);
   border-radius: 999px;
@@ -471,6 +495,7 @@ onDeactivated(() => disconnect())
 
 .activity-title {
   line-height: 1.35;
+  color: rgb(var(--v-theme-on-surface));
 }
 
 .activity-objective {

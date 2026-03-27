@@ -8,8 +8,8 @@
         :to="{ name: 'project', params: { projectId: props.projectId } }"
       />
       <div class="ml-3">
-        <div class="text-caption text-uppercase text-on-surface-variant">Promotion Review</div>
-        <h1 class="text-h4 font-weight-bold text-on-surface">{{ objective?.title || '...' }}</h1>
+        <div class="page-kicker">Promotion review</div>
+        <h1 class="page-title">{{ objective?.title || '...' }}</h1>
       </div>
     </div>
 
@@ -19,9 +19,9 @@
       <v-col cols="12" lg="4">
         <v-card color="surface-light" class="pa-5 mb-4">
           <div class="d-flex align-center mb-3">
-            <div class="text-caption text-uppercase text-on-surface-variant">Promotion State</div>
+            <div class="section-title">Promotion state</div>
             <v-spacer />
-            <v-chip :color="review?.review_clear ? 'success' : 'warning'" label size="x-small">
+            <v-chip :color="review?.review_clear ? 'success' : 'warning'" variant="tonal" size="x-small">
               {{ review?.review_clear ? 'clear' : 'blocked' }}
             </v-chip>
           </div>
@@ -31,7 +31,7 @@
         </v-card>
 
         <v-card color="surface-light" class="pa-5 mb-4">
-          <div class="text-caption text-uppercase text-on-surface-variant mb-3">Review Metrics</div>
+          <div class="section-title mb-3">Review metrics</div>
           <div class="d-flex flex-column ga-2">
             <div class="metric-row"><span>Rounds</span><strong>{{ rounds.length }}</strong></div>
             <div class="metric-row"><span>Packets</span><strong>{{ review?.review_packet_count || review?.objective_review_packet_count || 0 }}</strong></div>
@@ -41,7 +41,7 @@
         </v-card>
 
         <v-card color="surface-light" class="pa-5">
-          <div class="text-caption text-uppercase text-on-surface-variant mb-3">Verdict Counts</div>
+          <div class="section-title mb-3">Verdict counts</div>
           <div v-if="verdictEntries.length" class="d-flex flex-wrap ga-2">
             <v-chip
               v-for="[key, value] in verdictEntries"
@@ -62,8 +62,8 @@
         <v-card color="surface-light" class="pa-5 mb-4">
           <div class="d-flex align-center mb-4">
             <div>
-              <div class="text-caption text-uppercase text-on-surface-variant">Latest Review Round</div>
-              <h2 class="text-h6 mt-1">What promotion is saying now</h2>
+              <div class="section-title">Latest review round</div>
+              <h2 class="panel-title mt-1">What promotion is saying now</h2>
             </div>
             <v-spacer />
             <v-chip v-if="latestRound" :color="roundStatusColor(latestRound.status)" label size="small">
@@ -104,7 +104,7 @@
         </v-card>
 
         <v-card color="surface-light" class="pa-5">
-          <div class="text-caption text-uppercase text-on-surface-variant mb-3">Recent Rounds</div>
+          <div class="section-title mb-3">Recent rounds</div>
           <div v-if="!rounds.length" class="text-body-2 text-on-surface-variant">
             No review rounds yet.
           </div>
@@ -209,6 +209,30 @@ onDeactivated(() => disconnect())
   justify-content: space-between;
   gap: 1rem;
   font-size: 0.92rem;
+}
+
+.page-kicker {
+  font-size: 0.78rem;
+  color: rgb(var(--v-theme-on-surface-variant));
+}
+
+.page-title {
+  margin-top: 0.15rem;
+  font-size: 2rem;
+  font-weight: 650;
+  color: rgb(var(--v-theme-on-surface));
+}
+
+.section-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: rgb(var(--v-theme-on-surface-variant));
+}
+
+.panel-title {
+  font-size: 1.15rem;
+  font-weight: 620;
+  color: rgb(var(--v-theme-on-surface));
 }
 
 .metric-row span {

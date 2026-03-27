@@ -8,8 +8,8 @@
         :to="{ name: 'project', params: { projectId: props.projectId } }"
       />
       <div class="ml-3">
-        <div class="text-caption text-on-surface-variant text-uppercase">{{ objective?.status }}</div>
-        <h1 class="text-h4 font-weight-bold text-on-surface">{{ objective?.title || '...' }}</h1>
+        <div class="page-kicker">{{ objective?.status || 'objective' }}</div>
+        <h1 class="page-title">{{ objective?.title || '...' }}</h1>
       </div>
       <v-spacer />
       <v-btn
@@ -27,7 +27,7 @@
       <v-col cols="12" md="5">
         <!-- Intent Model -->
         <v-card color="surface-light" class="pa-5 mb-4">
-          <h3 class="text-caption text-uppercase text-on-surface-variant mb-3">Intent Model</h3>
+          <h3 class="section-title mb-3">Intent model</h3>
           <div v-if="intent" class="text-body-2 text-on-surface">
             <p class="mb-2"><strong>Success Criteria:</strong> {{ intent.intent_summary }}</p>
             <p v-if="intent.success_definition"><strong>Definition:</strong> {{ intent.success_definition }}</p>
@@ -38,13 +38,13 @@
         <!-- Red-Team Interrogation -->
         <v-card color="surface-light" class="pa-5 mb-4">
           <div class="d-flex align-center mb-3">
-            <h3 class="text-caption text-uppercase text-on-surface-variant">Red-Team Interrogation</h3>
+            <h3 class="section-title">Red-team interrogation</h3>
             <v-spacer />
             <v-chip
               :color="interrogation?.completed ? 'success' : 'warning'"
               size="x-small"
-              label
-            >{{ interrogation?.completed ? 'COMPLETE' : 'PENDING' }}</v-chip>
+              variant="tonal"
+            >{{ interrogation?.completed ? 'Complete' : 'Pending' }}</v-chip>
           </div>
           <div v-if="interrogation?.questions?.length" class="d-flex flex-column ga-2">
             <div v-for="(q, i) in interrogation.questions" :key="i" class="text-body-2 text-on-surface pa-2 rounded" style="background: rgba(157,213,134,0.05)">
@@ -72,7 +72,7 @@
         <!-- Mermaid Diagram -->
         <v-card color="surface-light" class="pa-5 mb-4">
           <div class="d-flex align-center mb-3">
-            <h3 class="text-caption text-uppercase text-on-surface-variant">Architecture Workspace</h3>
+            <h3 class="section-title">Architecture workspace</h3>
             <v-spacer />
             <div v-if="diagram?.content" class="diagram-controls mr-3">
               <button type="button" @click="zoomOut">-</button>
@@ -85,7 +85,7 @@
                 :key="s"
                 :color="diagram.status === s ? 'primary' : 'surface-variant'"
                 size="x-small"
-                label
+                variant="tonal"
               >{{ s }}</v-chip>
             </v-chip-group>
           </div>
@@ -121,7 +121,7 @@
         <!-- Review Report Card -->
         <v-card v-if="reviewRound" color="surface-light" class="pa-5 mb-4">
           <div class="d-flex align-center mb-4">
-            <h3 class="text-caption text-uppercase text-on-surface-variant">Promotion Review — Round {{ reviewRound.round_number }}</h3>
+            <h3 class="section-title">Promotion review - round {{ reviewRound.round_number }}</h3>
             <v-spacer />
             <v-chip :color="reviewRound.status === 'passed' ? 'success' : 'warning'" size="x-small" label>
               {{ reviewRound.status }}
@@ -150,7 +150,7 @@
 
         <!-- Atomic Tasks -->
         <v-card color="surface-light" class="pa-5">
-          <h3 class="text-caption text-uppercase text-on-surface-variant mb-3">
+          <h3 class="section-title mb-3">
             Atomic Tasks ({{ tasks.length }})
           </h3>
           <v-list density="compact" bg-color="transparent" class="pa-0">
@@ -405,6 +405,26 @@ onBeforeUnmount(() => {
   }
 })
 </script>
+
+<style scoped>
+.page-kicker {
+  font-size: 0.78rem;
+  color: rgb(var(--v-theme-on-surface-variant));
+}
+
+.page-title {
+  margin-top: 0.15rem;
+  font-size: 2rem;
+  font-weight: 650;
+  color: rgb(var(--v-theme-on-surface));
+}
+
+.section-title {
+  font-size: 0.96rem;
+  font-weight: 600;
+  color: rgb(var(--v-theme-on-surface-variant));
+}
+</style>
 
 <style scoped>
 .diagram-controls {

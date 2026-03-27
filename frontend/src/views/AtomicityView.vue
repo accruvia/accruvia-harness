@@ -8,8 +8,8 @@
         :to="{ name: 'project', params: { projectId: props.projectId } }"
       />
       <div class="ml-3">
-        <div class="text-caption text-uppercase text-on-surface-variant">Atomicity Workspace</div>
-        <h1 class="text-h4 font-weight-bold text-on-surface">{{ objective?.title || '...' }}</h1>
+        <div class="page-kicker">Atomicity workspace</div>
+        <h1 class="page-title">{{ objective?.title || '...' }}</h1>
       </div>
     </div>
 
@@ -18,7 +18,7 @@
     <v-row class="mt-2">
       <v-col cols="12" lg="4">
         <v-card color="surface-light" class="pa-5 mb-4">
-          <div class="text-caption text-uppercase text-on-surface-variant mb-3">Workflow</div>
+          <div class="section-title mb-3">Workflow</div>
           <div class="d-flex flex-wrap ga-2">
             <v-chip
               v-for="stage in workflowStages"
@@ -34,9 +34,9 @@
 
         <v-card color="surface-light" class="pa-5 mb-4">
           <div class="d-flex align-center mb-3">
-            <div class="text-caption text-uppercase text-on-surface-variant">Execution Gate</div>
+            <div class="section-title">Execution gate</div>
             <v-spacer />
-            <v-chip :color="blockingChecks.length ? 'warning' : 'success'" size="x-small" label>
+            <v-chip :color="blockingChecks.length ? 'warning' : 'success'" size="x-small" variant="tonal">
               {{ blockingChecks.length ? `${blockingChecks.length} blocked` : 'clear' }}
             </v-chip>
           </div>
@@ -56,7 +56,7 @@
         </v-card>
 
         <v-card color="surface-light" class="pa-5">
-          <div class="text-caption text-uppercase text-on-surface-variant mb-3">Current Shape</div>
+          <div class="section-title mb-3">Current shape</div>
           <div class="text-body-2 text-on-surface mb-3">
             {{ objective?.summary || intent?.intent_summary || 'No objective summary recorded yet.' }}
           </div>
@@ -75,16 +75,16 @@
             color="surface-light"
             class="pa-4"
           >
-            <div class="text-caption text-uppercase text-on-surface-variant">{{ stat.label }}</div>
-            <div class="text-h5 font-weight-bold mt-2">{{ stat.value }}</div>
+            <div class="stat-label">{{ stat.label }}</div>
+            <div class="stat-value mt-2">{{ stat.value }}</div>
           </v-card>
         </div>
 
         <v-card color="surface-light" class="pa-5">
           <div class="d-flex align-center mb-4">
             <div>
-              <div class="text-caption text-uppercase text-on-surface-variant">Atomic Tasks</div>
-              <h2 class="text-h6 text-on-surface mt-1">What is happening now</h2>
+              <div class="section-title">Atomic tasks</div>
+              <h2 class="panel-title mt-1">What is happening now</h2>
             </div>
             <v-spacer />
             <v-chip color="primary" variant="tonal">{{ tasks.length }} slices</v-chip>
@@ -105,7 +105,7 @@
                 <div class="ml-4 flex-grow-1">
                   <div class="d-flex align-center flex-wrap ga-2 mb-2">
                     <h3 class="text-subtitle-1 font-weight-medium">{{ task.title }}</h3>
-                    <v-chip :color="statusColor(task.status)" size="x-small" label>
+                    <v-chip :color="statusColor(task.status)" size="x-small" variant="tonal">
                       {{ task.status }}
                     </v-chip>
                     <v-chip color="surface-variant" variant="tonal" size="x-small">
@@ -229,6 +229,40 @@ onDeactivated(() => disconnect())
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 1rem;
+}
+
+.page-kicker {
+  font-size: 0.78rem;
+  color: rgb(var(--v-theme-on-surface-variant));
+}
+
+.page-title {
+  margin-top: 0.15rem;
+  font-size: 2rem;
+  font-weight: 650;
+  color: rgb(var(--v-theme-on-surface));
+}
+
+.section-title,
+.stat-label {
+  font-size: 0.8rem;
+  color: rgb(var(--v-theme-on-surface-variant));
+}
+
+.section-title {
+  font-weight: 600;
+}
+
+.panel-title {
+  font-size: 1.15rem;
+  font-weight: 620;
+  color: rgb(var(--v-theme-on-surface));
+}
+
+.stat-value {
+  font-size: 1.2rem;
+  font-weight: 600;
+  color: rgb(var(--v-theme-on-surface));
 }
 
 .gate-card,
