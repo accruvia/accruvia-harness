@@ -11,11 +11,12 @@ import sys
 import threading
 import time
 import datetime as _dt
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 import asyncio
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
+from enum import Enum
 
 from queue import Queue, Empty
 
@@ -139,6 +140,20 @@ _OBJECTIVE_REVIEW_SEVERITIES = frozenset({"low", "medium", "high"})
 _OBJECTIVE_REVIEW_REBUTTAL_OUTCOMES = frozenset(
     {"accepted", "wrong_artifact_type", "artifact_incomplete", "missing_terminal_event", "evidence_not_found"}
 )
+
+
+def _to_jsonable(value: Any) -> Any:
+    if is_dataclass(value):
+        return _to_jsonable(asdict(value))
+    if isinstance(value, dict):
+        return {str(key): _to_jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_to_jsonable(item) for item in value]
+    if isinstance(value, (_dt.datetime, _dt.date)):
+        return value.isoformat()
+    if isinstance(value, Enum):
+        return value.value
+    return value
 _OBJECTIVE_REVIEW_VAGUE_PHRASES = (
     "improve",
     "better",
@@ -6934,6 +6949,8 @@ class HarnessUIDataService:
         self.memory_provider = LocalContextMemoryProvider(self.store)
         self.auto_resume_atomic_generation = not bool(getattr(ctx, "is_test", False))
         self.auto_resume_objective_review = not bool(getattr(ctx, "is_test", False))
+        self._harness_overview_cache_lock = threading.Lock()
+        self._harness_overview_cache: tuple[float, dict[str, object]] | None = None
 
     def list_projects(self) -> dict[str, object]:
         projects = []
@@ -6947,6 +6964,10 @@ class HarnessUIDataService:
                 }
             )
         return {"projects": projects}
+
+    def invalidate_harness_overview_cache(self) -> None:
+        with self._harness_overview_cache_lock:
+            self._harness_overview_cache = None
 
     def reconcile_objective_workflow(self, objective_id: str) -> dict[str, object]:
         atomic_state = self._atomic_generation_state(objective_id)
@@ -7018,9 +7039,9 @@ class HarnessUIDataService:
         )
         return {
             "current_stage": current_stage,
-            "planning": {"ready": planning.ready, "checks": planning.checks},
-            "execution": {"ready": execution.ready, "checks": execution.checks},
-            "review": {"ready": review.ready, "checks": review.checks},
+            "planning": {"ready": planning.ready, "checks": _to_jsonable(planning.checks)},
+            "execution": {"ready": execution.ready, "checks": _to_jsonable(execution.checks)},
+            "review": {"ready": review.ready, "checks": _to_jsonable(review.checks)},
             "promotion": promotion,
         }
 
@@ -7246,7 +7267,7 @@ class HarnessUIDataService:
                     **serialize_dataclass(objective),
                     "execution_gate": {
                         "ready": gate.ready,
-                        "checks": gate.gate_checks,
+                        "checks": _to_jsonable(gate.gate_checks),
                     },
                     "workflow": workflow,
                     "intent_model": serialize_dataclass(latest_intent) if latest_intent is not None else None,
@@ -7292,6 +7313,296 @@ class HarnessUIDataService:
                 "running": _BACKGROUND_SUPERVISOR.is_running(project.id),
                 **_BACKGROUND_SUPERVISOR.status(project.id),
             },
+        }
+
+    def project_summary_fast(self, project_ref: str) -> dict[str, object]:
+        project_id = resolve_project_ref(self.ctx, project_ref)
+        project = self.store.get_project(project_id)
+        if project is None:
+            raise ValueError(f"Unknown project: {project_ref}")
+        objectives = self.store.list_objectives(project.id)
+        tasks = self.store.list_tasks(project.id)
+        task_counts_by_objective: dict[str, dict[str, int]] = {
+            objective.id: {"completed": 0, "active": 0, "failed": 0, "pending": 0}
+            for objective in objectives
+        }
+        for task in tasks:
+            if not task.objective_id or task.objective_id not in task_counts_by_objective:
+                continue
+            status = task.status.value if hasattr(task.status, "value") else str(task.status)
+            if status in task_counts_by_objective[task.objective_id]:
+                task_counts_by_objective[task.objective_id][status] += 1
+        objective_payload = [
+            {
+                "id": objective.id,
+                "project_id": project.id,
+                "title": objective.title,
+                "status": objective.status.value,
+                "task_counts": task_counts_by_objective.get(objective.id, {}),
+                "task_total": sum(task_counts_by_objective.get(objective.id, {}).values()),
+            }
+            for objective in objectives
+        ]
+        task_payload = [
+            {
+                "id": task.id,
+                "objective_id": task.objective_id,
+                "title": task.title,
+                "status": task.status.value if hasattr(task.status, "value") else str(task.status),
+                "updated_at": task.updated_at.isoformat(),
+            }
+            for task in tasks
+        ]
+        return {
+            "project": serialize_dataclass(project),
+            "objectives": objective_payload,
+            "tasks": task_payload,
+            "supervisor": {
+                "running": _BACKGROUND_SUPERVISOR.is_running(project.id),
+                **_BACKGROUND_SUPERVISOR.status(project.id),
+            },
+        }
+
+    def project_objectives_detail(self, project_ref: str) -> dict[str, object]:
+        project_id = resolve_project_ref(self.ctx, project_ref)
+        project = self.store.get_project(project_id)
+        if project is None:
+            raise ValueError(f"Unknown project: {project_ref}")
+        objectives = self.store.list_objectives(project.id)
+        tasks = self.store.list_tasks(project.id)
+        objective_task_map = {objective.id: [task for task in tasks if task.objective_id == objective.id] for objective in objectives}
+        payload = []
+        for objective in objectives:
+            linked_tasks = objective_task_map.get(objective.id, [])
+            review = self._promotion_review_for_objective(objective.id, linked_tasks)
+            workflow = self._harness_workflow_status_for_objective(objective, linked_tasks)
+            gate = objective_execution_gate(self.store, objective.id)
+            payload.append(
+                {
+                    "id": objective.id,
+                    "project_id": project.id,
+                    "title": objective.title,
+                    "status": objective.status.value,
+                    "execution_gate": {
+                        "ready": gate.ready,
+                        "checks": _to_jsonable(gate.gate_checks),
+                    },
+                    "workflow": workflow,
+                    "promotion_review": {
+                        "review_clear": bool(review.get("review_clear")),
+                        "review_rounds": review.get("review_rounds") or [],
+                    },
+                }
+            )
+        return {
+            "project": serialize_dataclass(project),
+            "objectives": payload,
+        }
+
+    def project_objective_detail(self, project_ref: str, objective_id: str) -> dict[str, object]:
+        project_id = resolve_project_ref(self.ctx, project_ref)
+        project = self.store.get_project(project_id)
+        if project is None:
+            raise ValueError(f"Unknown project: {project_ref}")
+        objective = self.store.get_objective(objective_id)
+        if objective is None or objective.project_id != project.id:
+            raise ValueError(f"Unknown objective for project: {objective_id}")
+        tasks = [task for task in self.store.list_tasks(project.id) if task.objective_id == objective.id]
+        review = self._promotion_review_for_objective(objective.id, tasks)
+        repo_promotion = self._repo_promotion_for_objective(objective.id, tasks)
+        workflow = self._workflow_status_for_objective(objective, tasks, review, repo_promotion)
+        gate = objective_execution_gate(self.store, objective.id)
+        latest_intent = self.store.latest_intent_model(objective.id)
+        latest_mermaid = self.store.latest_mermaid_artifact(objective.id)
+        latest_proposal = self._latest_mermaid_proposal(objective.id)
+        task_payload = [
+            {
+                "id": task.id,
+                "objective_id": task.objective_id,
+                "title": task.title,
+                "strategy": task.strategy,
+                "status": task.status.value if hasattr(task.status, "value") else str(task.status),
+                "updated_at": task.updated_at.isoformat(),
+            }
+            for task in tasks
+        ]
+        return {
+            "project": serialize_dataclass(project),
+            "objective": {
+                **serialize_dataclass(objective),
+                "execution_gate": {
+                    "ready": gate.ready,
+                    "checks": _to_jsonable(gate.gate_checks),
+                },
+                "workflow": workflow,
+                "intent_model": serialize_dataclass(latest_intent) if latest_intent is not None else None,
+                "interrogation_review": self._interrogation_review(objective.id),
+                "diagram": (
+                    {
+                        **serialize_dataclass(latest_mermaid),
+                        "content": latest_mermaid.content,
+                    }
+                    if latest_mermaid is not None
+                    else None
+                ),
+                "diagram_proposal": latest_proposal,
+                "promotion_review": review,
+            },
+            "tasks": task_payload,
+        }
+
+    def project_token_performance(self, project_ref: str) -> dict[str, object]:
+        project_id = resolve_project_ref(self.ctx, project_ref)
+        project = self.store.get_project(project_id)
+        if project is None:
+            raise ValueError(f"Unknown project: {project_ref}")
+        objectives = self.store.list_objectives(project.id)
+
+        def summarize_packets(packet_list: list[dict[str, object]] | None) -> dict[str, float | int]:
+            usage = {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "cost_usd": 0.0,
+                "latency_ms": 0,
+                "reported_packet_count": 0,
+                "unreported_packet_count": 0,
+            }
+            for packet in packet_list or []:
+                llm_usage = packet.get("llm_usage") if isinstance(packet, dict) else {}
+                llm_usage = llm_usage if isinstance(llm_usage, dict) else {}
+                reported = packet.get("llm_usage_reported") is not False if isinstance(packet, dict) else True
+                if reported:
+                    usage["prompt_tokens"] += int(llm_usage.get("prompt_tokens") or 0)
+                    usage["completion_tokens"] += int(llm_usage.get("completion_tokens") or 0)
+                    usage["total_tokens"] += int(llm_usage.get("total_tokens") or 0)
+                    usage["cost_usd"] += float(llm_usage.get("cost_usd") or 0.0)
+                    usage["latency_ms"] += int(llm_usage.get("latency_ms") or 0)
+                    usage["reported_packet_count"] += 1
+                else:
+                    usage["unreported_packet_count"] += 1
+                    usage["latency_ms"] += int(llm_usage.get("latency_ms") or 0)
+            return usage
+
+        def add_usage(
+            target: dict[str, float | int],
+            usage: dict[str, float | int],
+            *,
+            packet_count: int = 0,
+            round_count: int = 0,
+        ) -> None:
+            target["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
+            target["completion_tokens"] += int(usage.get("completion_tokens") or 0)
+            target["total_tokens"] += int(usage.get("total_tokens") or 0)
+            target["cost_usd"] += float(usage.get("cost_usd") or 0.0)
+            target["latency_ms"] += int(usage.get("latency_ms") or 0)
+            target["packet_count"] += packet_count
+            target["round_count"] += round_count
+            target["reported_packet_count"] += int(usage.get("reported_packet_count") or 0)
+            target["unreported_packet_count"] += int(usage.get("unreported_packet_count") or 0)
+
+        totals: dict[str, float | int] = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cost_usd": 0.0,
+            "latency_ms": 0,
+            "packet_count": 0,
+            "round_count": 0,
+            "reported_packet_count": 0,
+            "unreported_packet_count": 0,
+        }
+        objective_rows: list[dict[str, object]] = []
+        reviewer_rows: dict[str, dict[str, object]] = {}
+        round_rows: list[dict[str, object]] = []
+
+        for objective in objectives:
+            linked_tasks = [task for task in self.store.list_tasks(project.id) if task.objective_id == objective.id]
+            review = self._promotion_review_for_objective(objective.id, linked_tasks)
+            rounds = list(review.get("review_rounds") or [])
+            if not rounds:
+                continue
+            objective_usage: dict[str, float | int] = {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "cost_usd": 0.0,
+                "latency_ms": 0,
+                "packet_count": 0,
+                "round_count": 0,
+                "reported_packet_count": 0,
+                "unreported_packet_count": 0,
+            }
+            for round_row in rounds:
+                packets = list(round_row.get("packets") or [])
+                round_usage = summarize_packets(packets)
+                add_usage(objective_usage, round_usage, packet_count=len(packets), round_count=1)
+                add_usage(totals, round_usage, packet_count=len(packets), round_count=1)
+                round_rows.append(
+                    {
+                        "objective_id": objective.id,
+                        "objective_title": objective.title,
+                        "round_number": round_row.get("round_number"),
+                        "status": round_row.get("status"),
+                        "packet_count": len(packets),
+                        "usage": round_usage,
+                        "last_activity_at": round_row.get("last_activity_at"),
+                    }
+                )
+                for packet in packets:
+                    reviewer = str(packet.get("reviewer") or packet.get("dimension") or "unknown")
+                    current = reviewer_rows.get(
+                        reviewer,
+                        {
+                            "reviewer": reviewer,
+                            "prompt_tokens": 0,
+                            "completion_tokens": 0,
+                            "total_tokens": 0,
+                            "cost_usd": 0.0,
+                            "latency_ms": 0,
+                            "packet_count": 0,
+                            "reported_packet_count": 0,
+                            "unreported_packet_count": 0,
+                        },
+                    )
+                    packet_usage = summarize_packets([packet])
+                    current["prompt_tokens"] = int(current["prompt_tokens"]) + int(packet_usage["prompt_tokens"])
+                    current["completion_tokens"] = int(current["completion_tokens"]) + int(packet_usage["completion_tokens"])
+                    current["total_tokens"] = int(current["total_tokens"]) + int(packet_usage["total_tokens"])
+                    current["cost_usd"] = float(current["cost_usd"]) + float(packet_usage["cost_usd"])
+                    current["latency_ms"] = int(current["latency_ms"]) + int(packet_usage["latency_ms"])
+                    current["packet_count"] = int(current["packet_count"]) + 1
+                    current["reported_packet_count"] = int(current["reported_packet_count"]) + int(packet_usage["reported_packet_count"])
+                    current["unreported_packet_count"] = int(current["unreported_packet_count"]) + int(packet_usage["unreported_packet_count"])
+                    reviewer_rows[reviewer] = current
+            objective_rows.append(
+                {
+                    "objective_id": objective.id,
+                    "title": objective.title,
+                    "round_count": int(objective_usage["round_count"]),
+                    "packet_count": int(objective_usage["packet_count"]),
+                    "usage": objective_usage,
+                }
+            )
+
+        objective_rows.sort(key=lambda item: int((item.get("usage") or {}).get("total_tokens") or 0), reverse=True)
+        round_rows.sort(key=lambda item: int((item.get("usage") or {}).get("total_tokens") or 0), reverse=True)
+        reviewers = sorted(reviewer_rows.values(), key=lambda item: int(item.get("total_tokens") or 0), reverse=True)
+        avg_tokens_per_round = int(int(totals["total_tokens"]) / int(totals["round_count"])) if int(totals["round_count"]) else 0
+        avg_cost_per_round = float(totals["cost_usd"]) / int(totals["round_count"]) if int(totals["round_count"]) else 0.0
+        avg_tokens_per_packet = int(int(totals["total_tokens"]) / int(totals["packet_count"])) if int(totals["packet_count"]) else 0
+
+        return {
+            "project": serialize_dataclass(project),
+            "totals": totals,
+            "summary": {
+                "avg_tokens_per_round": avg_tokens_per_round,
+                "avg_cost_per_round": avg_cost_per_round,
+                "avg_tokens_per_packet": avg_tokens_per_packet,
+            },
+            "objectives": objective_rows,
+            "reviewers": reviewers,
+            "rounds": round_rows[:50],
         }
 
     def _latest_completed_task_for_objective(self, linked_tasks: list[Task]) -> Task | None:
@@ -9813,17 +10124,65 @@ class HarnessUIDataService:
         }
 
     def harness_overview(self) -> dict[str, object]:
+        with self._harness_overview_cache_lock:
+            cached = self._harness_overview_cache
+            if cached is not None and (time.monotonic() - cached[0]) < 5.0:
+                return cached[1]
+        payload = self._build_harness_overview()
+        with self._harness_overview_cache_lock:
+            self._harness_overview_cache = (time.monotonic(), payload)
+        return payload
+
+    def _harness_workflow_status_for_objective(
+        self,
+        objective: Objective,
+        linked_tasks: list[Task],
+    ) -> dict[str, object]:
+        planning = self.workflow_service.planning_readiness(objective.id)
+        execution = self.workflow_service.execution_readiness(objective.id, linked_tasks)
+        review = self.workflow_service.review_readiness(objective.id, linked_tasks)
+        current_stage = (
+            "review"
+            if objective.status == ObjectiveStatus.RESOLVED
+            else "execution"
+            if objective.status == ObjectiveStatus.EXECUTING
+            else "planning"
+        )
+        return {
+            "planning": {
+                "stage": planning.stage,
+                "ready": planning.ready,
+                "checks": _to_jsonable(planning.checks),
+            },
+            "execution": {
+                "stage": execution.stage,
+                "ready": execution.ready,
+                "checks": _to_jsonable(execution.checks),
+            },
+            "review": {
+                "stage": review.stage,
+                "ready": review.ready,
+                "checks": _to_jsonable(review.checks),
+            },
+            "current_stage": current_stage,
+        }
+
+    def _build_harness_overview(self) -> dict[str, object]:
         """System-wide harness dashboard data."""
         projects = []
         global_counts = {"completed": 0, "active": 0, "failed": 0, "pending": 0}
         active_objectives: list[dict[str, object]] = []
-        for project in self.store.list_projects():
+        projects_list = self.store.list_projects()
+        tasks_by_project: dict[str, list[Task]] = {}
+        for project in projects_list:
+            tasks_by_project[project.id] = self.store.list_tasks(project.id)
+        for project in projects_list:
             metrics = self.store.metrics_snapshot(project.id)
             tasks_by_status = metrics.get("tasks_by_status", {})
             for status_key in global_counts:
                 global_counts[status_key] += int(tasks_by_status.get(status_key, 0))
             objectives = self.store.list_objectives(project.id)
-            all_project_tasks = self.store.list_tasks(project.id)
+            all_project_tasks = tasks_by_project[project.id]
             active_objective = None
             all_objectives = []
             blocked_pending = 0
@@ -9831,16 +10190,26 @@ class HarnessUIDataService:
             runnable_pending = 0
             for obj in objectives:
                 linked_tasks = [t for t in all_project_tasks if t.objective_id == obj.id]
-                review = self._promotion_review_for_objective(obj.id, linked_tasks)
-                repo_promotion = self._repo_promotion_for_objective(obj.id, linked_tasks)
-                workflow = self._workflow_status_for_objective(obj, linked_tasks, review, repo_promotion)
                 task_counts = {"completed": 0, "active": 0, "failed": 0, "pending": 0}
                 for t in linked_tasks:
                     s = t.status.value if hasattr(t.status, "value") else str(t.status)
                     if s in task_counts:
                         task_counts[s] += 1
+                active_task_titles = [t.title for t in linked_tasks if t.status == TaskStatus.ACTIVE]
+                needs_workflow = bool(active_task_titles) or task_counts["pending"] > 0 or obj.status in {
+                    ObjectiveStatus.EXECUTING,
+                    ObjectiveStatus.PLANNING,
+                }
+                workflow = (
+                    self._harness_workflow_status_for_objective(obj, linked_tasks)
+                    if needs_workflow
+                    else None
+                )
+                review_ready = bool((workflow or {}).get("review", {}).get("ready"))
+                for t in linked_tasks:
+                    s = t.status.value if hasattr(t.status, "value") else str(t.status)
                     if s == TaskStatus.PENDING.value:
-                        queue_state = self.workflow_service.queue_state_for_task(t, review_ready=bool(workflow.get("review", {}).get("ready")))
+                        queue_state = self.workflow_service.queue_state_for_task(t, review_ready=review_ready)
                         state = str(queue_state.get("state") or "")
                         if state == "blocked_by_gate":
                             blocked_pending += 1
@@ -9856,14 +10225,14 @@ class HarnessUIDataService:
                     "status": obj.status.value,
                     "task_counts": task_counts,
                     "task_total": len(linked_tasks),
-                    "workflow": workflow,
                 }
                 all_objectives.append(obj_data)
-                active_task_titles = [t.title for t in linked_tasks if t.status == TaskStatus.ACTIVE]
                 if active_task_titles or task_counts["pending"] > 0 or obj.status in {ObjectiveStatus.EXECUTING, ObjectiveStatus.PLANNING}:
                     active_objectives.append(
                         {
                             **obj_data,
+                            "workflow": workflow
+                            or {"planning": {"checks": []}, "review": {"checks": []}},
                             "active_task_titles": active_task_titles,
                         }
                     )
@@ -9900,7 +10269,7 @@ class HarnessUIDataService:
                 })
         # Recent events for the feed
         recent_events = []
-        for project in self.store.list_projects():
+        for project in projects_list:
             records = self.store.list_context_records(
                 project_id=project.id, record_type="action_receipt",
             )
@@ -9928,7 +10297,7 @@ class HarnessUIDataService:
                     "objective_id": record.objective_id or "",
                 })
             # Include completed and failed task events
-            all_tasks = self.store.list_tasks(project.id)
+            all_tasks = tasks_by_project[project.id]
             for t in all_tasks:
                 status_val = t.status.value if hasattr(t.status, "value") else str(t.status)
                 if status_val == "completed":
@@ -12561,6 +12930,7 @@ def _build_fastapi_app(data_service: HarnessUIDataService, event_bus: _EventBus)
         except Exception as exc:
             return _JSONResponse({"error": str(exc)}, status_code=500)
         if notify:
+            data_service.invalidate_harness_overview_cache()
             event_bus.publish("workspace-changed")
         return _JSONResponse(payload, status_code=status_code)
 
@@ -12624,6 +12994,22 @@ def _build_fastapi_app(data_service: HarnessUIDataService, event_bus: _EventBus)
     @app.get("/api/projects/{project_ref}/workspace")
     def project_workspace(project_ref: str):
         return _dispatch(lambda: data_service.project_workspace(project_ref))
+
+    @app.get("/api/projects/{project_ref}/summary")
+    def project_summary(project_ref: str):
+        return _dispatch(lambda: data_service.project_summary_fast(project_ref))
+
+    @app.get("/api/projects/{project_ref}/objectives")
+    def project_objectives(project_ref: str):
+        return _dispatch(lambda: data_service.project_objectives_detail(project_ref))
+
+    @app.get("/api/projects/{project_ref}/objectives/{objective_id}")
+    def project_objective_detail(project_ref: str, objective_id: str):
+        return _dispatch(lambda: data_service.project_objective_detail(project_ref, objective_id))
+
+    @app.get("/api/projects/{project_ref}/token-performance")
+    def project_token_performance(project_ref: str):
+        return _dispatch(lambda: data_service.project_token_performance(project_ref))
 
     @app.get("/api/version")
     def version():
@@ -12840,6 +13226,7 @@ def start_ui_server(ctx, *, host: str, port: int, open_browser: bool, project_re
                     f"{r.id}:{r.record_type}:{r.created_at.isoformat()}" for r in recent_records
                 )
                 if last_signature is not None and sig != last_signature:
+                    data_service.invalidate_harness_overview_cache()
                     event_bus.publish("workspace-changed")
                 last_signature = sig
             except Exception:

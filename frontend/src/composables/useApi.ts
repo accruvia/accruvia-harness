@@ -14,8 +14,10 @@ export function useApi<T>(url: string) {
       const res = await globalThis.fetch(`${BASE}${url}`)
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
       data.value = await res.json()
+      return data.value
     } catch (e: any) {
       error.value = e.message
+      return null
     } finally {
       loading.value = false
     }

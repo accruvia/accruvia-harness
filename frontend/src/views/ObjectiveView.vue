@@ -1,7 +1,12 @@
 <template>
   <v-container fluid class="pa-6">
     <div class="d-flex align-center mb-6">
-      <v-btn icon="mdi-arrow-left" variant="text" size="small" :to="{ name: 'project', params: { projectId } }" />
+      <v-btn
+        icon="$arrowLeft"
+        variant="text"
+        size="small"
+        :to="{ name: 'project', params: { projectId: props.projectId } }"
+      />
       <div class="ml-3">
         <div class="text-caption text-on-surface-variant text-uppercase">{{ objective?.status }}</div>
         <h1 class="text-h4 font-weight-bold text-on-surface">{{ objective?.title || '...' }}</h1>
@@ -10,12 +15,14 @@
       <v-btn
         v-if="canPromote"
         color="primary"
-        prepend-icon="mdi-rocket-launch"
+        prepend-icon="$rocketLaunch"
         @click="promote"
       >Promote</v-btn>
     </div>
 
-    <v-row>
+    <ObjectiveSectionNav :project-id="props.projectId" :objective-id="props.objectiveId" />
+
+    <v-row class="mt-2">
       <!-- Left: Intent & Interrogation -->
       <v-col cols="12" md="5">
         <!-- Intent Model -->
@@ -41,7 +48,7 @@
           </div>
           <div v-if="interrogation?.questions?.length" class="d-flex flex-column ga-2">
             <div v-for="(q, i) in interrogation.questions" :key="i" class="text-body-2 text-on-surface pa-2 rounded" style="background: rgba(157,213,134,0.05)">
-              <v-icon size="x-small" color="primary" class="mr-1">mdi-help-circle</v-icon>
+              <v-icon size="x-small" color="primary" class="mr-1">$helpCircle</v-icon>
               {{ q }}
             </div>
           </div>
@@ -52,7 +59,7 @@
           <v-text-field
             v-model="comment"
             placeholder="Respond to red-team..."
-            append-inner-icon="mdi-send"
+            append-inner-icon="$send"
             @click:append-inner="sendComment"
             @keyup.enter="sendComment"
             hide-details
@@ -67,17 +74,48 @@
           <div class="d-flex align-center mb-3">
             <h3 class="text-caption text-uppercase text-on-surface-variant">Architecture Workspace</h3>
             <v-spacer />
-            <v-chip-group v-if="mermaid">
+            <div v-if="diagram?.content" class="diagram-controls mr-3">
+              <button type="button" @click="zoomOut">-</button>
+              <button type="button" @click="resetView">Reset</button>
+              <button type="button" @click="zoomIn">+</button>
+            </div>
+            <v-chip-group v-if="diagram">
               <v-chip
                 v-for="s in ['draft', 'investigating', 'paused', 'finished']"
                 :key="s"
-                :color="mermaid.status === s ? 'primary' : 'surface-variant'"
+                :color="diagram.status === s ? 'primary' : 'surface-variant'"
                 size="x-small"
                 label
               >{{ s }}</v-chip>
             </v-chip-group>
           </div>
-          <div v-if="mermaid?.content" class="pa-3 rounded font-mono text-body-2" style="background: rgba(0,0,0,0.3); white-space: pre-wrap; max-height: 300px; overflow: auto;">{{ mermaid.content }}</div>
+          <div
+            v-if="diagram?.content && mermaidSvg"
+            ref="diagramViewport"
+            class="diagram-shell"
+            @wheel.prevent="onWheel"
+            @mousedown="startPan"
+          >
+            <div
+              ref="diagramContent"
+              class="diagram-content"
+              :style="diagramTransform"
+              v-html="mermaidSvg"
+            />
+          </div>
+          <div
+            v-else-if="diagram?.content && renderError"
+            class="diagram-fallback pa-3 rounded"
+          >
+            <div class="text-body-2 text-error mb-2">{{ renderError }}</div>
+            <pre class="diagram-code">{{ diagram.content }}</pre>
+          </div>
+          <div v-else-if="diagram?.content" class="text-body-2 text-on-surface-variant">
+            Rendering diagram…
+          </div>
+          <div v-else class="text-body-2 text-on-surface-variant">
+            No architecture workspace artifact yet.
+          </div>
         </v-card>
 
         <!-- Review Report Card -->
@@ -101,7 +139,7 @@
                     :color="pkt.verdict === 'pass' ? 'success' : pkt.verdict === 'concern' ? 'warning' : 'error'"
                     size="small"
                     class="mr-2"
-                  >{{ pkt.verdict === 'pass' ? 'mdi-check-circle' : 'mdi-alert-circle' }}</v-icon>
+                  >{{ pkt.verdict === 'pass' ? '$checkCircle' : '$alertCircle' }}</v-icon>
                   <span class="text-caption font-weight-bold text-uppercase">{{ dimensionLabel(pkt.dimension) }}</span>
                 </div>
                 <p class="text-caption text-on-surface-variant">{{ pkt.summary?.slice(0, 100) }}{{ pkt.summary?.length > 100 ? '...' : '' }}</p>
@@ -125,8 +163,9 @@
                 <v-icon
                   :color="task.status === 'completed' ? 'success' : task.status === 'active' ? 'info' : task.status === 'failed' ? 'error' : 'on-surface-variant'"
                   size="small"
+                  :class="{ 'spin-icon': task.status === 'active' }"
                 >
-                  {{ task.status === 'completed' ? 'mdi-check-circle' : task.status === 'active' ? 'mdi-loading mdi-spin' : task.status === 'failed' ? 'mdi-close-circle' : 'mdi-circle-outline' }}
+                  {{ task.status === 'completed' ? '$checkCircle' : task.status === 'active' ? '$loading' : task.status === 'failed' ? '$closeCircle' : '$circleOutline' }}
                 </v-icon>
               </template>
               <v-list-item-title class="text-body-2">{{ task.title }}</v-list-item-title>
@@ -140,22 +179,38 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onActivated, onDeactivated, onBeforeUnmount, watch } from 'vue'
 import { useApi, post, useSSE } from '../composables/useApi'
+import ObjectiveSectionNav from '../components/ObjectiveSectionNav.vue'
 
 const props = defineProps<{ projectId: string; objectiveId: string }>()
 const comment = ref('')
+const mermaidSvg = ref('')
+const renderError = ref('')
+const diagramViewport = ref<HTMLDivElement | null>(null)
+const diagramContent = ref<HTMLDivElement | null>(null)
+const diagramScale = ref(1)
+const baseScale = ref(1)
+const panX = ref(0)
+const panY = ref(0)
+const isPanning = ref(false)
+const lastPointer = ref<{ x: number; y: number } | null>(null)
 
-const { data: workspace, fetch: fetchWorkspace } = useApi<any>(`/api/projects/${props.projectId}/workspace`)
+const { data: summary, fetch: fetchSummary } = useApi<any>(`/api/projects/${props.projectId}/summary`)
+const { data: detail, fetch: fetchDetail } = useApi<any>(`/api/projects/${props.projectId}/objectives/${props.objectiveId}`)
 
 const objective = computed(() => {
-  return (workspace.value?.objectives || []).find((o: any) => o.id === props.objectiveId)
+  return detail.value?.objective
+    || (summary.value?.objectives || []).find((o: any) => o.id === props.objectiveId)
 })
 
 const intent = computed(() => objective.value?.intent_model)
 const interrogation = computed(() => objective.value?.interrogation_review)
-const mermaid = computed(() => objective.value?.mermaid)
+const diagram = computed(() => objective.value?.diagram)
 const canPromote = computed(() => objective.value?.promotion_review?.review_clear)
+const diagramTransform = computed(() => ({
+  transform: `translate(${panX.value}px, ${panY.value}px) scale(${baseScale.value * diagramScale.value})`,
+}))
 
 const reviewRound = computed(() => {
   const rounds = objective.value?.promotion_review?.review_rounds || []
@@ -163,7 +218,8 @@ const reviewRound = computed(() => {
 })
 
 const tasks = computed(() => {
-  return (workspace.value?.tasks || []).filter((t: any) => t.objective_id === props.objectiveId)
+  return detail.value?.tasks
+    || (summary.value?.tasks || []).filter((t: any) => t.objective_id === props.objectiveId)
 })
 
 function dimensionLabel(dim: string) {
@@ -182,19 +238,245 @@ async function sendComment() {
     author: 'operator',
   })
   comment.value = ''
-  fetchWorkspace()
+  void fetchSummary()
+  void fetchDetail()
 }
 
 async function promote() {
   await post(`/api/objectives/${props.objectiveId}/promote`)
-  fetchWorkspace()
+  void fetchSummary()
+  void fetchDetail()
 }
 
-const { connect, disconnect } = useSSE(() => fetchWorkspace())
+let mermaidModule: any = null
+let mermaidLoadPromise: Promise<any> | null = null
 
-onMounted(() => {
-  fetchWorkspace()
+async function ensureMermaid() {
+  if (mermaidModule) return mermaidModule
+  if (!mermaidLoadPromise) {
+    mermaidLoadPromise = import('https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs')
+      .then((module) => {
+        const instance = module.default
+        instance.initialize({
+          startOnLoad: false,
+          theme: 'default',
+          securityLevel: 'loose',
+          flowchart: {
+            useMaxWidth: false,
+            htmlLabels: true,
+          },
+          themeVariables: {
+            fontSize: '18px',
+          },
+        })
+        mermaidModule = instance
+        return instance
+      })
+  }
+  return mermaidLoadPromise
+}
+
+async function renderDiagram() {
+  const code = diagram.value?.content || ''
+  if (!code) {
+    mermaidSvg.value = ''
+    renderError.value = ''
+    return
+  }
+  try {
+    renderError.value = ''
+    const mermaid = await ensureMermaid()
+    const id = `objective-diagram-${Math.random().toString(36).slice(2)}`
+    const rendered = await mermaid.render(id, code)
+    mermaidSvg.value = rendered.svg
+    queueMicrotask(() => {
+      fitDiagramToViewport()
+    })
+  } catch (error: any) {
+    mermaidSvg.value = ''
+    renderError.value = error?.message || 'Failed to render Mermaid diagram.'
+  }
+}
+
+function clampScale(next: number) {
+  return Math.min(4, Math.max(0.35, Number(next.toFixed(3))))
+}
+
+function zoomIn() {
+  diagramScale.value = clampScale(diagramScale.value * 1.2)
+}
+
+function zoomOut() {
+  diagramScale.value = clampScale(diagramScale.value / 1.2)
+}
+
+function resetView() {
+  fitDiagramToViewport()
+}
+
+function fitDiagramToViewport() {
+  if (!diagramViewport.value || !diagramContent.value) {
+    baseScale.value = 1
+    diagramScale.value = 1
+    panX.value = 0
+    panY.value = 0
+    return
+  }
+  const svg = diagramContent.value.querySelector('svg')
+  if (!(svg instanceof SVGSVGElement)) {
+    baseScale.value = 1
+    diagramScale.value = 1
+    panX.value = 0
+    panY.value = 0
+    return
+  }
+  const viewBox = svg.viewBox.baseVal
+  const naturalWidth = viewBox && viewBox.width ? viewBox.width : Number(svg.getAttribute('width') || 0) || 1200
+  const naturalHeight = viewBox && viewBox.height ? viewBox.height : Number(svg.getAttribute('height') || 0) || 700
+  const viewportWidth = Math.max(200, diagramViewport.value.clientWidth - 32)
+  const viewportHeight = Math.max(200, diagramViewport.value.clientHeight - 32)
+  const fit = Math.min(viewportWidth / naturalWidth, viewportHeight / naturalHeight)
+  baseScale.value = Math.max(0.45, Math.min(1.6, fit || 1))
+  diagramScale.value = 1
+  panX.value = Math.max(0, (viewportWidth - naturalWidth * baseScale.value) / 2)
+  panY.value = Math.max(0, (viewportHeight - naturalHeight * baseScale.value) / 2)
+}
+
+function onWheel(event: WheelEvent) {
+  if (!diagramViewport.value) return
+  const delta = event.deltaY < 0 ? 1.1 : 0.9
+  const currentScale = baseScale.value * diagramScale.value
+  const nextScale = clampScale(diagramScale.value * delta)
+  const actualNextScale = baseScale.value * nextScale
+  const rect = diagramViewport.value.getBoundingClientRect()
+  const pointerX = event.clientX - rect.left
+  const pointerY = event.clientY - rect.top
+  const worldX = (pointerX - panX.value) / currentScale
+  const worldY = (pointerY - panY.value) / currentScale
+  diagramScale.value = nextScale
+  panX.value = pointerX - worldX * actualNextScale
+  panY.value = pointerY - worldY * actualNextScale
+}
+
+function startPan(event: MouseEvent) {
+  if (event.button !== 0) return
+  isPanning.value = true
+  lastPointer.value = { x: event.clientX, y: event.clientY }
+}
+
+function onPointerMove(event: MouseEvent) {
+  if (!isPanning.value || !lastPointer.value) return
+  panX.value += event.clientX - lastPointer.value.x
+  panY.value += event.clientY - lastPointer.value.y
+  lastPointer.value = { x: event.clientX, y: event.clientY }
+}
+
+function stopPan() {
+  isPanning.value = false
+  lastPointer.value = null
+}
+
+const { connect, disconnect } = useSSE(() => {
+  void fetchSummary()
+  void fetchDetail()
+})
+
+watch(() => diagram.value?.content, () => {
+  void renderDiagram()
+}, { immediate: true })
+
+onActivated(() => {
+  void fetchSummary()
+  void fetchDetail()
+  void renderDiagram()
   connect()
 })
-onUnmounted(() => disconnect())
+onDeactivated(() => disconnect())
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('mousemove', onPointerMove)
+  window.addEventListener('mouseup', stopPan)
+}
+
+onBeforeUnmount(() => {
+  if (typeof window !== 'undefined') {
+    window.removeEventListener('mousemove', onPointerMove)
+    window.removeEventListener('mouseup', stopPan)
+  }
+})
 </script>
+
+<style scoped>
+.diagram-controls {
+  display: inline-flex;
+  gap: 0.35rem;
+}
+
+.diagram-controls button {
+  border: 1px solid rgba(125, 94, 67, 0.16);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.85);
+  color: rgb(var(--v-theme-on-surface));
+  padding: 0.35rem 0.75rem;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.diagram-shell {
+  position: relative;
+  min-height: 420px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.72);
+  overflow: hidden;
+  cursor: grab;
+}
+
+.diagram-shell:active {
+  cursor: grabbing;
+}
+
+.diagram-content {
+  position: absolute;
+  top: 1rem;
+  left: 1rem;
+  transform-origin: top left;
+  will-change: transform;
+}
+
+.diagram-content :deep(svg) {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: none;
+  min-width: 640px;
+}
+
+.diagram-fallback {
+  background: rgba(255, 245, 244, 0.95);
+}
+
+.diagram-code {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 0.83rem;
+  color: rgb(var(--v-theme-on-surface));
+}
+
+.spin-icon {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+</style>

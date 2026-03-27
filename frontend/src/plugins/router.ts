@@ -8,14 +8,39 @@ const routes = [
   },
   {
     path: '/projects/:projectId',
+    alias: '/projects/:projectId/objectives',
     name: 'project',
     component: () => import('../views/ProjectView.vue'),
+    props: true,
+  },
+  {
+    path: '/projects/:projectId/settings',
+    name: 'project-settings',
+    component: () => import('../views/SettingsView.vue'),
+    props: true,
+  },
+  {
+    path: '/projects/:projectId/token-performance',
+    name: 'project-token-performance',
+    component: () => import('../views/TokenPerformanceView.vue'),
     props: true,
   },
   {
     path: '/projects/:projectId/objectives/:objectiveId',
     name: 'objective',
     component: () => import('../views/ObjectiveView.vue'),
+    props: true,
+  },
+  {
+    path: '/projects/:projectId/objectives/:objectiveId/atomic',
+    name: 'objective-atomic',
+    component: () => import('../views/AtomicityView.vue'),
+    props: true,
+  },
+  {
+    path: '/projects/:projectId/objectives/:objectiveId/promotion',
+    name: 'objective-promotion',
+    component: () => import('../views/PromotionView.vue'),
     props: true,
   },
 ]
