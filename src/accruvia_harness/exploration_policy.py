@@ -8,6 +8,14 @@ Design rules:
 - Exploration lives in the harness, not in CLI wrappers.
 - High-risk tasks can disable exploration entirely.
 - Every decision is fully auditable via ``PolicyDecision``.
+
+Token-performance demotion (feat/token-performance-demotion):
+- ``_best_model`` now scores models on a composite metric combining:
+    success rate (weight 0.5), cost efficiency (0.3), and latency (0.2).
+- Cost and latency scores are computed relative to the best observed value
+  across the candidate set so the metric is dimensionless and comparable.
+- Models with no token data fall back to the optimistic prior (0.5) for
+  cost and latency components so they are not unfairly penalised.
 """
 
 from __future__ import annotations
@@ -19,6 +27,11 @@ from typing import Any
 
 from routellect.protocols import ModelCapability, RoutingDecision
 from routellect.routing_events import ModelUniverseSnapshot
+
+# Composite scoring weights.  Must sum to 1.0.
+_WEIGHT_SUCCESS = 0.5
+_WEIGHT_COST = 0.3
+_WEIGHT_LATENCY = 0.2
 
 
 @dataclass
@@ -72,7 +85,10 @@ class EpsilonGreedyPolicy:
         universe : ModelUniverseSnapshot
             Current available models.
         prior_outcomes : list[dict] | None
-            Historical outcomes for ranking (exploit path).
+            Historical outcomes for ranking (exploit path).  Each entry may
+            include token-performance keys emitted by the harness executor:
+            ``model_id``, ``success`` (bool), ``llm_cost_usd`` (float),
+            ``llm_total_tokens`` (int), ``llm_latency_ms`` (float).
         validation_profile : str
             If in ``high_risk_profiles``, exploration is suppressed.
         """
@@ -122,22 +138,75 @@ class EpsilonGreedyPolicy:
         available: list[ModelCapability],
         prior_outcomes: list[dict[str, Any]],
     ) -> ModelCapability:
-        """Rank available models by historical success rate, break ties by order."""
+        """Rank available models by composite score; break ties by order.
+
+        Composite score = 0.5 * success_rate
+                        + 0.3 * cost_efficiency   (lower cost → higher score)
+                        + 0.2 * latency_efficiency (lower latency → higher score)
+
+        Cost and latency scores are normalised relative to the best (lowest)
+        observed value so the metric is dimensionless.  Models with no
+        observed data receive an optimistic prior of 0.5 on each component.
+        """
         if not prior_outcomes:
             return available[0]
 
+        # Aggregate per-model statistics from prior outcomes.
         success_counts: dict[str, int] = {}
         total_counts: dict[str, int] = {}
+        cost_totals: dict[str, float] = {}
+        latency_totals: dict[str, float] = {}
+
         for outcome in prior_outcomes:
             mid = outcome.get("model_id", "")
+            if not mid:
+                continue
             total_counts[mid] = total_counts.get(mid, 0) + 1
             if outcome.get("success"):
                 success_counts[mid] = success_counts.get(mid, 0) + 1
+            cost = outcome.get("llm_cost_usd") or outcome.get("cost_usd") or 0.0
+            latency = outcome.get("llm_latency_ms") or outcome.get("latency_ms") or 0.0
+            cost_totals[mid] = cost_totals.get(mid, 0.0) + float(cost)
+            latency_totals[mid] = latency_totals.get(mid, 0.0) + float(latency)
 
-        def _score(model: ModelCapability) -> float:
-            total = total_counts.get(model.model_id, 0)
+        # Compute per-model averages for cost and latency.
+        avg_cost: dict[str, float] = {}
+        avg_latency: dict[str, float] = {}
+        for mid, total in total_counts.items():
+            if total > 0:
+                avg_cost[mid] = cost_totals.get(mid, 0.0) / total
+                avg_latency[mid] = latency_totals.get(mid, 0.0) / total
+
+        # Reference values for normalisation (best = lowest).
+        observed_costs = [v for v in avg_cost.values() if v > 0]
+        observed_latencies = [v for v in avg_latency.values() if v > 0]
+        best_cost = min(observed_costs) if observed_costs else None
+        best_latency = min(observed_latencies) if observed_latencies else None
+
+        def _cost_score(mid: str) -> float:
+            """Higher score = lower cost relative to best observed."""
+            if best_cost is None or mid not in avg_cost or avg_cost[mid] <= 0:
+                return 0.5  # Optimistic prior for untried / zero-cost models
+            return best_cost / avg_cost[mid]
+
+        def _latency_score(mid: str) -> float:
+            """Higher score = lower latency relative to best observed."""
+            if best_latency is None or mid not in avg_latency or avg_latency[mid] <= 0:
+                return 0.5  # Optimistic prior
+            return best_latency / avg_latency[mid]
+
+        def _success_rate(mid: str) -> float:
+            total = total_counts.get(mid, 0)
             if total == 0:
                 return 0.5  # Optimistic prior for untried models
-            return success_counts.get(model.model_id, 0) / total
+            return success_counts.get(mid, 0) / total
 
-        return max(available, key=_score)
+        def _composite_score(model: ModelCapability) -> float:
+            mid = model.model_id
+            return (
+                _WEIGHT_SUCCESS * _success_rate(mid)
+                + _WEIGHT_COST * _cost_score(mid)
+                + _WEIGHT_LATENCY * _latency_score(mid)
+            )
+
+        return max(available, key=_composite_score)

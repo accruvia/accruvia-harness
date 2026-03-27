@@ -62,6 +62,7 @@ class RoutingHook:
         self.policy = policy
         self.cache_path = cache_path
         self._event_log: list[dict[str, Any]] = []
+        self._outcome_history: list[dict[str, Any]] = []
 
     @classmethod
     def from_config(
@@ -153,18 +154,39 @@ class RoutingHook:
         self,
         decision: RoutingDecision,
         outcome: RoutingOutcome,
+        token_metrics: "dict[str, Any] | None" = None,
     ) -> None:
-        """Record an invocation outcome for learning and audit."""
+        """Record an invocation outcome for learning and audit.
+
+        token_metrics may contain llm_cost_usd, llm_total_tokens,
+        llm_latency_ms, llm_prompt_tokens, llm_completion_tokens.
+        These are stored in outcome_history for composite policy scoring.
+        """
         event = RoutingOutcomeEvent(
             decision=decision,
             outcome=outcome,
             universe_snapshot_id=self.universe.snapshot_id,
         )
         self._event_log.append(event.to_dict())
+        history_entry: dict[str, Any] = {
+            "model_id": decision.model_id,
+            "backend": decision.backend,
+            "success": outcome.success,
+        }
+        if token_metrics:
+            for k in ("llm_cost_usd", "llm_total_tokens", "llm_latency_ms",
+                      "llm_prompt_tokens", "llm_completion_tokens"):
+                if k in token_metrics:
+                    history_entry[k] = token_metrics[k]
+        self._outcome_history.append(history_entry)
 
     def get_event_log(self) -> list[dict[str, Any]]:
         """Return all routing events emitted during this session."""
         return list(self._event_log)
+
+    def get_outcome_history(self) -> list[dict[str, Any]]:
+        """Return token-enriched outcome history for composite policy scoring."""
+        return list(self._outcome_history)
 
 
 def _configured_backends(config: HarnessConfig) -> list[str]:

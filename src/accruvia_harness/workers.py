@@ -13,6 +13,7 @@ from .adapters import AdapterRegistry, build_adapter_registry
 from .config import HarnessConfig
 from .domain import Run, Task
 from .llm import LLMExecutionError, LLMInvocation, LLMRouter, build_llm_router
+from .routing_hook import RoutingHook
 from .policy import WorkResult
 from .subprocess_env import build_subprocess_env
 
@@ -574,10 +575,11 @@ class AgentCommandWorker(CommandWorker):
 
 
 class LLMTaskWorker:
-    def __init__(self, router: LLMRouter, model: str | None = None, telemetry=None) -> None:
+    def __init__(self, router: LLMRouter, model: str | None = None, telemetry=None, routing_hook: "RoutingHook | None" = None) -> None:
         self.router = router
         self.model = model
         self.telemetry = telemetry
+        self.routing_hook = routing_hook
 
     def work(self, task: Task, run: Run, workspace_root: Path) -> WorkResult:
         run_dir = workspace_root / "runs" / run.id
@@ -600,6 +602,28 @@ class LLMTaskWorker:
                 "llm_backend": result.backend,
                 "llm_model": self.model,
             }
+            # Feed token metrics back into the routing hook for policy learning.
+            if self.routing_hook is not None:
+                try:
+                    from routellect.protocols import RoutingDecision, RoutingOutcome
+                    _decision = RoutingDecision(
+                        model_id=str(result.diagnostics.get("model") or self.model or "default"),
+                        backend=result.backend,
+                        confidence=1.0,
+                        reasoning="executor success",
+                        universe_hash="",
+                        is_exploration=False,
+                    )
+                    _outcome = RoutingOutcome(success=True, error=None)
+                    _token_metrics = {
+                        k: result.diagnostics[k]
+                        for k in ("llm_cost_usd", "llm_total_tokens", "llm_latency_ms",
+                                  "llm_prompt_tokens", "llm_completion_tokens")
+                        if k in result.diagnostics
+                    }
+                    self.routing_hook.record_outcome(_decision, _outcome, token_metrics=_token_metrics)
+                except Exception:
+                    pass  # Never let feedback recording break execution
         except LLMExecutionError as exc:
             error_text = str(exc)
             timed_out = "timed out" in error_text.lower()
