@@ -13,6 +13,7 @@ from .adapters import AdapterRegistry, build_adapter_registry
 from .config import HarnessConfig
 from .domain import Run, Task
 from .llm import LLMExecutionError, LLMInvocation, LLMRouter, build_llm_router
+from .routing_hook import RoutingHook
 from .policy import WorkResult
 from .subprocess_env import build_subprocess_env
 
@@ -574,10 +575,11 @@ class AgentCommandWorker(CommandWorker):
 
 
 class LLMTaskWorker:
-    def __init__(self, router: LLMRouter, model: str | None = None, telemetry=None) -> None:
+    def __init__(self, router: LLMRouter, model: str | None = None, telemetry=None, routing_hook: "RoutingHook | None" = None) -> None:
         self.router = router
         self.model = model
         self.telemetry = telemetry
+        self.routing_hook = routing_hook
 
     def work(self, task: Task, run: Run, workspace_root: Path) -> WorkResult:
         run_dir = workspace_root / "runs" / run.id
@@ -585,6 +587,19 @@ class LLMTaskWorker:
         project_workspace = _prepared_project_workspace(run_dir)
         prompt = self._build_prompt(task, run)
         routed_backend = self.router.backend
+        # Capture the real routing decision before execution so we can pair it
+        # with the outcome record. Exploration flag, confidence, and universe
+        # snapshot fidelity are preserved — no synthetic reconstruction.
+        task_fingerprint = {"task_id": task.id, "validation_profile": task.validation_profile}
+        _policy_decision = None
+        if self.routing_hook is not None:
+            try:
+                _policy_decision = self.routing_hook.select_model_for(task_fingerprint)
+                if self.model is None:
+                    self.model = _policy_decision.routing_decision.model_id
+            except Exception:
+                pass  # Routing errors must never block execution
+
         try:
             result, routed_backend = self.router.execute(
                 invocation=LLMInvocation(
@@ -600,11 +615,39 @@ class LLMTaskWorker:
                 "llm_backend": result.backend,
                 "llm_model": self.model,
             }
+            # Record success with real token metrics from executor diagnostics.
+            if self.routing_hook is not None and _policy_decision is not None:
+                try:
+                    from routellect.protocols import RoutingOutcome as _RO
+                    _d = result.diagnostics
+                    self.routing_hook.record_outcome(
+                        _policy_decision.routing_decision,
+                        _RO(
+                            success=True,
+                            latency_ms=int(_d.get("llm_latency_ms") or 0),
+                            input_tokens=int(_d.get("llm_prompt_tokens") or 0),
+                            output_tokens=int(_d.get("llm_completion_tokens") or 0),
+                            cost=float(_d.get("llm_cost_usd") or 0.0),
+                            extra={"llm_total_tokens": float(_d.get("llm_total_tokens") or 0)},
+                        ),
+                    )
+                except Exception:
+                    pass  # Never let feedback recording break execution
         except LLMExecutionError as exc:
             error_text = str(exc)
             timed_out = "timed out" in error_text.lower()
             failure_category = "executor_timeout" if timed_out else "llm_executor_failure"
             worker_outcome = "blocked" if timed_out else "failed"
+            # Record failure so the policy can learn to demote bad backends.
+            if self.routing_hook is not None and _policy_decision is not None:
+                try:
+                    from routellect.protocols import RoutingOutcome as _RO
+                    self.routing_hook.record_outcome(
+                        _policy_decision.routing_decision,
+                        _RO(success=False, failure_kind=failure_category),
+                    )
+                except Exception:
+                    pass
             error_path = run_dir / "llm_error.txt"
             error_path.write_text(error_text, encoding="utf-8")
             report_path = run_dir / "report.json"
@@ -733,7 +776,7 @@ def build_worker(backend: str, shell_command: str | None = None) -> WorkerBacken
     raise ValueError(f"Unsupported worker backend: {backend}")
 
 
-def build_worker_from_config(config: HarnessConfig, telemetry=None) -> WorkerBackend:
+def build_worker_from_config(config: HarnessConfig, telemetry=None, routing_hook: "RoutingHook | None" = None) -> WorkerBackend:
     from .resource_limits import ResourceLimitPolicy, resolve_memory_limit_mb
     from .timeout_policy import ExecutionTimeoutPolicy
 
@@ -762,7 +805,7 @@ def build_worker_from_config(config: HarnessConfig, telemetry=None) -> WorkerBac
         cpu_time_limit_seconds=config.cpu_time_limit_seconds,
     )
     if config.worker_backend == "llm":
-        return LLMTaskWorker(build_llm_router(config, telemetry=telemetry), model=config.llm_model, telemetry=telemetry)
+        return LLMTaskWorker(build_llm_router(config, telemetry=telemetry), model=config.llm_model, telemetry=telemetry, routing_hook=routing_hook)
     if config.worker_backend == "local":
         return LocalArtifactWorker(adapter_registry=adapter_registry)
     if config.worker_backend == "shell":

@@ -9,6 +9,7 @@ from .services.issue_policy import IssueStatePolicy
 from .store import SQLiteHarnessStore
 from .telemetry import TelemetrySink
 from .validation import build_validator_registry
+from .routing_hook import RoutingHook
 from .workers import build_worker_from_config
 
 
@@ -58,5 +59,6 @@ def build_engine_from_config(
         issue_state_policy=build_issue_state_policy(config),
     )
     engine.set_llm_router(build_llm_router(config, telemetry=resolved_telemetry))
-    engine.set_worker(build_worker_from_config(config, telemetry=resolved_telemetry))
+    routing_hook = RoutingHook.from_config(config)
+    engine.set_worker(build_worker_from_config(config, telemetry=resolved_telemetry, routing_hook=routing_hook))
     return engine
