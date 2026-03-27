@@ -48,4 +48,38 @@ describe('dashboardState', () => {
       detail: '1 unresolved objectives remain even though no work is currently running.',
     })
   })
+
+  it('covers running, queued, historical, and quiet project states', () => {
+    expect(
+      projectDashboardState({
+        objectives: [{ status: 'resolved' }],
+        tasks_by_status: { active: 2, pending: 0, failed: 0, completed: 0 },
+      }).label,
+    ).toBe('Running')
+
+    expect(
+      projectDashboardState({
+        objectives: [{ status: 'resolved' }],
+        tasks_by_status: { active: 0, pending: 2, failed: 0, completed: 0 },
+      }).label,
+    ).toBe('Queued')
+
+    expect(
+      projectDashboardState({
+        objectives: [{ status: 'resolved' }],
+        tasks_by_status: { active: 0, pending: 0, failed: 2, completed: 4 },
+      }).label,
+    ).toBe('History to review')
+
+    expect(
+      projectDashboardState({
+        objectives: [{ status: 'resolved' }],
+        tasks_by_status: { active: 0, pending: 0, failed: 0, completed: 4 },
+      }).label,
+    ).toBe('Quiet')
+  })
+
+  it('returns an empty link when a recent signal lacks objective context', () => {
+    expect(dashboardEventLink({ project_id: 'project_1' })).toEqual({})
+  })
 })

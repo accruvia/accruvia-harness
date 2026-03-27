@@ -12,4 +12,18 @@ export default defineConfig({
       },
     },
   },
+  test: {
+    environment: 'jsdom',
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'json-summary'],
+      include: ['src/lib/**/*.ts', 'src/App.vue'],
+      thresholds: {
+        statements: 90,
+        branches: 85,
+        functions: 90,
+        lines: 90,
+      },
+    },
+  },
 })

@@ -163,7 +163,7 @@ watch(
       lastObjectiveId.value = nextObjectiveId
       globalThis.localStorage?.setItem(LAST_OBJECTIVE_KEY, nextObjectiveId)
     }
-    void hydrateProjectContext(nextProjectId || lastProjectId.value, nextObjectiveId || '')
+    void hydrateProjectContext(nextProjectId || lastProjectId.value, nextObjectiveId || lastObjectiveId.value)
   },
   { immediate: true },
 )
