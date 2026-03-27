@@ -89,6 +89,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import { apiUrl } from './composables/useApi'
 import { resolveVisibleContext } from './lib/contextState'
 
 const route = useRoute()
@@ -130,7 +131,7 @@ async function hydrateProjectContext(projectIdValue: string, objectiveIdValue: s
     return
   }
   try {
-    const response = await globalThis.fetch(`/api/projects/${encodeURIComponent(projectIdValue)}/summary`)
+    const response = await globalThis.fetch(apiUrl(`/api/projects/${encodeURIComponent(projectIdValue)}/summary`))
     if (!response.ok) throw new Error(`${response.status} ${response.statusText}`)
     const payload = await response.json()
     projectName.value = payload?.project?.name || projectIdValue
@@ -143,9 +144,9 @@ async function hydrateProjectContext(projectIdValue: string, objectiveIdValue: s
       objectiveName.value = matchingObjective.title
       return
     }
-    const objectiveResponse = await globalThis.fetch(
+    const objectiveResponse = await globalThis.fetch(apiUrl(
       `/api/projects/${encodeURIComponent(projectIdValue)}/objectives/${encodeURIComponent(objectiveIdValue)}`,
-    )
+    ))
     if (!objectiveResponse.ok) throw new Error(`${objectiveResponse.status} ${objectiveResponse.statusText}`)
     const objectivePayload = await objectiveResponse.json()
     objectiveName.value = objectivePayload?.objective?.title || objectiveIdValue

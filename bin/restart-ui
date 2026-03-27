@@ -36,7 +36,7 @@ if pgrep -f "accruvia_harness ui" >/dev/null 2>&1; then
   done
 fi
 
-setsid env PYTHONPATH=src "$python_bin" -m accruvia_harness ui --no-open-browser </dev/null >>"$log_path" 2>&1 &
+setsid env PYTHONPATH=src "$python_bin" -m accruvia_harness ui --host 127.0.0.1 --port 9100 --no-open-browser </dev/null >>"$log_path" 2>&1 &
 new_pid=$!
 echo "$new_pid" > "$pid_path"
 
@@ -47,7 +47,7 @@ for _ in {1..100}; do
     tail -n 50 "$log_path" >&2 || true
     exit 1
   fi
-  if grep -q "Harness UI running at http://" "$log_path" 2>/dev/null && curl -sf http://127.0.0.1:8765/api/version >/dev/null 2>&1; then
+  if grep -q "Harness API running at http://" "$log_path" 2>/dev/null && curl -sf http://127.0.0.1:9100/api/version >/dev/null 2>&1; then
     ready="yes"
     break
   fi
@@ -60,4 +60,4 @@ if [[ -z "$ready" ]]; then
   exit 1
 fi
 
-echo "Restarted UI as PID $new_pid and verified /api/version"
+echo "Restarted harness API backend as PID $new_pid and verified /api/version"

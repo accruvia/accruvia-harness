@@ -5,7 +5,7 @@ PIP ?= .venv/bin/pip
 # TODO(remove after packaged release): drop this once local installs/imports are deterministic.
 PYTHONPATH_VALUE := src
 
-.PHONY: help venv init install bootstrap install-temporal install-observability run ui-restart verify-test-import-safety test test-fast test-e2e test-observer test-temporal test-pytest temporal-up temporal-down
+.PHONY: help venv init install bootstrap install-temporal install-observability run ui-restart frontend-dev verify-test-import-safety test test-fast test-e2e test-observer test-temporal test-pytest temporal-up temporal-down
 
 help:
 	@echo "Targets:"
@@ -16,7 +16,8 @@ help:
 	@echo "  make install-temporal      Install Temporal extras"
 	@echo "  make install-observability Install observability extras"
 	@echo "  make run ARGS=\"status\"     Run the harness CLI"
-	@echo "  make ui-restart             Restart the Harness UI deterministically"
+	@echo "  make ui-restart             Restart the Harness API backend on :9100"
+	@echo "  make frontend-dev           Run the Vue frontend on :3000"
 	@echo "  make verify-test-import-safety  Fail fast if tests would import stale workspace code"
 	@echo "  make test-fast             Run the fast suite"
 	@echo "  make test                  Run the full suite"
@@ -49,6 +50,9 @@ run:
 
 ui-restart:
 	./bin/restart-ui
+
+frontend-dev:
+	npm --prefix frontend run dev
 
 verify-test-import-safety:
 	./bin/check-test-import-safety

@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import accruvia_harness.ui as ui_module
+from fastapi.testclient import TestClient
 from accruvia_harness.config import HarnessConfig
 from accruvia_harness.domain import (
     Artifact,
@@ -360,47 +361,32 @@ class FakePromotionEngine:
 
 
 class HarnessUIDataServiceTests(unittest.TestCase):
-    def test_objective_create_view_uses_dedicated_page_form(self) -> None:
-        self.assertIn('data-view="objective-create"', ui_module._OBJECTIVE_CREATE_HTML)
-        self.assertIn('page-create-objective-form', ui_module._OBJECTIVE_CREATE_HTML)
-        self.assertIn('page-create-objective-title', ui_module._OBJECTIVE_CREATE_HTML)
-        self.assertNotIn("window.prompt('New objective title:')", ui_module._APP_JS)
+    def test_fastapi_app_exposes_api_root_only(self) -> None:
+        client = TestClient(ui_module._build_fastapi_app(self.service, ui_module._EventBus()))
 
-    def test_token_performance_view_exists(self) -> None:
-        self.assertIn('data-view="token-performance"', ui_module._TOKEN_PERFORMANCE_HTML)
-        self.assertIn('token-performance-content', ui_module._TOKEN_PERFORMANCE_HTML)
-        self.assertIn('/token-performance', ui_module._APP_JS)
+        root = client.get("/")
+        version = client.get("/api/version")
+        legacy_page = client.get("/plan")
 
-    def test_settings_view_exists(self) -> None:
-        self.assertIn('data-view="settings"', ui_module._SETTINGS_HTML)
-        self.assertIn('settings-content', ui_module._SETTINGS_HTML)
-        self.assertIn('/settings', ui_module._APP_JS)
-        self.assertIn('repo-settings-save-btn', ui_module._APP_JS)
-        self.assertIn('modal-overlay', ui_module._FULL_UI_HTML)
-        self.assertIn('modal-status-row', ui_module._FULL_UI_HTML)
+        self.assertEqual(200, root.status_code)
+        self.assertEqual("accruvia-harness-api", root.json()["service"])
+        self.assertEqual(200, version.status_code)
+        self.assertEqual(ui_module._GIT_COMMIT, version.json()["commit"])
+        self.assertEqual(404, legacy_page.status_code)
 
-    def test_harness_view_surfaces_objective_board_and_canonical_dashboard_route(self) -> None:
-        self.assertIn('data-view="harness"', ui_module._HARNESS_HTML)
-        self.assertIn('harness-objective-board', ui_module._HARNESS_HTML)
-        self.assertIn("href: '/', label: 'Dashboard'", ui_module._APP_JS)
-        self.assertIn("href: `/plan${suffix}`, label: 'Plan'", ui_module._APP_JS)
-        self.assertIn('workflow-stage-strip', ui_module._FULL_UI_HTML)
-        self.assertIn('objective-gate-summary', ui_module._FULL_UI_HTML)
+    def test_fastapi_app_allows_local_frontend_cors(self) -> None:
+        client = TestClient(ui_module._build_fastapi_app(self.service, ui_module._EventBus()))
 
-    def test_promotion_review_ui_supports_force_promotion_override(self) -> None:
-        self.assertIn("promotion-force-approve-btn", ui_module._APP_JS)
-        self.assertIn("/promotion/force", ui_module._APP_JS)
-        self.assertIn("This round was operator-approved", ui_module._APP_JS)
-        self.assertIn("underlying reviewer packets remain recorded below", ui_module._APP_JS)
-        self.assertIn("Promote Objective to The Repo", ui_module._APP_JS)
-        self.assertIn("promotion-primary-button", ui_module._APP_JS)
-        self.assertIn("/promote", ui_module._APP_JS)
-        self.assertIn("Remote updated:", ui_module._APP_JS)
-        self.assertIn("Promotion did not complete", ui_module._APP_JS)
-        self.assertIn("Promotion completed", ui_module._APP_JS)
-        self.assertIn("Promoting Objective to The Repo", ui_module._APP_JS)
-        self.assertIn("Pushing to origin/", ui_module._APP_JS)
-        self.assertIn("setModalWorking", ui_module._APP_JS)
+        response = client.options(
+            "/api/version",
+            headers={
+                "Origin": "http://localhost:3000",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("http://localhost:3000", response.headers["access-control-allow-origin"])
 
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()

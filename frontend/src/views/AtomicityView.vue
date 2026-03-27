@@ -305,7 +305,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onActivated, onDeactivated, ref, watch } from 'vue'
-import { post, useApi, useSSE } from '../composables/useApi'
+import { apiUrl, post, useApi, useSSE } from '../composables/useApi'
 import ObjectiveSectionNav from '../components/ObjectiveSectionNav.vue'
 import { useRoute } from 'vue-router'
 import { buildContextChangeDetail } from '../lib/contextState'
@@ -518,7 +518,7 @@ function syncAssistantPendingState() {
 }
 
 async function fetchJson(url: string, options?: RequestInit) {
-  const response = await globalThis.fetch(url, options)
+  const response = await globalThis.fetch(apiUrl(url), options)
   const payload = await response.json().catch(() => ({}))
   if (!response.ok) {
     throw new Error(payload?.error || `${response.status} ${response.statusText}`)

@@ -1,6 +1,10 @@
 import { ref, type Ref } from 'vue'
 
-const BASE = ''
+export const API_BASE = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
+
+export function apiUrl(path: string) {
+  return `${API_BASE}${path}`
+}
 
 export function useApi<T>(url: string) {
   const data: Ref<T | null> = ref(null)
@@ -11,7 +15,7 @@ export function useApi<T>(url: string) {
     loading.value = true
     error.value = null
     try {
-      const res = await globalThis.fetch(`${BASE}${url}`)
+      const res = await globalThis.fetch(apiUrl(url))
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
       data.value = await res.json()
       return data.value
@@ -27,7 +31,7 @@ export function useApi<T>(url: string) {
 }
 
 export async function post(url: string, body?: object) {
-  const res = await globalThis.fetch(`${BASE}${url}`, {
+  const res = await globalThis.fetch(apiUrl(url), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined,
@@ -36,7 +40,7 @@ export async function post(url: string, body?: object) {
 }
 
 export async function put(url: string, body: object) {
-  const res = await globalThis.fetch(`${BASE}${url}`, {
+  const res = await globalThis.fetch(apiUrl(url), {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -48,7 +52,7 @@ export function useSSE(onEvent: (data: string) => void) {
   let source: EventSource | null = null
 
   function connect() {
-    source = new EventSource(`${BASE}/api/events`)
+    source = new EventSource(apiUrl('/api/events'))
     source.onmessage = (e) => onEvent(e.data)
     source.onerror = () => {
       source?.close()

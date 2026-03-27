@@ -245,7 +245,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
-import { post, useApi } from '../composables/useApi'
+import { apiUrl, post, useApi } from '../composables/useApi'
 import HarnessSectionNav from '../components/HarnessSectionNav.vue'
 import { assistantSendButtonState, hasAssistantPending } from '../lib/assistantState'
 import { buildContextChangeDetail } from '../lib/contextState'
@@ -425,7 +425,7 @@ function persistContext(projectId: string, objectiveId: string) {
 }
 
 async function fetchJson(url: string, options?: RequestInit) {
-  const response = await globalThis.fetch(url, options)
+  const response = await globalThis.fetch(apiUrl(url), options)
   const payload = await response.json().catch(() => ({}))
   if (!response.ok) {
     throw new Error(payload?.error || `${response.status} ${response.statusText}`)
