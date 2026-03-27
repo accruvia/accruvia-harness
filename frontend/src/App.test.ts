@@ -61,7 +61,6 @@ describe('App shell context', () => {
     expect(wrapper.text()).toContain('Refactor task execution pipeline')
     expect(wrapper.text()).toContain('Settings')
     expect(wrapper.text()).toContain('Token Performance')
-    expect(wrapper.text()).toContain('Project Objectives')
   })
 
   it('prefers current route params over persisted context', async () => {
@@ -185,5 +184,38 @@ describe('App shell context', () => {
 
     expect(wrapper.text()).toContain('project_seed')
     expect(wrapper.text()).toContain('objective_seed')
+  })
+
+  it('falls back to the objective detail endpoint when the project summary lacks the current objective title', async () => {
+    localStorage.setItem('accruvia:last-project-id', 'project_seed')
+    localStorage.setItem('accruvia:last-objective-id', 'objective_live')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url.includes('/summary')) {
+          return {
+            ok: true,
+            json: async () => ({
+              project: { name: 'accruvia-harness' },
+              objectives: [],
+            }),
+          }
+        }
+        return {
+          ok: true,
+          json: async () => ({
+            objective: { title: 'Context Management' },
+          }),
+        }
+      }),
+    )
+
+    const wrapper = mount(App, { global: { stubs: globalStubs } })
+    await flushPromises()
+    await flushPromises()
+    await nextTick()
+
+    expect(wrapper.text()).toContain('accruvia-harness')
+    expect(wrapper.text()).toContain('Context Management')
   })
 })

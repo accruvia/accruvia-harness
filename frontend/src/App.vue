@@ -68,12 +68,6 @@
           :to="{ name: 'project-token-performance', params: { projectId } }"
         />
         <v-list-item
-          v-if="projectId"
-          prepend-icon="$folderOutline"
-          title="Project Objectives"
-          :to="{ name: 'project', params: { projectId } }"
-        />
-        <v-list-item
           prepend-icon="$bookOpenVariant"
           title="Docs"
           href="/docs"
@@ -145,7 +139,16 @@ async function hydrateProjectContext(projectIdValue: string, objectiveIdValue: s
       return
     }
     const matchingObjective = (payload?.objectives || []).find((item: any) => item.id === objectiveIdValue)
-    objectiveName.value = matchingObjective?.title || objectiveIdValue
+    if (matchingObjective?.title) {
+      objectiveName.value = matchingObjective.title
+      return
+    }
+    const objectiveResponse = await globalThis.fetch(
+      `/api/projects/${encodeURIComponent(projectIdValue)}/objectives/${encodeURIComponent(objectiveIdValue)}`,
+    )
+    if (!objectiveResponse.ok) throw new Error(`${objectiveResponse.status} ${objectiveResponse.statusText}`)
+    const objectivePayload = await objectiveResponse.json()
+    objectiveName.value = objectivePayload?.objective?.title || objectiveIdValue
   } catch {
     projectName.value = projectIdValue
     objectiveName.value = objectiveIdValue || ''

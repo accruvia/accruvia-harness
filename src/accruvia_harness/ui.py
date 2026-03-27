@@ -7519,6 +7519,10 @@ class HarnessUIDataService:
         objective = self.store.get_objective(objective_id)
         if objective is None or objective.project_id != project.id:
             raise ValueError(f"Unknown objective for project: {objective_id}")
+        current_interrogation = self._interrogation_review(objective.id)
+        if not current_interrogation.get("completed") and self._should_auto_complete_interrogation(objective.id):
+            self._persist_interrogation_record("interrogation_completed", objective, current_interrogation)
+            self.reconcile_objective_workflow(objective.id)
         tasks = [task for task in self.store.list_tasks(project.id) if task.objective_id == objective.id]
         review = self._promotion_review_for_objective(objective.id, tasks)
         repo_promotion = self._repo_promotion_for_objective(objective.id, tasks)
@@ -7527,6 +7531,9 @@ class HarnessUIDataService:
         latest_intent = self.store.latest_intent_model(objective.id)
         latest_mermaid = self.store.latest_mermaid_artifact(objective.id)
         latest_proposal = self._latest_mermaid_proposal(objective.id)
+        comment_records = self.store.list_context_records(objective_id=objective.id, record_type="operator_comment")[-12:]
+        reply_records = self.store.list_context_records(objective_id=objective.id, record_type="harness_reply")[-12:]
+        receipt_records = self.store.list_context_records(objective_id=objective.id, record_type="action_receipt")[-12:]
         task_payload = [
             {
                 "id": task.id,
@@ -7561,6 +7568,40 @@ class HarnessUIDataService:
                 "promotion_review": review,
             },
             "tasks": task_payload,
+            "comments": [
+                {
+                    "id": record.id,
+                    "text": record.content,
+                    "author": record.author_id,
+                    "created_at": record.created_at.isoformat(),
+                    "objective_id": record.objective_id,
+                    "task_id": record.task_id,
+                }
+                for record in comment_records
+            ],
+            "replies": [
+                {
+                    "id": record.id,
+                    "text": record.content,
+                    "created_at": record.created_at.isoformat(),
+                    "objective_id": record.objective_id,
+                    "task_id": record.task_id,
+                    "reply_to": str(record.metadata.get("reply_to") or ""),
+                }
+                for record in reply_records
+            ],
+            "receipts": [
+                {
+                    "id": record.id,
+                    "text": record.content,
+                    "created_at": record.created_at.isoformat(),
+                    "objective_id": record.objective_id,
+                    "task_id": record.task_id,
+                    "kind": str(record.metadata.get("kind") or ""),
+                    "status": str(record.metadata.get("status") or ""),
+                }
+                for record in receipt_records
+            ],
         }
 
     def project_token_performance(self, project_ref: str) -> dict[str, object]:
@@ -11413,7 +11454,9 @@ class HarnessUIDataService:
             for record in self.store.list_context_records(objective_id=objective_id, record_type="operator_comment")
             if not created_at or record.created_at.isoformat() >= created_at
         ]
-        return len(answers) >= len(questions)
+        if len(answers) >= len(questions):
+            return True
+        return any(len((record.content or "").strip()) >= 48 for record in answers)
 
     def _build_interrogation_prompt(self, objective_id: str, deterministic: dict[str, object]) -> str:
         objective = self.store.get_objective(objective_id)

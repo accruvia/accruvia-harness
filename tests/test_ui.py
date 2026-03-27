@@ -631,6 +631,34 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         self.assertEqual(self.objective.id, payload["replies"][0]["objective_id"])
         self.assertFalse(result["frustration_detected"])
 
+    def test_project_objective_detail_includes_recent_comment_and_reply_history(self) -> None:
+        result = self.service.add_operator_comment(
+            self.project.id,
+            "We need to document the context passed from planning to atomicity to promotion.",
+            "shaun",
+            self.objective.id,
+        )
+
+        payload = self.service.project_objective_detail(self.project.id, self.objective.id)
+
+        self.assertEqual(1, len(payload["comments"]))
+        self.assertEqual(result["comment"]["text"], payload["comments"][0]["text"])
+        self.assertEqual(1, len(payload["replies"]))
+        self.assertEqual(result["reply"]["text"], payload["replies"][0]["text"])
+
+    def test_substantive_single_answer_can_complete_interrogation(self) -> None:
+        result = self.service.add_operator_comment(
+            self.project.id,
+            "We need to document the context passed at each stage, define telemetry for every handoff, and make the promotion packet explain exactly what evidence advanced from atomic work into review.",
+            "shaun",
+            self.objective.id,
+        )
+
+        interrogation = self.service.project_objective_detail(self.project.id, self.objective.id)["objective"]["interrogation_review"]
+
+        self.assertTrue(interrogation["completed"])
+        self.assertTrue(result["reply"]["text"])
+
     def test_add_operator_comment_can_infer_frustration(self) -> None:
         result = self.service.add_operator_comment(
             self.project.id,
