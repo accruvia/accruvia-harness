@@ -288,6 +288,7 @@ function objectiveActivity(obj: any) {
   const pendingCount = Number(counts.pending || 0)
   const completedCount = Number(counts.completed || 0)
   const failedCount = Number(counts.failed || 0)
+  const unresolvedFailedCount = Number(obj.promotion_review?.unresolved_failed_count || 0)
 
   if (activeCount > 0) {
     return {
@@ -346,11 +347,19 @@ function objectiveActivity(obj: any) {
     }
   }
 
-  if (failedCount > 0) {
+  if (unresolvedFailedCount > 0) {
     return {
       tone: 'error',
-      label: failedCount === 1 ? '1 failed task' : `${failedCount} failed tasks`,
-      detail: 'This objective has failed task work that likely needs remediation or review.',
+      label: unresolvedFailedCount === 1 ? '1 blocking failed task' : `${unresolvedFailedCount} blocking failed tasks`,
+      detail: 'This objective cannot advance until failed work is retried or explicitly dispositioned.',
+    }
+  }
+
+  if (failedCount > 0) {
+    return {
+      tone: 'surface-variant',
+      label: failedCount === 1 ? '1 historical failed task' : `${failedCount} historical failed tasks`,
+      detail: 'This objective has failed task history, but those failures are not currently blocking progress.',
     }
   }
 

@@ -188,6 +188,7 @@ const attentionItems = computed(() => {
       const active = Number(taskCounts.active || 0)
       const pending = Number(taskCounts.pending || 0)
       const failed = Number(taskCounts.failed || 0)
+      const unresolvedFailed = Number(objective.unresolved_failed_count || 0)
       const unresolved = objective.status !== 'resolved'
 
       if (active > 0) {
@@ -215,8 +216,8 @@ const attentionItems = computed(() => {
           ...objective,
           tone: 'warning',
           label: 'Paused objective',
-          detail: failed > 0
-            ? 'This objective is paused and still has failed task outcomes to review.'
+          detail: unresolvedFailed > 0
+            ? 'This objective is paused and still has blocking failed tasks that need a disposition or retry decision.'
             : 'This objective is paused. Decide whether to resume it or leave it parked.',
           priority: 2,
           status_label: 'Paused by workflow state',
@@ -242,12 +243,12 @@ const attentionItems = computed(() => {
           status_label: 'Not yet started',
         }
       }
-      if (failed > 0 && unresolved) {
+      if (unresolvedFailed > 0 && unresolved) {
         return {
           ...objective,
           tone: 'error',
-          label: failed === 1 ? '1 failed task' : `${failed} failed tasks`,
-          detail: 'Execution history contains failed tasks that may need remediation or explicit disposition.',
+          label: unresolvedFailed === 1 ? '1 blocking failed task' : `${unresolvedFailed} blocking failed tasks`,
+          detail: 'This objective cannot advance until failed work is retried or explicitly dispositioned.',
           priority: 5,
           status_label: 'Failed work present',
         }
@@ -269,6 +270,7 @@ const unresolvedItems = computed(() => {
       .filter((objective: any) => objective.status !== 'resolved')
       .map((objective: any) => {
         const counts = objective.task_counts || {}
+        const unresolvedFailed = Number(objective.unresolved_failed_count || 0)
         let label = 'Unresolved'
         let tone = 'warning'
         let detail = 'This objective has not yet reached a resolved state.'
@@ -286,6 +288,10 @@ const unresolvedItems = computed(() => {
           label = 'Running'
           tone = 'info'
           detail = 'The harness is actively executing work for this unresolved objective.'
+        } else if (unresolvedFailed > 0) {
+          label = 'Blocked by failed work'
+          tone = 'error'
+          detail = 'This unresolved objective still has blocking failed tasks that need a retry or explicit disposition.'
         }
         return {
           ...objective,
@@ -319,11 +325,13 @@ const failureItems = computed(() => {
       .filter((objective: any) => Number(objective.task_counts?.failed || 0) > 0)
       .map((objective: any) => ({
         ...objective,
-        tone: objective.status === 'resolved' ? 'surface-variant' : 'error',
-        label: objective.task_counts.failed === 1 ? '1 failed task' : `${objective.task_counts.failed} failed tasks`,
-        detail: objective.status === 'resolved'
-          ? 'This objective is resolved but still has failed task history worth reviewing.'
-          : 'This objective still carries failed task outcomes that may need remediation or disposition.',
+        tone: Number(objective.unresolved_failed_count || 0) > 0 ? 'error' : 'surface-variant',
+        label: Number(objective.unresolved_failed_count || 0) > 0
+          ? (Number(objective.unresolved_failed_count) === 1 ? '1 blocking failed task' : `${objective.unresolved_failed_count} blocking failed tasks`)
+          : (objective.task_counts.failed === 1 ? '1 historical failed task' : `${objective.task_counts.failed} historical failed tasks`),
+        detail: Number(objective.unresolved_failed_count || 0) > 0
+          ? 'These failures are still blocking workflow and need a retry or explicit disposition.'
+          : 'These failures are retained as history, but they are not currently blocking progress.',
         status_label: `Status: ${objective.status}`,
       })),
   ).sort((left: any, right: any) => Number(right.task_counts?.failed || 0) - Number(left.task_counts?.failed || 0))

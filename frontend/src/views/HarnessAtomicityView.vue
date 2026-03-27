@@ -33,7 +33,7 @@
               <span>{{ objective.task_counts?.active || 0 }} active</span>
               <span>{{ objective.task_counts?.pending || 0 }} pending</span>
               <span>{{ objective.task_counts?.completed || 0 }} completed</span>
-              <span>{{ objective.task_counts?.failed || 0 }} failed</span>
+              <span>{{ objective.unresolved_failed_count || 0 }} blocking failed</span>
             </div>
           </button>
         </div>
@@ -64,13 +64,22 @@
                 <div class="value">{{ selectedObjective.task_counts?.active || 0 }}</div>
               </div>
               <div class="detail-stat">
-                <div class="label">Failed</div>
-                <div class="value">{{ selectedObjective.task_counts?.failed || 0 }}</div>
+                <div class="label">Blocking Failed</div>
+                <div class="value">{{ selectedObjective.unresolved_failed_count || 0 }}</div>
+              </div>
+              <div class="detail-stat">
+                <div class="label">Last activity</div>
+                <div class="value">{{ generationLastActivity(selectedObjective) }}</div>
               </div>
             </div>
 
             <div class="panel-label mb-2">Current constraint</div>
             <div class="panel-copy mb-4">{{ activity(selectedObjective).detail }}</div>
+
+            <div v-if="generationStatusNote(selectedObjective)" class="detail-callout mb-4">
+              <div class="panel-label mb-1">Generation status</div>
+              <div class="text-body-2 text-on-surface">{{ generationStatusNote(selectedObjective) }}</div>
+            </div>
 
             <div v-if="blockingReason(selectedObjective)" class="detail-callout mb-4">
               <div class="panel-label mb-1">Blocking reason</div>
@@ -102,16 +111,33 @@ function firstFailedCheck(checkGroup: any) {
   return (checkGroup?.checks || []).find((check: any) => !check.ok)
 }
 
+function firstRelevantFailedCheck(checkGroup: any) {
+  return (checkGroup?.checks || []).find((check: any) => !check.ok && !String(check.key || '').endsWith('_placeholder'))
+}
+
 function activity(objective: any) {
   const counts = objective.task_counts || {}
   if ((counts.active || 0) > 0) {
     return { tone: 'info', label: `${counts.active} active tasks`, detail: 'The harness is currently executing atomic units for this objective.' }
   }
   const generation = objective.atomic_generation || {}
-  if (generation.status === 'running') {
-    return { tone: 'info', label: 'Generating atomic units', detail: generation.phase || 'The harness is deriving or refining atomic units from the Mermaid.' }
+  if (generation.status === 'running' && generation.is_stale) {
+    return {
+      tone: 'warning',
+      label: 'Generation stalled',
+      detail: `Atomic generation started ${formatRelativeTime(generation.started_at)} and has not reported activity since ${formatRelativeTime(generation.last_activity_at)}.`,
+    }
   }
-  const blocker = firstFailedCheck(objective.execution_gate)
+  if (generation.status === 'running') {
+    return {
+      tone: 'info',
+      label: 'Generating atomic units',
+      detail: generation.phase
+        ? `Atomic generation is ${generation.phase}. Last activity ${formatRelativeTime(generation.last_activity_at)}.`
+        : `Atomic generation is in progress. Last activity ${formatRelativeTime(generation.last_activity_at)}.`,
+    }
+  }
+  const blocker = firstRelevantFailedCheck(objective.execution_gate)
   if (blocker?.key === 'interrogation_complete') {
     return { tone: 'warning', label: 'Waiting on interrogation', detail: blocker.detail }
   }
@@ -121,8 +147,19 @@ function activity(objective: any) {
   if ((counts.pending || 0) > 0) {
     return { tone: 'warning', label: `${counts.pending} pending tasks`, detail: 'Atomic tasks exist but are waiting to run.' }
   }
+  if ((objective.unresolved_failed_count || 0) > 0) {
+    return {
+      tone: 'error',
+      label: objective.unresolved_failed_count === 1 ? '1 blocking failed task' : `${objective.unresolved_failed_count} blocking failed tasks`,
+      detail: 'Promotion/review cannot proceed until these failed tasks are retried or explicitly dispositioned.',
+    }
+  }
   if ((counts.failed || 0) > 0) {
-    return { tone: 'error', label: `${counts.failed} failed tasks`, detail: 'Atomic work has failed tasks that need remediation or review.' }
+    return {
+      tone: 'surface-variant',
+      label: `${counts.failed} historical failed`,
+      detail: 'This objective has failed task history, but those failures are not currently blocking progress.',
+    }
   }
   if ((counts.completed || 0) > 0) {
     return { tone: 'success', label: 'Atomic work completed', detail: 'Atomic execution has completed for this objective.' }
@@ -131,15 +168,67 @@ function activity(objective: any) {
 }
 
 function blockingReason(objective: any) {
-  return firstFailedCheck(objective.execution_gate)?.detail || ''
+  if ((objective.unresolved_failed_count || 0) > 0) {
+    return objective.unresolved_failed_count === 1
+      ? 'One failed task still needs an explicit retry or disposition decision before workflow can advance.'
+      : `${objective.unresolved_failed_count} failed tasks still need explicit retry or disposition decisions before workflow can advance.`
+  }
+  const generation = objective.atomic_generation || {}
+  if (generation.status === 'running' && generation.is_stale) {
+    return 'Atomic generation appears stale. The harness has not reported generation activity recently and may need a restart or operator review.'
+  }
+  return firstRelevantFailedCheck(objective.execution_gate)?.detail || ''
 }
 
 function generationLabel(objective: any) {
   const generation = objective.atomic_generation || {}
+  if (generation.status === 'running' && generation.is_stale) return 'stalled'
   if (generation.status === 'running') return 'running'
   if (generation.status === 'completed') return `v${generation.diagram_version || '?'} done`
   if (generation.status === 'failed') return 'failed'
   return 'idle'
+}
+
+function generationLastActivity(objective: any) {
+  const generation = objective.atomic_generation || {}
+  if (!generation.last_activity_at) return 'none'
+  return formatRelativeTime(generation.last_activity_at)
+}
+
+function generationStatusNote(objective: any) {
+  const generation = objective.atomic_generation || {}
+  if (generation.status === 'running' && generation.is_stale) {
+    return `This generation started ${formatRelativeTime(generation.started_at)} and has not emitted progress since ${formatRelativeTime(generation.last_activity_at)}. It looks stale, not actively working.`
+  }
+  if (generation.status === 'running') {
+    return `This generation started ${formatRelativeTime(generation.started_at)} and last reported activity ${formatRelativeTime(generation.last_activity_at)}.`
+  }
+  if (generation.status === 'completed') {
+    return `Atomic generation completed ${formatRelativeTime(generation.completed_at || generation.last_activity_at)}.`
+  }
+  if (generation.status === 'failed') {
+    return `Atomic generation failed ${formatRelativeTime(generation.failed_at || generation.last_activity_at)}.`
+  }
+  return ''
+}
+
+function formatRelativeTime(value: string) {
+  if (!value) return 'recently'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return 'recently'
+  const diffMinutes = Math.floor((Date.now() - date.getTime()) / 60000)
+  if (diffMinutes < 1) return 'just now'
+  if (diffMinutes < 60) return `${diffMinutes} min ago`
+  const diffHours = Math.floor(diffMinutes / 60)
+  if (diffHours < 24) return `${diffHours} hr ago`
+  const diffDays = Math.floor(diffHours / 24)
+  if (diffDays < 7) return `${diffDays} day${diffDays === 1 ? '' : 's'} ago`
+  return date.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  })
 }
 
 onMounted(async () => {

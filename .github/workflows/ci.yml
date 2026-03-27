@@ -54,6 +54,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e '.[temporal]'
 
+      - name: Reset Docker Hub auth
+        run: |
+          docker logout || true
+          docker logout docker.io || true
+
       - name: Start Temporal
         run: docker compose -f docker-compose.temporal.yml up -d
 

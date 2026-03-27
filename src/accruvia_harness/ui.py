@@ -7621,6 +7621,7 @@ class HarnessUIDataService:
                 workflow = self._harness_workflow_status_for_objective(objective, linked_tasks)
                 gate = objective_execution_gate(self.store, objective.id)
                 generation = self._atomic_generation_state(objective.id)
+                review = self._promotion_review_for_objective(objective.id, linked_tasks)
                 task_counts = {"completed": 0, "active": 0, "failed": 0, "pending": 0}
                 latest_activity = objective.updated_at.isoformat() if objective.updated_at else ""
                 for task in linked_tasks:
@@ -7643,6 +7644,8 @@ class HarnessUIDataService:
                         },
                         "atomic_generation": generation,
                         "task_counts": task_counts,
+                        "unresolved_failed_count": int(review.get("unresolved_failed_count") or 0),
+                        "waived_failed_count": int(review.get("waived_failed_count") or 0),
                         "task_total": sum(task_counts.values()),
                         "latest_activity_at": latest_activity,
                     }
@@ -12041,6 +12044,13 @@ class HarnessUIDataService:
             "coverage_complete": coverage_complete,
             "last_critique_problems": last_critique_problems,
             "last_coverage_gaps": last_coverage_gaps,
+            "is_stale": self._atomic_generation_is_stale(
+                {
+                    "status": status,
+                    "last_activity_at": last_activity_at,
+                },
+                objective_id,
+            ),
         }
 
     def _atomic_units_for_objective(
