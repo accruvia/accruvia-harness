@@ -283,6 +283,24 @@ MIGRATIONS: list[Migration] = [
         ALTER TABLE tasks ADD COLUMN attempt_metadata_json TEXT NOT NULL DEFAULT '{}';
         """,
     ),
+    Migration(
+        version=14,
+        name="routing_outcome_history",
+        sql="""
+        CREATE TABLE IF NOT EXISTS routing_outcome_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            model_id TEXT NOT NULL,
+            success INTEGER NOT NULL,
+            llm_cost_usd REAL NOT NULL DEFAULT 0.0,
+            llm_total_tokens REAL NOT NULL DEFAULT 0.0,
+            llm_latency_ms REAL NOT NULL DEFAULT 0.0,
+            payload_json TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX IF NOT EXISTS idx_routing_outcome_history_recorded_at
+        ON routing_outcome_history(recorded_at);
+        """,
+    ),
 ]
 
 

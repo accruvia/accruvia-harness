@@ -12,6 +12,7 @@ Design rules:
 
 from __future__ import annotations
 
+import math
 import random
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -122,22 +123,92 @@ class EpsilonGreedyPolicy:
         available: list[ModelCapability],
         prior_outcomes: list[dict[str, Any]],
     ) -> ModelCapability:
-        """Rank available models by historical success rate, break ties by order."""
+        """Rank models by success first, then by cost/tokens/latency efficiency."""
         if not prior_outcomes:
             return available[0]
 
         success_counts: dict[str, int] = {}
         total_counts: dict[str, int] = {}
+        cost_sums: dict[str, float] = {}
+        token_sums: dict[str, float] = {}
+        latency_sums: dict[str, float] = {}
+        metric_counts: dict[str, int] = {}
+
+        def _to_non_negative_float(value: Any) -> float | None:
+            if value is None:
+                return None
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                return None
+            if not math.isfinite(numeric) or numeric < 0.0:
+                return None
+            return numeric
+
         for outcome in prior_outcomes:
             mid = outcome.get("model_id", "")
+            if not mid:
+                continue
             total_counts[mid] = total_counts.get(mid, 0) + 1
             if outcome.get("success"):
                 success_counts[mid] = success_counts.get(mid, 0) + 1
+            cost = _to_non_negative_float(outcome.get("llm_cost_usd"))
+            total_tokens = _to_non_negative_float(outcome.get("llm_total_tokens"))
+            latency = _to_non_negative_float(outcome.get("llm_latency_ms"))
+            if cost is None and "cost" in outcome:
+                cost = _to_non_negative_float(outcome.get("cost"))
+            if total_tokens is None and ("input_tokens" in outcome or "output_tokens" in outcome):
+                input_tokens = _to_non_negative_float(outcome.get("input_tokens")) or 0.0
+                output_tokens = _to_non_negative_float(outcome.get("output_tokens")) or 0.0
+                total_tokens = input_tokens + output_tokens
+            if latency is None and "latency_ms" in outcome:
+                latency = _to_non_negative_float(outcome.get("latency_ms"))
+            if cost is None and total_tokens is None and latency is None:
+                continue
+            metric_counts[mid] = metric_counts.get(mid, 0) + 1
+            cost_sums[mid] = cost_sums.get(mid, 0.0) + (cost or 0.0)
+            token_sums[mid] = token_sums.get(mid, 0.0) + (total_tokens or 0.0)
+            latency_sums[mid] = latency_sums.get(mid, 0.0) + (latency or 0.0)
 
-        def _score(model: ModelCapability) -> float:
+        total_metric_rows = sum(metric_counts.values())
+        global_cost_avg = sum(cost_sums.values()) / total_metric_rows if total_metric_rows else 1.0
+        global_tokens_avg = sum(token_sums.values()) / total_metric_rows if total_metric_rows else 1.0
+        global_latency_avg = sum(latency_sums.values()) / total_metric_rows if total_metric_rows else 1.0
+
+        def _score(model: ModelCapability) -> tuple[float, str]:
             total = total_counts.get(model.model_id, 0)
             if total == 0:
-                return 0.5  # Optimistic prior for untried models
-            return success_counts.get(model.model_id, 0) / total
+                # Mildly optimistic prior for untried models.
+                return (0.7, model.model_id)
 
-        return max(available, key=_score)
+            success_rate = success_counts.get(model.model_id, 0) / total
+            metric_count = metric_counts.get(model.model_id, 0)
+            avg_cost = (
+                cost_sums.get(model.model_id, 0.0) / metric_count
+                if metric_count
+                else global_cost_avg
+            )
+            avg_tokens = (
+                token_sums.get(model.model_id, 0.0) / metric_count
+                if metric_count
+                else global_tokens_avg
+            )
+            avg_latency = (
+                latency_sums.get(model.model_id, 0.0) / metric_count
+                if metric_count
+                else global_latency_avg
+            )
+
+            cost_factor = avg_cost / max(global_cost_avg, 1e-9)
+            token_factor = avg_tokens / max(global_tokens_avg, 1e-9)
+            latency_factor = avg_latency / max(global_latency_avg, 1e-9)
+            # Lower score is better. Success dominates, metrics are tie-breakers.
+            score = (
+                (1.0 - success_rate) * 0.6
+                + cost_factor * 0.2
+                + token_factor * 0.1
+                + latency_factor * 0.1
+            )
+            return (score, model.model_id)
+
+        return min(available, key=_score)

@@ -158,6 +158,30 @@ class TestEpsilonGreedyPolicy:
         assert decision.routing_decision.model_id == "sonnet"
         assert decision.exploration_flag is False
 
+    def test_exploit_uses_metric_history_to_break_ties(self):
+        import random
+        policy = EpsilonGreedyPolicy(epsilon=0.0, rng=random.Random(42))
+        universe = self._make_universe()
+        prior = [
+            {
+                "model_id": "sonnet",
+                "success": True,
+                "llm_cost_usd": 1.5,
+                "llm_total_tokens": 2000,
+                "llm_latency_ms": 1100,
+            },
+            {
+                "model_id": "gpt-4o",
+                "success": True,
+                "llm_cost_usd": 0.2,
+                "llm_total_tokens": 300,
+                "llm_latency_ms": 150,
+            },
+        ]
+        decision = policy.select({"task": "test"}, universe, prior_outcomes=prior)
+        assert decision.routing_decision.model_id == "gpt-4o"
+        assert decision.exploration_flag is False
+
     def test_explore_selects_random_model(self):
         import random
         policy = EpsilonGreedyPolicy(epsilon=1.0, rng=random.Random(42))
@@ -191,7 +215,7 @@ class TestEpsilonGreedyPolicy:
 
 
 class TestRoutingHook:
-    def _make_hook(self, epsilon: float = 0.0) -> RoutingHook:
+    def _make_hook(self, epsilon: float = 0.0, db_path: Path | None = None) -> RoutingHook:
         import random
         models = [
             ModelCapability(backend="claude", provider="anthropic", model_id="sonnet"),
@@ -199,7 +223,7 @@ class TestRoutingHook:
         ]
         universe = ModelUniverseSnapshot(models=models)
         policy = EpsilonGreedyPolicy(epsilon=epsilon, rng=random.Random(42))
-        return RoutingHook(universe=universe, policy=policy)
+        return RoutingHook(universe=universe, policy=policy, db_path=db_path)
 
     def test_select_model_returns_valid_decision(self):
         hook = self._make_hook()
@@ -231,6 +255,50 @@ class TestRoutingHook:
         log = hook.get_event_log()
         assert len(log) == 1
         assert log[0]["outcome"]["success"] is True
+
+    def test_select_uses_internal_outcome_history_by_default(self):
+        hook = self._make_hook()
+        decision = RoutingDecision(
+            model_id="gpt-4o",
+            backend="codex",
+            confidence=1.0,
+            universe_hash=hook.universe.snapshot_id,
+        )
+        outcome = RoutingOutcome(
+            success=True,
+            latency_ms=120,
+            cost=0.1,
+            input_tokens=80,
+            output_tokens=40,
+            extra={"llm_cost_usd": 0.1, "llm_total_tokens": 120, "llm_latency_ms": 120},
+        )
+        hook.record_outcome(decision, outcome)
+
+        selected = hook.select_model_for({"task": "test"})
+        assert selected.routing_decision.model_id == "gpt-4o"
+
+    def test_outcome_history_persists_to_sqlite(self, tmp_path: Path):
+        db_path = tmp_path / "harness.db"
+        first = self._make_hook(db_path=db_path)
+        decision = RoutingDecision(
+            model_id="gpt-4o",
+            backend="codex",
+            confidence=1.0,
+            universe_hash=first.universe.snapshot_id,
+        )
+        outcome = RoutingOutcome(
+            success=True,
+            latency_ms=90,
+            cost=0.05,
+            input_tokens=45,
+            output_tokens=30,
+            extra={"llm_cost_usd": 0.05, "llm_total_tokens": 75, "llm_latency_ms": 90},
+        )
+        first.record_outcome(decision, outcome)
+
+        second = self._make_hook(db_path=db_path)
+        selected = second.select_model_for({"task": "test"})
+        assert selected.routing_decision.model_id == "gpt-4o"
 
     def test_fallback_on_unknown_model(self):
         """Safety rail: if policy somehow returns a model not in the
