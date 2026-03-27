@@ -8,7 +8,30 @@
 
       <div v-if="projectId" class="context-block">
         <div class="context-label">Project</div>
-        <div class="context-value">{{ projectId }}</div>
+        <router-link class="context-value context-link" :to="{ name: 'project', params: { projectId } }">
+          {{ projectLabel }}
+        </router-link>
+        <template v-if="objectiveId">
+          <div class="context-label mt-3">Objective</div>
+          <router-link
+            class="context-value context-link"
+            :to="{ name: 'objective', params: { projectId, objectiveId } }"
+          >
+            {{ objectiveLabel }}
+          </router-link>
+        </template>
+        <div class="context-actions">
+          <router-link class="context-action" :to="{ name: 'harness-objectives' }">
+            Change project
+          </router-link>
+          <router-link
+            v-if="projectId"
+            class="context-action"
+            :to="{ name: 'project', params: { projectId } }"
+          >
+            Change objective
+          </router-link>
+        </div>
       </div>
 
       <v-list density="compact" nav class="px-3">
@@ -34,18 +57,6 @@
         />
         <v-list-item
           v-if="projectId"
-          prepend-icon="$formatListBulleted"
-          title="Project Objectives"
-          :to="{ name: 'project', params: { projectId } }"
-        />
-        <v-list-item
-          v-if="projectId && objectiveId"
-          prepend-icon="$bookOpenVariant"
-          title="Objective Overview"
-          :to="{ name: 'objective', params: { projectId, objectiveId } }"
-        />
-        <v-list-item
-          v-if="projectId"
           prepend-icon="$cogOutline"
           title="Settings"
           :to="{ name: 'project-settings', params: { projectId } }"
@@ -57,16 +68,10 @@
           :to="{ name: 'project-token-performance', params: { projectId } }"
         />
         <v-list-item
-          v-if="projectId && objectiveId"
-          prepend-icon="$sourceBranch"
-          title="Objective Atomicity"
-          :to="{ name: 'objective-atomic', params: { projectId, objectiveId } }"
-        />
-        <v-list-item
-          v-if="projectId && objectiveId"
-          prepend-icon="$rocketLaunch"
-          title="Objective Promotion"
-          :to="{ name: 'objective-promotion', params: { projectId, objectiveId } }"
+          v-if="projectId"
+          prepend-icon="$folderOutline"
+          title="Project Objectives"
+          :to="{ name: 'project', params: { projectId } }"
         />
         <v-list-item
           prepend-icon="$bookOpenVariant"
@@ -88,20 +93,88 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
 const route = useRoute()
+const LAST_PROJECT_KEY = 'accruvia:last-project-id'
+const LAST_OBJECTIVE_KEY = 'accruvia:last-objective-id'
+const projectName = ref('')
+const objectiveName = ref('')
+const lastProjectId = ref(globalThis.localStorage?.getItem(LAST_PROJECT_KEY) || '')
+const lastObjectiveId = ref(globalThis.localStorage?.getItem(LAST_OBJECTIVE_KEY) || '')
 
-const projectId = computed(() => {
+const currentProjectId = computed(() => {
   const raw = route.params.projectId
   return typeof raw === 'string' ? raw : ''
 })
 
-const objectiveId = computed(() => {
+const currentObjectiveId = computed(() => {
   const raw = route.params.objectiveId
   return typeof raw === 'string' ? raw : ''
 })
+
+const projectId = computed(() => currentProjectId.value || lastProjectId.value)
+const objectiveId = computed(() => currentObjectiveId.value || lastObjectiveId.value)
+
+const projectLabel = computed(() => projectName.value || projectId.value)
+const objectiveLabel = computed(() => objectiveName.value || objectiveId.value)
+
+async function hydrateProjectContext(projectIdValue: string, objectiveIdValue: string) {
+  if (!projectIdValue) {
+    projectName.value = ''
+    objectiveName.value = ''
+    return
+  }
+  try {
+    const response = await globalThis.fetch(`/api/projects/${encodeURIComponent(projectIdValue)}/summary`)
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`)
+    const payload = await response.json()
+    projectName.value = payload?.project?.name || projectIdValue
+    if (!objectiveIdValue) {
+      objectiveName.value = ''
+      return
+    }
+    const matchingObjective = (payload?.objectives || []).find((item: any) => item.id === objectiveIdValue)
+    objectiveName.value = matchingObjective?.title || objectiveIdValue
+  } catch {
+    projectName.value = projectIdValue
+    objectiveName.value = objectiveIdValue || ''
+  }
+}
+
+watch(
+  [currentProjectId, currentObjectiveId],
+  ([nextProjectId, nextObjectiveId]) => {
+    if (nextProjectId) {
+      lastProjectId.value = nextProjectId
+      globalThis.localStorage?.setItem(LAST_PROJECT_KEY, nextProjectId)
+    }
+    if (nextObjectiveId) {
+      lastObjectiveId.value = nextObjectiveId
+      globalThis.localStorage?.setItem(LAST_OBJECTIVE_KEY, nextObjectiveId)
+    }
+    void hydrateProjectContext(nextProjectId || lastProjectId.value, nextObjectiveId || '')
+  },
+  { immediate: true },
+)
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('accruvia-context-change', (event: Event) => {
+    const detail = (event as CustomEvent).detail || {}
+    const nextProjectId = typeof detail.projectId === 'string' ? detail.projectId : ''
+    const nextObjectiveId = typeof detail.objectiveId === 'string' ? detail.objectiveId : ''
+    if (nextProjectId) {
+      lastProjectId.value = nextProjectId
+      globalThis.localStorage?.setItem(LAST_PROJECT_KEY, nextProjectId)
+    }
+    if (nextObjectiveId) {
+      lastObjectiveId.value = nextObjectiveId
+      globalThis.localStorage?.setItem(LAST_OBJECTIVE_KEY, nextObjectiveId)
+    }
+    void hydrateProjectContext(nextProjectId || lastProjectId.value, nextObjectiveId || lastObjectiveId.value)
+  })
+}
 </script>
 
 <style scoped>
@@ -142,6 +215,39 @@ const objectiveId = computed(() => {
   font-weight: 600;
   color: rgb(var(--v-theme-on-surface));
   word-break: break-word;
+}
+
+.context-link {
+  display: block;
+  text-decoration: none;
+}
+
+.context-link:hover {
+  text-decoration: underline;
+}
+
+.context-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.85rem;
+}
+
+.context-action {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid rgba(125, 94, 67, 0.14);
+  border-radius: 999px;
+  background: rgba(255, 251, 245, 0.72);
+  color: rgb(var(--v-theme-on-surface));
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 0.38rem 0.7rem;
+  text-decoration: none;
+}
+
+.context-action:hover {
+  border-color: rgba(179, 92, 46, 0.28);
 }
 
 .app-main {

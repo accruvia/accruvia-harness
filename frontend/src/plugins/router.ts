@@ -3,13 +3,14 @@ import { createRouter, createWebHistory } from 'vue-router'
 const routes = [
   {
     path: '/',
-    name: 'harness-objectives',
-    component: () => import('../views/HarnessObjectivesView.vue'),
-  },
-  {
-    path: '/dashboard',
+    alias: '/dashboard',
     name: 'dashboard',
     component: () => import('../views/DashboardView.vue'),
+  },
+  {
+    path: '/objectives',
+    name: 'harness-objectives',
+    component: () => import('../views/HarnessObjectivesView.vue'),
   },
   {
     path: '/atomicity',

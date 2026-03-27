@@ -83,7 +83,14 @@
         </div>
         <v-card color="surface-light" class="pa-5">
           <div class="d-flex flex-column ga-3">
-            <div v-for="event in recentSignals" :key="`${event.created_at}-${event.text}`" class="signal-row">
+            <component
+              :is="event.project_id && event.objective_id ? 'router-link' : 'div'"
+              v-for="event in recentSignals"
+              :key="`${event.created_at}-${event.text}`"
+              class="signal-row"
+              :class="{ 'signal-link': event.project_id && event.objective_id }"
+              v-bind="eventLinkProps(event)"
+            >
               <v-icon :color="event.tone" size="x-small" class="mt-1">$circle</v-icon>
               <div class="ml-3 flex-grow-1 min-w-0">
                 <div class="text-body-2 text-on-surface">{{ event.text }}</div>
@@ -92,7 +99,7 @@
                   · {{ formatTimestamp(event.created_at) }}
                 </div>
               </div>
-            </div>
+            </component>
           </div>
         </v-card>
       </v-col>
@@ -480,6 +487,20 @@ function formatTimestamp(value: string) {
   })
 }
 
+function eventLinkProps(event: any) {
+  if (!event.project_id || !event.objective_id) return {}
+  if (event.task_id) {
+    return {
+      to: {
+        name: 'objective-atomic',
+        params: { projectId: event.project_id, objectiveId: event.objective_id },
+        query: { taskId: event.task_id },
+      },
+    }
+  }
+  return { to: { name: 'objective', params: { projectId: event.project_id, objectiveId: event.objective_id } } }
+}
+
 async function refreshHarness() {
   const payload = await fetchHarness()
   if (payload) {
@@ -508,6 +529,19 @@ onMounted(() => {
 .signal-row {
   display: flex;
   align-items: flex-start;
+}
+
+.signal-link {
+  text-decoration: none;
+  color: inherit;
+  border-radius: 12px;
+  padding: 0.35rem 0.4rem;
+  margin: 0 -0.4rem;
+  transition: background-color 160ms ease;
+}
+
+.signal-link:hover {
+  background: rgba(255, 247, 238, 0.9);
 }
 
 .metric-card {

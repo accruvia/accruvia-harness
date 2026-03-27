@@ -219,6 +219,16 @@ class CommandLLMExecutor:
             response_text = completed.stdout
             response_path.write_text(response_text, encoding="utf-8")
 
+        response_cli_json = _try_parse_cli_json_output(response_text)
+        if response_cli_json is not None and bool(response_cli_json.get("is_error")):
+            error_message = str(response_cli_json.get("result") or "").strip() or f"{self.backend_name} CLI returned an error"
+            raise LLMExecutionError(error_message)
+
+        cli_json = _try_parse_cli_json_output(completed.stdout)
+        if cli_json is not None and bool(cli_json.get("is_error")):
+            error_message = str(cli_json.get("result") or "").strip() or f"{self.backend_name} CLI returned an error"
+            raise LLMExecutionError(error_message)
+
         metadata: dict[str, object] = {}
         if metadata_path.exists():
             try:
@@ -227,7 +237,6 @@ class CommandLLMExecutor:
                 metadata = {}
 
         if not metadata:
-            cli_json = _try_parse_cli_json_output(completed.stdout)
             if cli_json is not None:
                 if not (response_path.exists() and response_path.stat().st_size > 0):
                     response_text = str(cli_json.get("result") or "")
@@ -390,8 +399,8 @@ class LLMRouter:
                             telemetry.warn(
                                 "llm_transient_retry",
                                 f"Transient error on {backend} (attempt {attempt}/{max_tries}): {error_str}",
-                                backend=backend,
-                            )
+                            backend=backend,
+                        )
                         import time as _time
                         _time.sleep(min(attempt * 5, 15))
                         continue
@@ -409,6 +418,7 @@ class LLMRouter:
                             task_id=invocation.task.id,
                             run_id=invocation.run.id,
                         )
+                    break
         details = "; ".join(f"{item['backend']}: {item['error']}" for item in failures)
         raise LLMExecutionError(f"All configured LLM executors failed. {details}")
 

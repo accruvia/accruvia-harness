@@ -36,6 +36,12 @@ class TaskResponderContext:
     status: str
     strategy: str
     objective: str
+    analysis_summary: str = ""
+    failure_message: str = ""
+    root_cause_hint: str = ""
+    backend_failure_kind: str = ""
+    backend_failure_explanation: str = ""
+    evidence_to_inspect: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -108,6 +114,93 @@ def answer_ui_message(packet: ResponderContextPacket, message: str) -> Responder
                 "matches your intended flow before execution."
             ),
             recommended_action="review_mermaid",
+            retrieved_memories=packet.retrieved_memories,
+        )
+
+    if packet.task is not None and (
+        "what failed" in lowered
+        or "why did this task fail" in lowered
+        or "why did it fail" in lowered
+        or "why did this fail" in lowered
+        or "explain the failure" in lowered
+        or "explain why" in lowered
+    ):
+        detail_bits = []
+        if packet.task.analysis_summary:
+            detail_bits.append(packet.task.analysis_summary)
+        if packet.task.backend_failure_explanation:
+            detail_bits.append(packet.task.backend_failure_explanation)
+        if packet.task.failure_message:
+            detail_bits.append(f"Raw failure: {packet.task.failure_message}")
+        if packet.task.root_cause_hint and packet.task.root_cause_hint != packet.task.failure_message:
+            detail_bits.append(f"Root-cause hint: {packet.task.root_cause_hint}")
+        if detail_bits:
+            return ResponderResult(
+                reply=" ".join(detail_bits),
+                recommended_action="review_run" if packet.run is not None else "none",
+                evidence_refs=_run_refs(packet),
+                retrieved_memories=packet.retrieved_memories,
+            )
+
+    if packet.task is not None and (
+        "should i retry" in lowered
+        or "retry or waive" in lowered
+        or "waive" in lowered
+    ):
+        failure_cause = packet.task.failure_message or packet.task.analysis_summary or "the latest failed run"
+        infra_like = "all worker backends failed" in failure_cause.lower() or "executor/infrastructure" in failure_cause.lower()
+        if packet.task.backend_failure_kind in {"quota", "auth", "backend_unavailable"}:
+            infra_like = True
+        return ResponderResult(
+            reply=(
+                (f"This looks infrastructure-related rather than like a completed product judgment. " if infra_like else "")
+                + f"Retry if {failure_cause} looks transient or environmental. "
+                + "Waive only if the task is obsolete, superseded, or no longer needed for promotion. "
+                "If the failure points to a real implementation gap, retry or replace the work instead of waiving it."
+            ),
+            recommended_action="review_run" if packet.run is not None else "none",
+            evidence_refs=_run_refs(packet),
+            retrieved_memories=packet.retrieved_memories,
+        )
+
+    if packet.task is not None and (
+        "what evidence should i inspect next" in lowered
+        or "what should i inspect next" in lowered
+        or "what evidence next" in lowered
+    ):
+        available = ", ".join(packet.task.evidence_to_inspect[:4]) if packet.task.evidence_to_inspect else (
+            ", ".join(packet.run.available_sections[:4]) if packet.run is not None else ""
+        )
+        failure_bits = []
+        if packet.task.analysis_summary:
+            failure_bits.append(packet.task.analysis_summary)
+        if packet.task.backend_failure_explanation:
+            failure_bits.append(packet.task.backend_failure_explanation)
+        if packet.task.failure_message:
+            failure_bits.append(f"Raw failure: {packet.task.failure_message}")
+        evidence_text = (
+            f"Inspect these artifacts next: {available}."
+            if available
+            else "Inspect the latest run artifact bundle and any persisted report or stderr output for this task."
+        )
+        backend_check_text = "For this task, I would first confirm whether the backend failure was quota, auth, or executor configuration before deciding to retry or waive it."
+        if packet.task.backend_failure_kind == "quota":
+            backend_check_text = "This looks like a quota or credit exhaustion issue. Confirm the CLI stderr or provider account state before retrying."
+        elif packet.task.backend_failure_kind == "auth":
+            backend_check_text = "This looks like an authentication issue. Confirm the CLI stderr, token state, or login/session before retrying."
+        elif packet.task.backend_failure_kind == "backend_unavailable":
+            backend_check_text = "This looks like backend or executor availability trouble. Confirm the worker stderr and executor configuration before retrying."
+        return ResponderResult(
+            reply=" ".join(
+                part for part in [
+                    "Start with the latest run for this exact task.",
+                    " ".join(failure_bits) if failure_bits else "",
+                    evidence_text,
+                    backend_check_text,
+                ] if part
+            ),
+            recommended_action="review_run" if packet.run is not None else "none",
+            evidence_refs=_run_refs(packet),
             retrieved_memories=packet.retrieved_memories,
         )
 

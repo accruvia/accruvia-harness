@@ -13,12 +13,41 @@
       <v-col cols="12" lg="7">
         <div class="d-flex align-center justify-space-between flex-wrap ga-3 mb-4">
           <h2 class="section-title">Global objectives board</h2>
-          <div class="section-meta">{{ objectives.length }} objectives</div>
+          <div class="section-meta">{{ filteredObjectives.length }} of {{ objectives.length }} objectives</div>
+        </div>
+
+        <div class="filter-bar mb-4">
+          <v-text-field
+            v-model="objectiveQuery"
+            label="Filter objectives"
+            hide-details
+            clearable
+          />
+          <div class="project-filter-group">
+            <button
+              type="button"
+              class="project-filter"
+              :class="{ active: selectedProjectFilter === '' }"
+              @click="selectedProjectFilter = ''"
+            >
+              All projects
+            </button>
+            <button
+              v-for="project in projectOptions"
+              :key="project"
+              type="button"
+              class="project-filter"
+              :class="{ active: selectedProjectFilter === project }"
+              @click="selectedProjectFilter = project"
+            >
+              {{ project }}
+            </button>
+          </div>
         </div>
 
         <div class="objective-grid">
           <button
-            v-for="objective in objectives"
+            v-for="objective in filteredObjectives"
             :key="objective.id"
             type="button"
             class="objective-tile"
@@ -92,6 +121,8 @@ import HarnessSectionNav from '../components/HarnessSectionNav.vue'
 
 const { data: harness, fetch: fetchHarness } = useApi<any>('/api/harness')
 const selectedId = ref('')
+const selectedProjectFilter = ref('')
+const objectiveQuery = ref('')
 
 const objectives = computed(() => {
   const projects = harness.value?.projects || []
@@ -110,7 +141,24 @@ const objectives = computed(() => {
 })
 
 const selectedObjective = computed(() => {
-  return objectives.value.find((objective: any) => objective.id === selectedId.value) || objectives.value[0] || null
+  return filteredObjectives.value.find((objective: any) => objective.id === selectedId.value)
+    || filteredObjectives.value[0]
+    || null
+})
+
+const projectOptions = computed(() => {
+  return [...new Set(objectives.value.map((objective: any) => String(objective.project_name || '')))].filter(Boolean).sort()
+})
+
+const filteredObjectives = computed(() => {
+  const query = objectiveQuery.value.trim().toLowerCase()
+  return objectives.value.filter((objective: any) => {
+    const matchesProject = !selectedProjectFilter.value || objective.project_name === selectedProjectFilter.value
+    if (!matchesProject) return false
+    if (!query) return true
+    const haystack = `${objective.title || ''} ${objective.project_name || ''} ${objective.status || ''}`.toLowerCase()
+    return haystack.includes(query)
+  })
 })
 
 function ranksafe(rank: Record<string, number>, status: string) {
@@ -146,11 +194,38 @@ function objectiveSummary(objective: any) {
 
 onMounted(async () => {
   await fetchHarness()
-  if (!selectedId.value && objectives.value[0]?.id) selectedId.value = objectives.value[0].id
+  if (!selectedId.value && filteredObjectives.value[0]?.id) selectedId.value = filteredObjectives.value[0].id
 })
 </script>
 
 <style scoped>
+.filter-bar {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.project-filter-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.project-filter {
+  border: 1px solid rgba(125, 94, 67, 0.14);
+  border-radius: 999px;
+  background: rgba(255, 251, 245, 0.88);
+  color: rgb(var(--v-theme-on-surface));
+  padding: 0.5rem 0.9rem;
+  font-size: 0.84rem;
+  font-weight: 600;
+}
+
+.project-filter.active {
+  background: rgb(var(--v-theme-primary));
+  border-color: rgb(var(--v-theme-primary));
+  color: rgb(var(--v-theme-on-primary));
+}
+
 .objective-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));

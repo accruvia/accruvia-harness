@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+import multiprocessing as mp
 import datetime as _dt
 from dataclasses import asdict, dataclass, is_dataclass
 import asyncio
@@ -19,6 +20,7 @@ from typing import Any
 from enum import Enum
 
 from queue import Queue, Empty
+from fastapi import Request
 
 from .commands.common import resolve_project_ref
 
@@ -140,6 +142,7 @@ _OBJECTIVE_REVIEW_SEVERITIES = frozenset({"low", "medium", "high"})
 _OBJECTIVE_REVIEW_REBUTTAL_OUTCOMES = frozenset(
     {"accepted", "wrong_artifact_type", "artifact_incomplete", "missing_terminal_event", "evidence_not_found"}
 )
+_TASK_REPLY_STALE_SECONDS = 90
 
 
 def _to_jsonable(value: Any) -> Any:
@@ -254,6 +257,113 @@ class BackgroundSupervisorCoordinator:
 
 
 _BACKGROUND_SUPERVISOR = BackgroundSupervisorCoordinator()
+
+
+def _run_task_question_job(
+    *,
+    db_path: str,
+    workspace_root: str,
+    log_path: str | None,
+    config_file: str | None,
+    project_id: str,
+    objective_id: str | None,
+    task_id: str,
+    comment_record_id: str,
+    comment_text: str,
+    frustration_detected: bool,
+    job_id: str,
+    queued_at_iso: str,
+) -> None:
+    from .commands.common import build_context
+    from .config import HarnessConfig
+    from .store import SQLiteHarnessStore
+
+    queued_at = _dt.datetime.fromisoformat(queued_at_iso)
+    started_at = _dt.datetime.now(_dt.timezone.utc)
+    monotonic_started = time.monotonic()
+    worker_store = None
+    try:
+        worker_config = HarnessConfig.from_env(db_path, workspace_root, log_path, config_file)
+        worker_ctx = build_context(worker_config)
+        worker_store = worker_ctx.store
+        worker_service = HarnessUIDataService(worker_ctx)
+        responder_result = worker_service._answer_operator_comment(
+            project_id=project_id,
+            objective_id=objective_id,
+            task_id=task_id,
+            comment_text=comment_text,
+            frustration_detected=frustration_detected,
+        )
+        completed_at = _dt.datetime.now(_dt.timezone.utc)
+        elapsed_ms = int((time.monotonic() - monotonic_started) * 1000)
+        queue_wait_ms = max(0, int((started_at - queued_at).total_seconds() * 1000))
+        worker_service._log_ui_memory_retrieval(
+            project_id=project_id,
+            objective_id=objective_id,
+            task_id=task_id,
+            comment_text=comment_text,
+            responder_result=responder_result,
+        )
+        worker_store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="harness_reply",
+                project_id=project_id,
+                objective_id=objective_id,
+                task_id=task_id,
+                visibility="operator_visible",
+                author_type="system",
+                content=responder_result.reply,
+                metadata={
+                    "reply_to": comment_record_id,
+                    "status": "completed",
+                    "job_id": job_id,
+                    "queued_at": queued_at.isoformat(),
+                    "started_at": started_at.isoformat(),
+                    "completed_at": completed_at.isoformat(),
+                    "elapsed_ms": elapsed_ms,
+                    "queue_wait_ms": queue_wait_ms,
+                    "recommended_action": responder_result.recommended_action,
+                    "evidence_refs": responder_result.evidence_refs,
+                    "mode_shift": responder_result.mode_shift,
+                    "retrieved_memories": [serialize_dataclass(memory) for memory in responder_result.retrieved_memories],
+                    "llm_backend": responder_result.llm_backend,
+                    "prompt_path": responder_result.prompt_path,
+                    "response_path": responder_result.response_path,
+                },
+            )
+        )
+    except Exception as exc:
+        failed_at = _dt.datetime.now(_dt.timezone.utc)
+        elapsed_ms = int((time.monotonic() - monotonic_started) * 1000)
+        queue_wait_ms = max(0, int((started_at - queued_at).total_seconds() * 1000))
+        try:
+            if worker_store is None:
+                worker_store = SQLiteHarnessStore(db_path)
+            worker_store.create_context_record(
+                ContextRecord(
+                    id=new_id("context"),
+                    record_type="harness_reply_failed",
+                    project_id=project_id,
+                    objective_id=objective_id,
+                    task_id=task_id,
+                    visibility="operator_visible",
+                    author_type="system",
+                    content=str(exc),
+                    metadata={
+                        "reply_to": comment_record_id,
+                        "status": "failed",
+                        "job_id": job_id,
+                        "queued_at": queued_at.isoformat(),
+                        "started_at": started_at.isoformat(),
+                        "completed_at": failed_at.isoformat(),
+                        "elapsed_ms": elapsed_ms,
+                        "queue_wait_ms": queue_wait_ms,
+                    },
+                )
+            )
+        except Exception:
+            pass
 
 
 _APP_CSS = """
@@ -7646,6 +7756,7 @@ class HarnessUIDataService:
                         "task_counts": task_counts,
                         "unresolved_failed_count": int(review.get("unresolved_failed_count") or 0),
                         "waived_failed_count": int(review.get("waived_failed_count") or 0),
+                        "failed_tasks": list(review.get("failed_tasks") or []),
                         "task_total": sum(task_counts.values()),
                         "latest_activity_at": latest_activity,
                     }
@@ -10126,6 +10237,24 @@ class HarnessUIDataService:
             _BACKGROUND_SUPERVISOR.start(task.project_id, engine, watch=True)
         return {"task_id": task_id, "status": "pending"}
 
+    def apply_failed_task_disposition(
+        self,
+        task_id: str,
+        *,
+        disposition: str,
+        rationale: str,
+    ) -> dict[str, object]:
+        result = self.task_service.apply_failed_task_disposition(
+            task_id=task_id,
+            disposition=disposition,
+            rationale=rationale,
+        )
+        task = self.store.get_task(task_id)
+        engine = getattr(self.ctx, "engine", None)
+        if task is not None and engine is not None and disposition.strip().lower() in {"retry_as_is", "allow_manual_operator_implementation"}:
+            _BACKGROUND_SUPERVISOR.start(task.project_id, engine, watch=True)
+        return result
+
     def _auto_retry_restart_safe_failed_task(self, task: Task) -> bool:
         if task.status != TaskStatus.FAILED:
             return False
@@ -10384,6 +10513,7 @@ class HarnessUIDataService:
                     "text": text,
                     "created_at": record.created_at.isoformat(),
                     "objective_id": record.objective_id or "",
+                    "task_id": record.task_id or "",
                 })
             # Also include decomposition telemetry
             telemetry = self.store.list_context_records(
@@ -10396,6 +10526,7 @@ class HarnessUIDataService:
                     "text": record.content,
                     "created_at": record.created_at.isoformat(),
                     "objective_id": record.objective_id or "",
+                    "task_id": record.task_id or "",
                 })
             # Include completed and failed task events
             all_tasks = tasks_by_project[project.id]
@@ -10408,6 +10539,7 @@ class HarnessUIDataService:
                         "text": f"Task completed: {t.title}",
                         "created_at": t.updated_at.isoformat(),
                         "objective_id": t.objective_id or "",
+                        "task_id": t.id,
                         "event_type": "task_completed",
                     })
                 elif status_val == "failed":
@@ -10417,6 +10549,7 @@ class HarnessUIDataService:
                         "text": f"Task failed: {t.title}",
                         "created_at": t.updated_at.isoformat(),
                         "objective_id": t.objective_id or "",
+                        "task_id": t.id,
                         "event_type": "task_failed",
                     })
                 elif status_val == "active":
@@ -10426,6 +10559,7 @@ class HarnessUIDataService:
                         "text": f"Task started: {t.title}",
                         "created_at": t.updated_at.isoformat(),
                         "objective_id": t.objective_id or "",
+                        "task_id": t.id,
                         "event_type": "task_active",
                     })
         recent_events.sort(key=lambda e: e["created_at"], reverse=True)
@@ -10538,6 +10672,7 @@ class HarnessUIDataService:
         text: str,
         author: str | None,
         objective_id: str | None = None,
+        task_id: str | None = None,
     ) -> dict[str, object]:
         project_id = resolve_project_ref(self.ctx, project_ref)
         project = self.store.get_project(project_id)
@@ -10550,17 +10685,35 @@ class HarnessUIDataService:
             objective = self.store.get_objective(objective_id)
             if objective is None or objective.project_id != project.id:
                 raise ValueError(f"Unknown objective: {objective_id}")
+        selected_task = None
+        if task_id:
+            selected_task = self.store.get_task(task_id)
+            if selected_task is None or selected_task.project_id != project.id:
+                raise ValueError(f"Unknown task: {task_id}")
+            if objective_id and selected_task.objective_id != objective_id:
+                raise ValueError(f"Task {task_id} does not belong to objective {objective_id}")
+            if objective_id is None:
+                objective_id = selected_task.objective_id
         record = ContextRecord(
             id=new_id("context"),
             record_type="operator_comment",
             project_id=project.id,
             objective_id=objective_id,
+            task_id=task_id,
             visibility="model_visible",
             author_type="operator",
             author_id=(author or "").strip(),
             content=body,
         )
         self.store.create_context_record(record)
+        if task_id:
+            return self._enqueue_task_question(
+                project_id=project.id,
+                objective_id=objective_id,
+                task_id=task_id,
+                comment_record=record,
+                frustration_detected=self._comment_looks_like_frustration(body),
+            )
         if objective_id and self._should_auto_complete_interrogation(objective_id):
             self.complete_interrogation_review(objective_id)
         frustration_detected = self._comment_looks_like_frustration(body)
@@ -10574,6 +10727,7 @@ class HarnessUIDataService:
         responder_result = self._answer_operator_comment(
             project_id=project.id,
             objective_id=objective_id,
+            task_id=task_id,
             comment_text=body,
             frustration_detected=frustration_detected,
         )
@@ -10627,6 +10781,7 @@ class HarnessUIDataService:
         self._log_ui_memory_retrieval(
             project_id=project.id,
             objective_id=objective_id,
+            task_id=task_id,
             comment_text=body,
             responder_result=responder_result,
         )
@@ -10660,6 +10815,7 @@ class HarnessUIDataService:
             record_type="harness_reply",
             project_id=project.id,
             objective_id=objective_id,
+            task_id=task_id,
             visibility="operator_visible",
             author_type="system",
             content=responder_result.reply,
@@ -10681,12 +10837,14 @@ class HarnessUIDataService:
                 "author": record.author_id,
                 "text": record.content,
                 "objective_id": record.objective_id,
+                "task_id": record.task_id,
                 "created_at": record.created_at.isoformat(),
             },
             "reply": {
                 "id": reply_record.id,
                 "text": reply_record.content,
                 "objective_id": reply_record.objective_id,
+                "task_id": reply_record.task_id,
                 "created_at": reply_record.created_at.isoformat(),
                 "recommended_action": responder_result.recommended_action,
                 "evidence_refs": responder_result.evidence_refs,
@@ -10698,6 +10856,75 @@ class HarnessUIDataService:
             },
             "frustration_detected": frustration_detected,
             "mermaid_proposal": proposal,
+        }
+
+    def _enqueue_task_question(
+        self,
+        *,
+        project_id: str,
+        objective_id: str | None,
+        task_id: str,
+        comment_record: ContextRecord,
+        frustration_detected: bool,
+    ) -> dict[str, object]:
+        queued_at = _dt.datetime.now(_dt.timezone.utc)
+        job_id = new_id("replyjob")
+        pending_record = ContextRecord(
+            id=new_id("context"),
+            record_type="harness_reply_pending",
+            project_id=project_id,
+            objective_id=objective_id,
+            task_id=task_id,
+            visibility="operator_visible",
+            author_type="system",
+            content="Waiting on harness response…",
+            metadata={
+                "reply_to": comment_record.id,
+                "status": "pending",
+                "job_id": job_id,
+                "queued_at": queued_at.isoformat(),
+            },
+        )
+        self.store.create_context_record(pending_record)
+
+        mp.Process(
+            target=_run_task_question_job,
+            kwargs={
+                "db_path": str(self.ctx.config.db_path),
+                "workspace_root": str(self.ctx.config.workspace_root),
+                "log_path": (str(self.ctx.config.log_path) if self.ctx.config.log_path is not None else None),
+                "config_file": None,
+                "project_id": project_id,
+                "objective_id": objective_id,
+                "task_id": task_id,
+                "comment_record_id": comment_record.id,
+                "comment_text": comment_record.content,
+                "frustration_detected": frustration_detected,
+                "job_id": job_id,
+                "queued_at_iso": queued_at.isoformat(),
+            },
+            daemon=True,
+        ).start()
+        return {
+            "comment": {
+                "id": comment_record.id,
+                "author": comment_record.author_id,
+                "text": comment_record.content,
+                "objective_id": comment_record.objective_id,
+                "task_id": comment_record.task_id,
+                "created_at": comment_record.created_at.isoformat(),
+            },
+            "reply": {
+                "id": pending_record.id,
+                "text": pending_record.content,
+                "objective_id": pending_record.objective_id,
+                "task_id": pending_record.task_id,
+                "created_at": pending_record.created_at.isoformat(),
+                "status": "pending",
+                "job_id": job_id,
+                "queued_at": queued_at.isoformat(),
+            },
+            "frustration_detected": frustration_detected,
         }
 
     def add_operator_frustration(
@@ -10823,12 +11050,14 @@ class HarnessUIDataService:
         *,
         project_id: str,
         objective_id: str | None,
+        task_id: str | None,
         comment_text: str,
         frustration_detected: bool,
     ) -> ResponderResult:
         packet = self._build_responder_context_packet(
             project_id=project_id,
             objective_id=objective_id,
+            task_id=task_id,
             comment_text=comment_text,
             frustration_detected=frustration_detected,
         )
@@ -10836,6 +11065,7 @@ class HarnessUIDataService:
             packet=packet,
             project_id=project_id,
             objective_id=objective_id,
+            task_id=task_id,
             comment_text=comment_text,
         )
         if llm_result is not None:
@@ -10848,6 +11078,7 @@ class HarnessUIDataService:
         packet: ResponderContextPacket,
         project_id: str,
         objective_id: str | None,
+        task_id: str | None,
         comment_text: str,
     ) -> ResponderResult | None:
         interrogation_service = getattr(self.ctx, "interrogation_service", None)
@@ -10858,6 +11089,7 @@ class HarnessUIDataService:
             packet=packet,
             project_id=project_id,
             objective_id=objective_id,
+            task_id=task_id,
             comment_text=comment_text,
         )
         run_dir = self.workspace_root / "ui_responder" / (objective_id or project_id) / new_id("reply")
@@ -11647,6 +11879,7 @@ class HarnessUIDataService:
         packet: ResponderContextPacket,
         project_id: str,
         objective_id: str | None,
+        task_id: str | None,
         comment_text: str,
     ) -> str:
         project = self.store.get_project(project_id)
@@ -11654,8 +11887,15 @@ class HarnessUIDataService:
         intent_model = self.store.latest_intent_model(objective_id) if objective_id else None
         mermaid = self.store.latest_mermaid_artifact(objective_id, "workflow_control") if objective_id else None
         interrogation_review = self._interrogation_review(objective_id) if objective_id else {}
-        task, run = self._latest_linked_task_and_run(project_id=project_id, objective_id=objective_id)
+        task = self.store.get_task(task_id) if task_id else None
+        run = None
+        if task is not None:
+            task_runs = self.store.list_runs(task.id)
+            run = task_runs[-1] if task_runs else None
+        else:
+            task, run = self._latest_linked_task_and_run(project_id=project_id, objective_id=objective_id)
         run_output = self.run_cli_output(run.id) if run is not None else {}
+        task_insight = self.task_failure_insight(task.id) if task is not None else {}
         all_records = self.store.list_context_records(objective_id=objective_id) if objective_id else self.store.list_context_records(project_id=project_id)
         context_records = [
             {
@@ -11693,6 +11933,7 @@ class HarnessUIDataService:
                 else None
             ),
             "latest_task": serialize_dataclass(task) if task is not None else None,
+            "selected_task_insight": task_insight if task is not None else None,
             "latest_run": serialize_dataclass(run) if run is not None else None,
             "latest_run_output": run_output,
             "recent_turns": [serialize_dataclass(turn) for turn in packet.recent_turns],
@@ -12527,6 +12768,7 @@ class HarnessUIDataService:
         *,
         project_id: str,
         objective_id: str | None,
+        task_id: str | None,
         comment_text: str,
         frustration_detected: bool,
     ) -> ResponderContextPacket:
@@ -12537,7 +12779,15 @@ class HarnessUIDataService:
         intent_model = self.store.latest_intent_model(objective_id) if objective_id else None
         mermaid = self.store.latest_mermaid_artifact(objective_id, "workflow_control") if objective_id else None
         next_action = self._next_action_for_context(objective_id)
-        task, run = self._latest_linked_task_and_run(project_id=project_id, objective_id=objective_id)
+        task = self.store.get_task(task_id) if task_id else None
+        if task is not None and task.project_id != project_id:
+            raise ValueError(f"Unknown task for project: {task_id}")
+        run = None
+        if task is not None:
+            task_runs = self.store.list_runs(task.id)
+            run = task_runs[-1] if task_runs else None
+        else:
+            task, run = self._latest_linked_task_and_run(project_id=project_id, objective_id=objective_id)
         run_context = None
         if run is not None:
             run_context = RunResponderContext(
@@ -12553,12 +12803,19 @@ class HarnessUIDataService:
             )
         task_context = None
         if task is not None:
+            insight = self.task_failure_insight(task.id)
             task_context = TaskResponderContext(
                 task_id=task.id,
                 title=task.title,
                 status=task.status.value,
                 strategy=task.strategy,
                 objective=task.objective,
+                analysis_summary=str(insight.get("analysis_summary") or ""),
+                failure_message=str(insight.get("failure_message") or ""),
+                root_cause_hint=str(insight.get("root_cause_hint") or ""),
+                backend_failure_kind=str(insight.get("backend_failure_kind") or ""),
+                backend_failure_explanation=str(insight.get("backend_failure_explanation") or ""),
+                evidence_to_inspect=[str(item) for item in list(insight.get("suggested_evidence") or []) if str(item)],
             )
         objective_context = None
         if objective is not None:
@@ -12606,7 +12863,7 @@ class HarnessUIDataService:
             objective=objective_context,
             task=task_context,
             run=run_context,
-            recent_turns=self._recent_conversation_turns(project_id=project_id, objective_id=objective_id),
+            recent_turns=self._recent_conversation_turns(project_id=project_id, objective_id=objective_id, task_id=task_id),
             frustration_detected=frustration_detected,
             retrieved_memories=retrieved_memories,
             interrogation_question=interrogation_question,
@@ -12618,6 +12875,7 @@ class HarnessUIDataService:
         *,
         project_id: str,
         objective_id: str | None,
+        task_id: str | None,
         comment_text: str,
         responder_result: ResponderResult,
     ) -> None:
@@ -12627,6 +12885,7 @@ class HarnessUIDataService:
                 record_type="ui_memory_retrieval",
                 project_id=project_id,
                 objective_id=objective_id,
+                task_id=task_id,
                 visibility="system_only",
                 author_type="system",
                 content=comment_text,
@@ -12640,12 +12899,13 @@ class HarnessUIDataService:
             )
         )
 
-    def _recent_conversation_turns(self, *, project_id: str, objective_id: str | None) -> list[ConversationTurn]:
+    def _recent_conversation_turns(self, *, project_id: str, objective_id: str | None, task_id: str | None = None) -> list[ConversationTurn]:
         turns: list[ConversationTurn] = []
         for record_type, role in (("operator_comment", "operator"), ("harness_reply", "harness")):
             for record in self.store.list_context_records(
                 project_id=project_id,
                 objective_id=objective_id,
+                task_id=task_id,
                 record_type=record_type,
             ):
                 turns.append(
@@ -12657,6 +12917,187 @@ class HarnessUIDataService:
                 )
         turns.sort(key=lambda item: item.created_at)
         return turns[-10:]
+
+    def task_conversation(self, task_id: str) -> dict[str, object]:
+        task = self.store.get_task(task_id)
+        if task is None:
+            raise ValueError(f"Unknown task: {task_id}")
+        project = self.store.get_project(task.project_id)
+        if project is None:
+            raise ValueError(f"Unknown project for task: {task_id}")
+        objective = self.store.get_objective(task.objective_id) if task.objective_id else None
+        task_records = self.store.list_context_records(project_id=project.id, objective_id=task.objective_id, task_id=task.id)
+        comment_records = [record for record in task_records if record.record_type == "operator_comment"]
+        reply_records = [
+            record
+            for record in task_records
+            if record.record_type in {"harness_reply_pending", "harness_reply", "harness_reply_failed"}
+        ]
+        replies_by_comment: dict[str, list[ContextRecord]] = {}
+        for record in reply_records:
+            reply_to = str(record.metadata.get("reply_to") or "")
+            if not reply_to:
+                continue
+            replies_by_comment.setdefault(reply_to, []).append(record)
+        turns: list[dict[str, object]] = []
+        rank = {"harness_reply_pending": 0, "harness_reply_failed": 1, "harness_reply": 2}
+        now = _dt.datetime.now(_dt.timezone.utc)
+        for comment in comment_records:
+            turns.append(
+                {
+                    "id": comment.id,
+                    "role": "operator",
+                    "text": comment.content,
+                    "created_at": comment.created_at.isoformat(),
+                    "status": "completed",
+                }
+            )
+            candidates = replies_by_comment.get(comment.id, [])
+            if not candidates:
+                continue
+            selected = sorted(
+                candidates,
+                key=lambda record: (rank.get(record.record_type, -1), record.created_at.isoformat()),
+            )[-1]
+            queued_at_raw = selected.metadata.get("queued_at")
+            started_at_raw = selected.metadata.get("started_at")
+            completed_at_raw = selected.metadata.get("completed_at")
+            status = str(selected.metadata.get("status") or "")
+            stale = False
+            stale_elapsed_ms: int | None = None
+            if selected.record_type == "harness_reply_pending":
+                anchor_raw = str(queued_at_raw or selected.created_at.isoformat() or "")
+                try:
+                    anchor_dt = _dt.datetime.fromisoformat(anchor_raw)
+                    stale_elapsed_ms = max(0, int((now - anchor_dt).total_seconds() * 1000))
+                    stale = stale_elapsed_ms >= (_TASK_REPLY_STALE_SECONDS * 1000)
+                except ValueError:
+                    anchor_dt = None
+                if stale:
+                    status = "failed"
+            turns.append(
+                {
+                    "id": selected.id,
+                    "role": "harness",
+                    "text": (
+                        f"{selected.content} Reply appears stalled and should be retried."
+                        if stale
+                        else selected.content
+                    ),
+                    "created_at": selected.created_at.isoformat(),
+                    "status": status or ("pending" if selected.record_type == "harness_reply_pending" else "failed" if selected.record_type == "harness_reply_failed" else "completed"),
+                    "pending": selected.record_type == "harness_reply_pending" and not stale,
+                    "failed": selected.record_type == "harness_reply_failed" or stale,
+                    "job_id": selected.metadata.get("job_id"),
+                    "queued_at": queued_at_raw,
+                    "started_at": started_at_raw,
+                    "completed_at": completed_at_raw,
+                    "elapsed_ms": selected.metadata.get("elapsed_ms") if not stale else stale_elapsed_ms,
+                    "queue_wait_ms": selected.metadata.get("queue_wait_ms"),
+                    "stale": stale,
+                }
+            )
+        return {
+            "task": serialize_dataclass(task),
+            "objective": serialize_dataclass(objective) if objective is not None else None,
+            "project": serialize_dataclass(project),
+            "turns": turns[-20:],
+        }
+
+    def task_failure_insight(self, task_id: str) -> dict[str, object]:
+        task = self.store.get_task(task_id)
+        if task is None:
+            raise ValueError(f"Unknown task: {task_id}")
+        project = self.store.get_project(task.project_id)
+        objective = self.store.get_objective(task.objective_id) if task.objective_id else None
+        runs = self.store.list_runs(task.id)
+        run = runs[-1] if runs else None
+        evaluation = None
+        sections_raw: list[RunOutputSection] = []
+        summarized_run: dict[str, object] = {}
+        if run is not None:
+            evaluations = self.store.list_evaluations(run.id)
+            evaluation = evaluations[-1] if evaluations else None
+            sections_raw = self._run_output_sections(run.id)
+            summarized_run = self._summarize_run_output(run, sections_raw)
+        diagnostics = evaluation.details.get("diagnostics") if evaluation is not None and isinstance(evaluation.details, dict) else {}
+        diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+        failure_message = str(
+            diagnostics.get("failure_message")
+            or diagnostics.get("error")
+            or diagnostics.get("blocked_reason")
+            or ""
+        ).strip()
+        root_cause_hint = str((evaluation.details if evaluation is not None else {}).get("root_cause_hint") or "").strip() if evaluation is not None else ""
+        relevant_section_previews = self._task_failure_section_previews(sections_raw)
+        normalized_failure = self._normalize_task_failure(
+            failure_message=failure_message,
+            root_cause_hint=root_cause_hint,
+            section_previews=relevant_section_previews,
+        )
+        return {
+            "project": serialize_dataclass(project) if project is not None else None,
+            "objective": serialize_dataclass(objective) if objective is not None else None,
+            "task": serialize_dataclass(task),
+            "run": serialize_dataclass(run) if run is not None else None,
+            "analysis_summary": str(evaluation.summary or "") if evaluation is not None else "",
+            "failure_message": failure_message,
+            "root_cause_hint": root_cause_hint,
+            "failure_category": str(diagnostics.get("failure_category") or "").strip(),
+            "run_summary": summarized_run,
+            "available_sections": [section.label for section in sections_raw],
+            "relevant_section_previews": relevant_section_previews,
+            "backend_failure_kind": normalized_failure["kind"],
+            "backend_failure_explanation": normalized_failure["explanation"],
+            "suggested_evidence": normalized_failure["suggested_evidence"],
+        }
+
+    def _task_failure_section_previews(self, sections: list[RunOutputSection]) -> dict[str, str]:
+        previews: dict[str, str] = {}
+        for label in ("worker stderr", "codex worker stderr", "llm stderr", "report", "plan", "workspace metadata"):
+            matching = next((section for section in sections if section.label == label), None)
+            if matching is not None:
+                previews[label] = self._truncate_text(matching.content, 220)
+        return previews
+
+    def _normalize_task_failure(
+        self,
+        *,
+        failure_message: str,
+        root_cause_hint: str,
+        section_previews: dict[str, str],
+    ) -> dict[str, object]:
+        combined = "\n".join(
+            part for part in [
+                failure_message.strip(),
+                root_cause_hint.strip(),
+                *(section_previews.values()),
+            ] if part
+        ).lower()
+        suggested_evidence = [label for label in ("worker stderr", "codex worker stderr", "llm stderr", "report", "plan", "workspace metadata") if label in section_previews]
+        if "hit your limit" in combined or "quota" in combined or "credits exhausted" in combined or "out of credits" in combined:
+            return {
+                "kind": "quota",
+                "explanation": "The failure looks like provider quota or credit exhaustion rather than a code defect.",
+                "suggested_evidence": suggested_evidence or ["llm stderr", "worker stderr", "report"],
+            }
+        if "unauthorized" in combined or "incorrect username or password" in combined or "authentication" in combined or "api key" in combined or "login" in combined:
+            return {
+                "kind": "auth",
+                "explanation": "The failure looks like an authentication or credential problem in the backend toolchain.",
+                "suggested_evidence": suggested_evidence or ["worker stderr", "llm stderr", "report"],
+            }
+        if "all worker backends failed" in combined or "executor/infrastructure" in combined or "executor failed" in combined or "backend unavailable" in combined:
+            return {
+                "kind": "backend_unavailable",
+                "explanation": "The failure looks like backend or executor infrastructure trouble, not a completed product-level judgment.",
+                "suggested_evidence": suggested_evidence or ["worker stderr", "llm stderr", "report", "plan"],
+            }
+        return {
+            "kind": "",
+            "explanation": "",
+            "suggested_evidence": suggested_evidence,
+        }
 
     def _latest_linked_task_and_run(self, *, project_id: str, objective_id: str | None):
         linked_tasks = [
@@ -13139,6 +13580,14 @@ def _build_fastapi_app(data_service: HarnessUIDataService, event_bus: _EventBus)
     def run_cli_output(run_id: str):
         return _dispatch(lambda: data_service.run_cli_output(run_id))
 
+    @app.get("/api/tasks/{task_id}/conversation")
+    def task_conversation(task_id: str):
+        return _dispatch(lambda: data_service.task_conversation(task_id))
+
+    @app.get("/api/tasks/{task_id}/insight")
+    def task_insight(task_id: str):
+        return _dispatch(lambda: data_service.task_failure_insight(task_id))
+
     @app.get("/api/projects/{project_id}/supervisor")
     def supervisor_status(project_id: str):
         return data_service.supervisor_status(project_id)
@@ -13175,22 +13624,23 @@ def _build_fastapi_app(data_service: HarnessUIDataService, event_bus: _EventBus)
         ), notify=True)
 
     @app.post("/api/projects/{project_ref}/objectives", status_code=201)
-    async def create_objective(project_ref: str, request):
+    async def create_objective(project_ref: str, request: Request):
         payload = await request.json()
         return _dispatch(lambda: data_service.create_objective(
             project_ref, str(payload.get("title") or ""), str(payload.get("summary") or ""),
         ), status_code=201, notify=True)
 
     @app.post("/api/projects/{project_ref}/comments", status_code=201)
-    async def add_comment(project_ref: str, request):
+    async def add_comment(project_ref: str, request: Request):
         payload = await request.json()
         return _dispatch(lambda: data_service.add_operator_comment(
             project_ref, str(payload.get("text") or ""), str(payload.get("author") or ""),
             str(payload.get("objective_id") or "").strip() or None,
+            str(payload.get("task_id") or "").strip() or None,
         ), status_code=201, notify=True)
 
     @app.post("/api/projects/{project_ref}/frustrations", status_code=201)
-    async def add_frustration(project_ref: str, request):
+    async def add_frustration(project_ref: str, request: Request):
         payload = await request.json()
         return _dispatch(lambda: data_service.add_operator_frustration(
             project_ref, str(payload.get("text") or ""), str(payload.get("author") or ""),
@@ -13206,7 +13656,7 @@ def _build_fastapi_app(data_service: HarnessUIDataService, event_bus: _EventBus)
         return _dispatch(lambda: data_service.complete_interrogation_review(objective_id), status_code=201, notify=True)
 
     @app.post("/api/objectives/{objective_id}/promotion/force", status_code=201)
-    async def force_promote(objective_id: str, request):
+    async def force_promote(objective_id: str, request: Request):
         payload = await request.json()
         return _dispatch(lambda: data_service.force_promote_objective_review(
             objective_id, rationale=str(payload.get("rationale") or ""), author=str(payload.get("author") or "operator"),
@@ -13242,6 +13692,18 @@ def _build_fastapi_app(data_service: HarnessUIDataService, event_bus: _EventBus)
     @app.post("/api/tasks/{task_id}/retry")
     def retry_task(task_id: str):
         return _dispatch(lambda: data_service.retry_task(task_id), notify=True)
+
+    @app.post("/api/tasks/{task_id}/failed-disposition")
+    async def failed_task_disposition(task_id: str, request: Request):
+        payload = await request.json()
+        return _dispatch(
+            lambda: data_service.apply_failed_task_disposition(
+                task_id,
+                disposition=str(payload.get("disposition") or ""),
+                rationale=str(payload.get("rationale") or ""),
+            ),
+            notify=True,
+        )
 
     @app.post("/api/projects/{project_id}/supervise", status_code=201)
     def start_supervisor(project_id: str):
