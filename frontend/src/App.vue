@@ -95,6 +95,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
+import { resolveVisibleContext } from './lib/contextState'
 
 const route = useRoute()
 const LAST_PROJECT_KEY = 'accruvia:last-project-id'
@@ -114,8 +115,16 @@ const currentObjectiveId = computed(() => {
   return typeof raw === 'string' ? raw : ''
 })
 
-const projectId = computed(() => currentProjectId.value || lastProjectId.value)
-const objectiveId = computed(() => currentObjectiveId.value || lastObjectiveId.value)
+const resolvedContext = computed(() =>
+  resolveVisibleContext({
+    currentProjectId: currentProjectId.value,
+    currentObjectiveId: currentObjectiveId.value,
+    lastProjectId: lastProjectId.value,
+    lastObjectiveId: lastObjectiveId.value,
+  }),
+)
+const projectId = computed(() => resolvedContext.value.projectId)
+const objectiveId = computed(() => resolvedContext.value.objectiveId)
 
 const projectLabel = computed(() => projectName.value || projectId.value)
 const objectiveLabel = computed(() => objectiveName.value || objectiveId.value)

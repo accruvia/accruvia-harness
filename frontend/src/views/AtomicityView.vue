@@ -308,6 +308,8 @@ import { computed, nextTick, onActivated, onDeactivated, ref, watch } from 'vue'
 import { post, useApi, useSSE } from '../composables/useApi'
 import ObjectiveSectionNav from '../components/ObjectiveSectionNav.vue'
 import { useRoute } from 'vue-router'
+import { buildContextChangeDetail } from '../lib/contextState'
+import { assistantPendingAnchorMs, latestPendingTurn as selectLatestPendingTurn } from '../lib/taskConversation'
 
 const props = defineProps<{ projectId: string; objectiveId: string }>()
 const route = useRoute()
@@ -427,13 +429,10 @@ const assistantPendingElapsed = computed(() => {
 function persistContext() {
   globalThis.localStorage?.setItem('accruvia:last-project-id', props.projectId)
   globalThis.localStorage?.setItem('accruvia:last-objective-id', props.objectiveId)
-  globalThis.dispatchEvent(new CustomEvent('accruvia-context-change', { detail: { projectId: props.projectId, objectiveId: props.objectiveId } }))
+  globalThis.dispatchEvent(new CustomEvent('accruvia-context-change', { detail: buildContextChangeDetail(props.projectId, props.objectiveId) }))
 }
 
-const latestPendingTurn = computed(() => {
-  const pendingTurns = assistantTurns.value.filter((turn: any) => turn.pending)
-  return pendingTurns[pendingTurns.length - 1] || null
-})
+const latestPendingTurn = computed(() => selectLatestPendingTurn(assistantTurns.value))
 
 function statusColor(status: string) {
   const colors: Record<string, string> = {
@@ -469,10 +468,9 @@ function toggleTaskFilter(filterKey: string) {
 }
 
 function startAssistantPending() {
-  const anchorRaw = latestPendingTurn.value?.queued_at || latestPendingTurn.value?.created_at || ''
-  const anchorMs = anchorRaw ? new Date(anchorRaw).getTime() : Date.now()
+  const anchorMs = assistantPendingAnchorMs(latestPendingTurn.value)
   assistantPending.value = true
-  assistantPendingStartedAt.value = Number.isNaN(anchorMs) ? Date.now() : anchorMs
+  assistantPendingStartedAt.value = anchorMs
   assistantPendingTick.value = assistantPendingStartedAt.value
   if (assistantPendingTimer !== null) globalThis.clearInterval(assistantPendingTimer)
   assistantPendingTimer = globalThis.setInterval(() => {

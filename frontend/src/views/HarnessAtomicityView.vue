@@ -248,11 +248,13 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { post, useApi } from '../composables/useApi'
 import HarnessSectionNav from '../components/HarnessSectionNav.vue'
 import { assistantSendButtonState, hasAssistantPending } from '../lib/assistantState'
+import { buildContextChangeDetail } from '../lib/contextState'
+import { assistantPendingAnchorMs, isAtomicityRelevantObjective, latestPendingTurn as selectLatestPendingTurn } from '../lib/taskConversation'
 
 const { data, fetch } = useApi<any>('/api/atomicity')
 const selectedId = ref('')
 const rawObjectives = computed(() => data.value?.objectives || [])
-const objectives = computed(() => rawObjectives.value.filter(isAtomicityRelevant))
+const objectives = computed(() => rawObjectives.value.filter(isAtomicityRelevantObjective))
 const selectedObjective = computed(() => objectives.value.find((objective: any) => objective.id === selectedId.value) || objectives.value[0] || null)
 const actionTaskId = ref('')
 const actionKind = ref('')
@@ -295,18 +297,6 @@ const starterPrompts = computed(() => [
   'What evidence should I inspect next?',
 ])
 
-function isAtomicityRelevant(objective: any) {
-  const counts = objective?.task_counts || {}
-  const generation = objective?.atomic_generation || {}
-  const currentStage = String(objective?.workflow?.current_stage || '')
-  const unresolvedFailed = Number(objective?.unresolved_failed_count || 0)
-  if (unresolvedFailed > 0) return true
-  if (Number(counts.active || 0) > 0 || Number(counts.pending || 0) > 0) return true
-  if (generation.status === 'running') return true
-  if (currentStage === 'planning' || currentStage === 'execution') return true
-  return false
-}
-
 const assistantPendingElapsed = computed(() => {
   if (!assistantPending.value || !assistantPendingStartedAt.value) return '0s'
   const elapsedMs = Math.max(0, assistantPendingTick.value - assistantPendingStartedAt.value)
@@ -316,10 +306,7 @@ const assistantPendingElapsed = computed(() => {
   return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`
 })
 
-const latestPendingTurn = computed(() => {
-  const pendingTurns = assistantTurns.value.filter((turn: any) => turn.pending)
-  return pendingTurns[pendingTurns.length - 1] || null
-})
+const latestPendingTurn = computed(() => selectLatestPendingTurn(assistantTurns.value))
 
 function firstFailedCheck(checkGroup: any) {
   return (checkGroup?.checks || []).find((check: any) => !check.ok)
@@ -434,7 +421,7 @@ function blockingFailedTasks(objective: any) {
 function persistContext(projectId: string, objectiveId: string) {
   globalThis.localStorage?.setItem('accruvia:last-project-id', projectId)
   globalThis.localStorage?.setItem('accruvia:last-objective-id', objectiveId)
-  globalThis.dispatchEvent(new CustomEvent('accruvia-context-change', { detail: { projectId, objectiveId } }))
+  globalThis.dispatchEvent(new CustomEvent('accruvia-context-change', { detail: buildContextChangeDetail(projectId, objectiveId) }))
 }
 
 async function fetchJson(url: string, options?: RequestInit) {
@@ -447,10 +434,9 @@ async function fetchJson(url: string, options?: RequestInit) {
 }
 
 function startAssistantPending() {
-  const anchorRaw = latestPendingTurn.value?.queued_at || latestPendingTurn.value?.created_at || ''
-  const anchorMs = anchorRaw ? new Date(anchorRaw).getTime() : Date.now()
+  const anchorMs = assistantPendingAnchorMs(latestPendingTurn.value)
   assistantPending.value = true
-  assistantPendingStartedAt.value = Number.isNaN(anchorMs) ? Date.now() : anchorMs
+  assistantPendingStartedAt.value = anchorMs
   assistantPendingTick.value = assistantPendingStartedAt.value
   if (assistantPendingTimer !== null) globalThis.clearInterval(assistantPendingTimer)
   assistantPendingTimer = globalThis.setInterval(() => {
