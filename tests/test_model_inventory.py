@@ -227,10 +227,11 @@ class TestRoutingHook:
             universe_hash=hook.universe.snapshot_id,
         )
         outcome = RoutingOutcome(success=True, latency_ms=100)
-        hook.record_outcome(decision, outcome)
+        hook.record_outcome(decision, outcome, token_metrics={"llm_total_tokens": 42.0})
         log = hook.get_event_log()
         assert len(log) == 1
         assert log[0]["outcome"]["success"] is True
+        assert log[0]["token_metrics"]["llm_total_tokens"] == 42.0
 
     def test_fallback_on_unknown_model(self):
         """Safety rail: if policy somehow returns a model not in the

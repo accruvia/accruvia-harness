@@ -153,6 +153,7 @@ class RoutingHook:
         self,
         decision: RoutingDecision,
         outcome: RoutingOutcome,
+        token_metrics: dict[str, float] | None = None,
     ) -> None:
         """Record an invocation outcome for learning and audit."""
         event = RoutingOutcomeEvent(
@@ -160,7 +161,10 @@ class RoutingHook:
             outcome=outcome,
             universe_snapshot_id=self.universe.snapshot_id,
         )
-        self._event_log.append(event.to_dict())
+        payload = event.to_dict()
+        if token_metrics:
+            payload["token_metrics"] = dict(token_metrics)
+        self._event_log.append(payload)
 
     def get_event_log(self) -> list[dict[str, Any]]:
         """Return all routing events emitted during this session."""
