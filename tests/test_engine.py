@@ -12,6 +12,10 @@ from accruvia_harness.domain import (
     Artifact,
     ContextRecord,
     DecisionAction,
+    Evaluation,
+    EvaluationVerdict,
+    FailureCategory,
+    FailurePatternRecord,
     IntentModel,
     MermaidArtifact,
     MermaidStatus,
@@ -325,6 +329,52 @@ class HarnessEngineTests(unittest.TestCase):
         project = Project(id=new_id("project"), name="accruvia", description="Harness work")
         self.store.create_project(project)
         self.project_id = project.id
+
+    def _record_failure_for_task(
+        self,
+        task_id: str,
+        *,
+        attempt: int,
+        summary: str,
+        category: str,
+        missing_required_artifacts: list[str] | None = None,
+    ) -> Run:
+        run = Run(
+            id=new_id("run"),
+            task_id=task_id,
+            status=RunStatus.FAILED,
+            attempt=attempt,
+            summary=summary,
+        )
+        self.store.create_run(run)
+        self.store.create_evaluation(
+            Evaluation(
+                id=new_id("evaluation"),
+                run_id=run.id,
+                verdict=EvaluationVerdict.INCOMPLETE,
+                confidence=0.9,
+                summary=summary,
+                details={
+                    "missing_required_artifacts": list(missing_required_artifacts or []),
+                    "failure_category": category,
+                },
+            )
+        )
+        self.store.create_failure_pattern(
+            FailurePatternRecord(
+                id=new_id("failure_pattern"),
+                task_id=task_id,
+                run_id=run.id,
+                objective_id=self.store.get_task(task_id).objective_id,
+                attempt=attempt,
+                category=FailureCategory(category),
+                fingerprint=new_id("fingerprint"),
+                summary=summary,
+                details={"analysis": {"missing_required_artifacts": list(missing_required_artifacts or [])}},
+            )
+        )
+        self.store.update_task_status(task_id, TaskStatus.FAILED)
+        return run
 
     def _init_git_repo(self, repo_root: Path, *, with_remote: bool = False) -> Path | None:
         subprocess.run(["git", "init", "-b", "main"], cwd=repo_root, check=True, capture_output=True, text=True)
@@ -1413,6 +1463,122 @@ class HarnessEngineTests(unittest.TestCase):
         waiver_records = self.store.list_context_records(objective_id=objective.id, record_type="failed_task_waived")
         self.assertEqual({"status": "waived", "task_id": waive_task.id}, waive_result)
         self.assertEqual(1, len(waiver_records))
+
+    def test_split_retry_tasks_include_root_history_and_block_on_repeated_root_cause(self) -> None:
+        objective = Objective(
+            id=new_id("objective"),
+            project_id=self.project_id,
+            title="Retry history objective",
+            summary="Retry descendants should inherit prior failure context.",
+        )
+        self.store.create_objective(objective)
+        root = self.engine.create_task_with_policy(
+            project_id=self.project_id,
+            objective_id=objective.id,
+            title="Produce workflow implementation evidence bundle",
+            objective="Produce the full evidence bundle for promotion review.",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=2,
+            required_artifacts=["plan", "report"],
+        )
+        root_run = self._record_failure_for_task(
+            root.id,
+            attempt=1,
+            summary="Missing report artifact blocked promotion evidence.",
+            category="logic",
+            missing_required_artifacts=["report"],
+        )
+
+        split_result = self.engine.tasks.apply_failed_task_disposition(
+            task_id=root.id,
+            disposition="split_into_narrower_tasks",
+            rationale="Split the failure into narrower remediation work.",
+            source_run_id=root_run.id,
+            findings=[{"title": "Produce missing artifacts for root", "objective": "Generate the missing report artifact only."}],
+        )
+
+        self.assertEqual("split", split_result["status"])
+        child = self.store.get_task(split_result["task_ids"][0])
+        self.assertIsNotNone(child)
+        self.assertIn("Prior retry history for this root failure", child.objective if child else "")
+        self.assertIn("Missing report artifact blocked promotion evidence.", child.objective if child else "")
+        history = child.external_ref_metadata["retry_remediation"]["history"] if child else []
+        self.assertEqual(root.id, child.external_ref_metadata["retry_remediation"]["root_task_id"] if child else None)
+        self.assertEqual(1, len(history))
+
+        child_run = self._record_failure_for_task(
+            child.id,
+            attempt=1,
+            summary="Missing report artifact blocked promotion evidence again.",
+            category="logic",
+            missing_required_artifacts=["report"],
+        )
+        blocked_result = self.engine.tasks.apply_failed_task_disposition(
+            task_id=child.id,
+            disposition="split_into_narrower_tasks",
+            rationale="Try another narrow split.",
+            source_run_id=child_run.id,
+            findings=[{"title": "Narrow remediation for child", "objective": "Try another variant."}],
+        )
+
+        self.assertEqual("blocked", blocked_result["status"])
+        self.assertEqual(ObjectiveStatus.INVESTIGATING, self.store.get_objective(objective.id).status)
+        self.assertEqual(0, len(self.store.list_child_tasks(child.id)))
+        blocked_records = self.store.list_context_records(objective_id=objective.id, record_type="failed_task_retry_blocked")
+        self.assertEqual(1, len(blocked_records))
+
+    def test_split_retry_tasks_block_when_retry_tree_cap_would_be_exceeded(self) -> None:
+        objective = Objective(
+            id=new_id("objective"),
+            project_id=self.project_id,
+            title="Retry cap objective",
+            summary="Retry subtree should hard-stop at fifteen descendants.",
+        )
+        self.store.create_objective(objective)
+        root = self.engine.create_task_with_policy(
+            project_id=self.project_id,
+            objective_id=objective.id,
+            title="Root failed task",
+            objective="Root task for retry-cap verification.",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=2,
+            required_artifacts=["plan", "report"],
+        )
+        root_run = self._record_failure_for_task(
+            root.id,
+            attempt=1,
+            summary="Initial logic failure.",
+            category="logic",
+        )
+        for index in range(15):
+            self.engine.tasks.create_follow_on_task(
+                parent_task_id=root.id,
+                source_run_id=root_run.id,
+                title=f"Existing remediation {index}",
+                objective=f"Existing remediation objective {index}",
+            )
+
+        blocked_result = self.engine.tasks.apply_failed_task_disposition(
+            task_id=root.id,
+            disposition="split_into_narrower_tasks",
+            rationale="This should hit the remediation tree cap.",
+            source_run_id=root_run.id,
+            findings=[{"title": "Produce missing artifacts for root", "objective": "Generate the missing artifact."}],
+        )
+
+        self.assertEqual("blocked", blocked_result["status"])
+        self.assertIn("hard cap of 15 remediation tasks", blocked_result["reason"])
+        self.assertEqual(15, len(self.store.list_child_tasks(root.id)))
 
     def test_waived_obsolete_failed_task_counts_as_resolved_for_objective_phase(self) -> None:
         objective = Objective(

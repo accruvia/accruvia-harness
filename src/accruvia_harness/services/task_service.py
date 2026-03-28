@@ -2,9 +2,23 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from ..domain import ContextRecord, Event, ObjectiveStatus, Project, PromotionMode, RepoProvider, Task, TaskStatus, WorkspacePolicy, new_id
+from ..domain import (
+    ContextRecord,
+    Event,
+    ObjectiveStatus,
+    Project,
+    PromotionMode,
+    RepoProvider,
+    Task,
+    TaskStatus,
+    WorkspacePolicy,
+    new_id,
+)
 from ..store import SQLiteHarnessStore
 from .common import task_created_payload
+
+_REMEDIATION_TREE_CAP = 15
+_RETRY_HISTORY_MAX_OBJECTIVE_CHARS = 280
 
 
 class TaskService:
@@ -194,15 +208,45 @@ class TaskService:
         parent = self.store.get_task(parent_task_id)
         if parent is None:
             raise ValueError(f"Unknown parent task: {parent_task_id}")
+        root_task = self._retry_tree_root(parent)
+        blocked_reason, retry_history, current_failure = self._remediation_block_reason(
+            parent=parent,
+            root_task=root_task,
+            source_run_id=source_run_id,
+            findings=findings,
+        )
+        if blocked_reason:
+            self._mark_retry_tree_blocked(
+                task=parent,
+                root_task=root_task,
+                source_run_id=source_run_id,
+                reason=blocked_reason,
+                current_failure=current_failure,
+            )
+            return []
         created: list[Task] = []
         for index, finding in enumerate(findings, start=1):
             title = str(finding.get("title") or "").strip() or f"Remediate review finding {index}"
-            objective = str(finding.get("objective") or "").strip() or "Address the failed-task review finding and keep the work on the same objective."
+            base_objective = (
+                str(finding.get("objective") or "").strip()
+                or "Address the failed-task review finding and keep the work on the same objective."
+            )
+            objective = self._compose_remediation_objective(
+                base_objective=base_objective,
+                retry_history=retry_history,
+            )
             metadata = {
                 "failed_task_disposition": {
                     "kind": "split_into_narrower_tasks",
                     "source_task_id": parent_task_id,
                     "source_run_id": source_run_id,
+                },
+                "retry_remediation": {
+                    "root_task_id": root_task.id,
+                    "parent_task_id": parent_task_id,
+                    "history": retry_history,
+                    "current_failure": current_failure,
+                    "history_summary": self._format_retry_history(retry_history),
                 },
                 "promotion_remediation": {
                     "finding_ids": list(finding.get("finding_ids") or []),
@@ -273,6 +317,22 @@ class TaskService:
             return {"status": "pending", "task_id": task.id}
 
         if normalized == "split_into_narrower_tasks":
+            root_task = self._retry_tree_root(task)
+            blocked_reason, _, current_failure = self._remediation_block_reason(
+                parent=task,
+                root_task=root_task,
+                source_run_id=effective_run_id,
+                findings=findings or [],
+            )
+            if blocked_reason:
+                self._mark_retry_tree_blocked(
+                    task=task,
+                    root_task=root_task,
+                    source_run_id=effective_run_id,
+                    reason=blocked_reason,
+                    current_failure=current_failure,
+                )
+                return {"status": "blocked", "task_id": task.id, "reason": blocked_reason}
             created = self.create_tasks_from_review_findings(
                 parent_task_id=task.id,
                 source_run_id=effective_run_id,
@@ -345,3 +405,208 @@ class TaskService:
             return {"status": "waived", "task_id": task.id}
 
         raise ValueError(f"Unsupported failed-task disposition: {disposition}")
+
+    def _retry_tree_root(self, task: Task) -> Task:
+        current = task
+        visited = {task.id}
+        while current.parent_task_id:
+            parent = self.store.get_task(current.parent_task_id)
+            if parent is None or parent.id in visited:
+                break
+            current = parent
+            visited.add(parent.id)
+        return current
+
+    def _retry_tree_descendants(self, root_task: Task) -> list[Task]:
+        tasks = self.store.list_tasks(root_task.project_id)
+        children_by_parent: dict[str, list[Task]] = {}
+        for candidate in tasks:
+            if candidate.parent_task_id:
+                children_by_parent.setdefault(candidate.parent_task_id, []).append(candidate)
+        descendants: list[Task] = []
+        stack = list(children_by_parent.get(root_task.id, []))
+        seen: set[str] = set()
+        while stack:
+            candidate = stack.pop()
+            if candidate.id in seen:
+                continue
+            seen.add(candidate.id)
+            descendants.append(candidate)
+            stack.extend(children_by_parent.get(candidate.id, []))
+        descendants.sort(key=lambda item: item.created_at)
+        return descendants
+
+    def _remediation_block_reason(
+        self,
+        *,
+        parent: Task,
+        root_task: Task,
+        source_run_id: str,
+        findings: list[dict[str, object]],
+    ) -> tuple[str | None, list[dict[str, object]], dict[str, object]]:
+        descendants = self._retry_tree_descendants(root_task)
+        if len(descendants) >= _REMEDIATION_TREE_CAP or len(descendants) + len(findings) > _REMEDIATION_TREE_CAP:
+            return (
+                f"Retry tree for root failure '{root_task.title}' reached the hard cap of {_REMEDIATION_TREE_CAP} remediation tasks.",
+                self._build_retry_history(root_task, descendants),
+                self._failure_classification(parent, source_run_id),
+            )
+        retry_history = self._build_retry_history(root_task, descendants)
+        current_failure = self._failure_classification(parent, source_run_id)
+        previous_failure = self._previous_retry_failure(retry_history, parent.id)
+        if self._same_failure_classification(previous_failure, current_failure):
+            return (
+                "Latest remediation attempt repeated the previous root cause classification; escalating to blocked instead of spawning another retry.",
+                retry_history,
+                current_failure,
+            )
+        return None, retry_history, current_failure
+
+    def _build_retry_history(self, root_task: Task, descendants: list[Task]) -> list[dict[str, object]]:
+        history: list[dict[str, object]] = []
+        ordered_tasks = [root_task, *descendants]
+        for task in ordered_tasks:
+            runs = self.store.list_runs(task.id)
+            if not runs:
+                continue
+            run = runs[-1]
+            evaluations = self.store.list_evaluations(run.id)
+            decisions = self.store.list_decisions(run.id)
+            evaluation = evaluations[-1] if evaluations else None
+            decision = decisions[-1] if decisions else None
+            history.append(
+                {
+                    "task_id": task.id,
+                    "task_title": task.title,
+                    "objective": task.objective,
+                    "run_id": run.id,
+                    "attempt": run.attempt,
+                    "run_status": run.status.value,
+                    "outcome": evaluation.summary if evaluation is not None else run.summary,
+                    "verdict": evaluation.verdict.value if evaluation is not None else "",
+                    "decision": decision.action.value if decision is not None else "",
+                    "failure": self._failure_classification(task, run.id),
+                }
+            )
+        return history
+
+    def _failure_classification(self, task: Task, run_id: str) -> dict[str, object]:
+        run = self.store.get_run(run_id)
+        if run is None or run.task_id != task.id:
+            runs = self.store.list_runs(task.id)
+            run = runs[-1] if runs else None
+        if run is None:
+            return {"failure_category": "", "missing_required_artifacts": []}
+        evaluations = self.store.list_evaluations(run.id)
+        evaluation = evaluations[-1] if evaluations else None
+        missing = []
+        if evaluation is not None:
+            raw_missing = evaluation.details.get("missing_required_artifacts")
+            if isinstance(raw_missing, list):
+                missing = sorted(str(item) for item in raw_missing if str(item).strip())
+        failure_patterns = [item for item in self.store.list_failure_patterns(task_id=task.id) if item.run_id == run.id]
+        category = failure_patterns[-1].category.value if failure_patterns else ""
+        if not category and evaluation is not None:
+            details = evaluation.details if isinstance(evaluation.details, dict) else {}
+            diagnostics = details.get("diagnostics") if isinstance(details.get("diagnostics"), dict) else {}
+            category = str(details.get("failure_category") or diagnostics.get("failure_category") or evaluation.verdict.value)
+        return {
+            "failure_category": category,
+            "missing_required_artifacts": missing,
+        }
+
+    def _previous_retry_failure(self, retry_history: list[dict[str, object]], current_task_id: str) -> dict[str, object] | None:
+        prior = [entry for entry in retry_history if str(entry.get("task_id") or "") != current_task_id]
+        if not prior:
+            return None
+        latest = prior[-1].get("failure")
+        return latest if isinstance(latest, dict) else None
+
+    @staticmethod
+    def _same_failure_classification(previous: dict[str, object] | None, current: dict[str, object]) -> bool:
+        if not previous:
+            return False
+        previous_category = str(previous.get("failure_category") or "").strip()
+        current_category = str(current.get("failure_category") or "").strip()
+        previous_missing = sorted(str(item) for item in (previous.get("missing_required_artifacts") or []))
+        current_missing = sorted(str(item) for item in (current.get("missing_required_artifacts") or []))
+        return previous_category == current_category and previous_missing == current_missing
+
+    def _compose_remediation_objective(self, *, base_objective: str, retry_history: list[dict[str, object]]) -> str:
+        history_summary = self._format_retry_history(retry_history)
+        if not history_summary:
+            return base_objective
+        return (
+            f"{base_objective}\n\n"
+            "Prior retry history for this root failure:\n"
+            f"{history_summary}\n\n"
+            f"This attempt must do something different from the prior rounds. Focus now on: {base_objective}"
+        )
+
+    def _format_retry_history(self, retry_history: list[dict[str, object]]) -> str:
+        if not retry_history:
+            return ""
+        lines: list[str] = []
+        for index, entry in enumerate(retry_history, start=1):
+            objective = " ".join(str(entry.get("objective") or "").split())
+            objective = objective[:_RETRY_HISTORY_MAX_OBJECTIVE_CHARS]
+            failure = entry.get("failure") if isinstance(entry.get("failure"), dict) else {}
+            category = str(failure.get("failure_category") or "unknown")
+            missing = ", ".join(str(item) for item in (failure.get("missing_required_artifacts") or []))
+            outcome = str(entry.get("outcome") or "").strip()
+            outcome = " ".join(outcome.split())
+            line = (
+                f"{index}. {entry.get('task_title')} tried '{objective}'. "
+                f"Outcome: {outcome or 'no evaluation summary recorded'} "
+                f"(verdict={entry.get('verdict') or 'unknown'}, decision={entry.get('decision') or 'unknown'}, "
+                f"failure_category={category}"
+            )
+            if missing:
+                line += f", missing_artifacts={missing}"
+            line += ")."
+            lines.append(line)
+        return "\n".join(lines)
+
+    def _mark_retry_tree_blocked(
+        self,
+        *,
+        task: Task,
+        root_task: Task,
+        source_run_id: str,
+        reason: str,
+        current_failure: dict[str, object],
+    ) -> None:
+        if task.objective_id:
+            self.store.update_objective_status(task.objective_id, ObjectiveStatus.INVESTIGATING)
+            self.store.create_context_record(
+                ContextRecord(
+                    id=new_id("context"),
+                    record_type="failed_task_retry_blocked",
+                    project_id=task.project_id,
+                    objective_id=task.objective_id,
+                    task_id=task.id,
+                    run_id=source_run_id or None,
+                    visibility="operator_visible",
+                    author_type="system",
+                    content=reason,
+                    metadata={
+                        "root_task_id": root_task.id,
+                        "retry_tree_descendants": len(self._retry_tree_descendants(root_task)),
+                        "failure_classification": current_failure,
+                    },
+                )
+            )
+        self.store.create_event(
+            Event(
+                id=new_id("event"),
+                entity_type="task",
+                entity_id=task.id,
+                event_type="failed_task_retry_blocked",
+                payload={
+                    "root_task_id": root_task.id,
+                    "source_run_id": source_run_id,
+                    "reason": reason,
+                    "failure_classification": current_failure,
+                },
+            )
+        )
