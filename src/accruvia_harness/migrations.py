@@ -330,31 +330,36 @@ MIGRATIONS: list[Migration] = [
 
 
 def apply_migrations(connection: sqlite3.Connection) -> list[int]:
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS schema_migrations (
-            version INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        )
-        """
-    )
-    rows = connection.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()
-    applied = {int(row[0]) for row in rows}
-    newly_applied: list[int] = []
-    for migration in MIGRATIONS:
-        if migration.version in applied:
-            continue
-        # Execute each statement individually to stay within the connection's
-        # transaction instead of using executescript() which auto-commits and
-        # can leave partially-applied migrations unrecorded.
-        for statement in migration.sql.split(";"):
-            statement = statement.strip()
-            if statement:
-                connection.execute(statement)
+    connection.execute("BEGIN IMMEDIATE")
+    try:
         connection.execute(
-            "INSERT INTO schema_migrations (version, name) VALUES (?, ?)",
-            (migration.version, migration.name),
+            """
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
         )
-        newly_applied.append(migration.version)
-    return newly_applied
+        rows = connection.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()
+        applied = {int(row[0]) for row in rows}
+        newly_applied: list[int] = []
+        for migration in MIGRATIONS:
+            if migration.version in applied:
+                continue
+            # Serialize migration application so concurrent harness processes do
+            # not race between the version check and the INSERT record.
+            for statement in migration.sql.split(";"):
+                statement = statement.strip()
+                if statement:
+                    connection.execute(statement)
+            connection.execute(
+                "INSERT INTO schema_migrations (version, name) VALUES (?, ?)",
+                (migration.version, migration.name),
+            )
+            newly_applied.append(migration.version)
+        connection.commit()
+        return newly_applied
+    except Exception:
+        connection.rollback()
+        raise

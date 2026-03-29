@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from accruvia_harness.domain import (
     ContextRecord,
@@ -21,6 +24,7 @@ from accruvia_harness.domain import (
     TaskStatus,
     new_id,
 )
+from accruvia_harness.migrations import Migration, apply_migrations
 from accruvia_harness.store import SQLiteHarnessStore
 
 
@@ -87,6 +91,34 @@ class SQLiteHarnessStoreTests(unittest.TestCase):
         self.assertEqual("baseline", loaded.strategy)
         self.assertEqual(5, loaded.max_attempts)
         self.assertEqual(["plan", "report", "diff"], loaded.required_artifacts)
+
+    def test_concurrent_initialize_serializes_pending_migrations(self) -> None:
+        db_path = Path(self.temp_dir.name) / "concurrent-harness.db"
+        errors: list[Exception] = []
+        started = threading.Barrier(2)
+
+        def initialize_store() -> None:
+            store = SQLiteHarnessStore(db_path)
+            with store.connect() as connection:
+                connection.create_function("py_sleep", 1, time.sleep)
+                started.wait(timeout=5)
+                try:
+                    apply_migrations(connection)
+                except Exception as exc:  # pragma: no cover - asserted below
+                    errors.append(exc)
+
+        with mock.patch(
+            "accruvia_harness.migrations.MIGRATIONS",
+            [Migration(version=1, name="slow_init", sql="SELECT py_sleep(0.2);")],
+        ):
+            threads = [threading.Thread(target=initialize_store) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=5)
+
+        self.assertEqual([], errors)
+        self.assertEqual(1, SQLiteHarnessStore(db_path).schema_version())
 
     def test_project_round_trip_preserves_adapter_name(self) -> None:
         project = Project(
