@@ -20,6 +20,7 @@ class PromotionApplyResult:
     pr_url: str | None = None
     cleanup_performed: bool = False
     verified_remote_sha: str | None = None
+    rollback_commit_sha: str | None = None
 
 
 class RepositoryPromotionService:
@@ -29,6 +30,7 @@ class RepositoryPromotionService:
         gitlab: GitLabCLI | None = None,
         *,
         pre_push_commands: tuple[tuple[str, ...], ...] | None = None,
+        post_push_commands: tuple[tuple[str, ...], ...] | None = None,
     ) -> None:
         self.github = github or GitHubCLI()
         self.gitlab = gitlab or GitLabCLI()
@@ -36,6 +38,7 @@ class RepositoryPromotionService:
             ("make", "verify-test-import-safety"),
             ("make", "test-fast"),
         )
+        self.post_push_commands = post_push_commands if post_push_commands is not None else self.pre_push_commands
 
     def apply(
         self,
@@ -60,7 +63,20 @@ class RepositoryPromotionService:
         if project.promotion_mode == PromotionMode.DIRECT_MAIN:
             pushed_ref = f"{commit_sha}:{project.base_branch}"
             self._git(workspace_root, "push", "origin", f"HEAD:{project.base_branch}")
-            return PromotionApplyResult(branch_name=branch_name, commit_sha=commit_sha, pushed_ref=pushed_ref)
+            verified_remote_sha = self._verify_remote_sha(workspace_root, project.base_branch, commit_sha)
+            try:
+                self._run_post_push_checks(workspace_root)
+            except Exception as exc:
+                rollback_commit_sha = self._rollback_direct_main(workspace_root, project.base_branch, commit_sha)
+                raise RuntimeError(
+                    f"Post-merge validation failed after pushing {commit_sha}; rollback applied as {rollback_commit_sha}."
+                ) from exc
+            return PromotionApplyResult(
+                branch_name=branch_name,
+                commit_sha=commit_sha,
+                pushed_ref=pushed_ref,
+                verified_remote_sha=verified_remote_sha,
+            )
 
         push_branch = target_branch or branch_name
         self._git(workspace_root, "push", "-u", "origin", f"HEAD:{push_branch}")
@@ -118,12 +134,21 @@ class RepositoryPromotionService:
             if project.promotion_mode == PromotionMode.DIRECT_MAIN:
                 self._git(worktree_root, "push", "origin", f"HEAD:{project.base_branch}")
                 verified_remote_sha = self._verify_remote_sha(worktree_root, project.base_branch, commit_sha)
+                rollback_commit_sha: str | None = None
+                try:
+                    self._run_post_push_checks(worktree_root, source_repo_root=source_repo_root)
+                except Exception as exc:
+                    rollback_commit_sha = self._rollback_direct_main(worktree_root, project.base_branch, commit_sha)
+                    raise RuntimeError(
+                        f"Post-merge validation failed after pushing {commit_sha}; rollback applied as {rollback_commit_sha}."
+                    ) from exc
                 push_result = PromotionApplyResult(
                     branch_name=branch_name,
                     commit_sha=commit_sha,
                     pushed_ref=f"{commit_sha}:{project.base_branch}",
                     cleanup_performed=False,
                     verified_remote_sha=verified_remote_sha,
+                    rollback_commit_sha=rollback_commit_sha,
                 )
             else:
                 self._git(worktree_root, "push", "-u", "origin", f"HEAD:{branch_name}")
@@ -309,13 +334,36 @@ class RepositoryPromotionService:
             shutil.rmtree(worktree_root, ignore_errors=True)
 
     def _run_pre_push_checks(self, workspace_root: Path, *, source_repo_root: Path | None = None) -> None:
-        if not self.pre_push_commands:
+        self._run_checks(
+            self.pre_push_commands,
+            workspace_root,
+            source_repo_root=source_repo_root,
+            failure_prefix="Pre-push verification failed",
+        )
+
+    def _run_post_push_checks(self, workspace_root: Path, *, source_repo_root: Path | None = None) -> None:
+        self._run_checks(
+            self.post_push_commands,
+            workspace_root,
+            source_repo_root=source_repo_root,
+            failure_prefix="Post-merge validation failed",
+        )
+
+    def _run_checks(
+        self,
+        commands: tuple[tuple[str, ...], ...],
+        workspace_root: Path,
+        *,
+        source_repo_root: Path | None = None,
+        failure_prefix: str,
+    ) -> None:
+        if not commands:
             return
         if not (workspace_root / "Makefile").exists():
             return
         cleanup = self._ensure_pre_push_venv(workspace_root, source_repo_root=source_repo_root)
         try:
-            for command in self.pre_push_commands:
+            for command in commands:
                 completed = subprocess.run(
                     list(command),
                     cwd=workspace_root,
@@ -326,12 +374,19 @@ class RepositoryPromotionService:
                 if completed.returncode != 0:
                     command_text = " ".join(command)
                     detail = (completed.stdout or completed.stderr or "").strip()
-                    message = f"Pre-push verification failed for `{command_text}`."
+                    message = f"{failure_prefix} for `{command_text}`."
                     if detail:
                         message = f"{message}\n\n{detail[-4000:]}"
                     raise RuntimeError(message)
         finally:
             cleanup()
+
+    def _rollback_direct_main(self, workspace_root: Path, base_branch: str, commit_sha: str) -> str:
+        self._git(workspace_root, "revert", "--no-edit", commit_sha)
+        rollback_sha = self._git_output(workspace_root, "rev-parse", "HEAD").strip()
+        self._git(workspace_root, "push", "origin", f"HEAD:{base_branch}")
+        self._verify_remote_sha(workspace_root, base_branch, rollback_sha)
+        return rollback_sha
 
     def _ensure_pre_push_venv(self, workspace_root: Path, *, source_repo_root: Path | None = None):
         venv_path = workspace_root / ".venv"

@@ -87,6 +87,34 @@ class ControlPlane:
         self._record_event("system_frozen", "system", "system", {"reason": reason})
         return self.status()
 
+    def mark_degraded(self, reason: str) -> dict[str, object]:
+        current = self.store.get_control_system_state()
+        if current.global_state == GlobalSystemState.FROZEN:
+            return self.status()
+        state = replace(
+            current,
+            global_state=GlobalSystemState.DEGRADED,
+            freeze_reason=reason,
+            updated_at=datetime.now(UTC),
+        )
+        self.store.update_control_system_state(state)
+        self._record_event("system_degraded", "system", "system", {"reason": reason})
+        return self.status()
+
+    def mark_healthy(self, *, reason: str = "checks_passed") -> dict[str, object]:
+        current = self.store.get_control_system_state()
+        if current.global_state == GlobalSystemState.FROZEN or not current.master_switch:
+            return self.status()
+        state = replace(
+            current,
+            global_state=GlobalSystemState.HEALTHY,
+            freeze_reason=None,
+            updated_at=datetime.now(UTC),
+        )
+        self.store.update_control_system_state(state)
+        self._record_event("system_healthy", "system", "system", {"reason": reason})
+        return self.status()
+
     def thaw(self) -> dict[str, object]:
         current = self.store.get_control_system_state()
         next_state = GlobalSystemState.STARTING if current.master_switch else GlobalSystemState.OFF

@@ -7,8 +7,11 @@ import sys
 from typing import Any
 
 from ..bootstrap import build_engine_from_config, build_store, build_telemetry
+from ..control_breadcrumbs import BreadcrumbWriter
+from ..control_classifier import FailureClassifier
 from ..config import HarnessConfig, default_config_path, write_persisted_config
 from ..control_plane import ControlPlane
+from ..control_watch import ControlWatchService
 from ..domain import serialize_dataclass
 from ..engine import HarnessEngine
 from ..github import GitHubCLI
@@ -91,11 +94,17 @@ class CLIContext:
     interrogation_service: InterrogationService
     telemetry: TelemetrySink
     control_plane: ControlPlane
+    failure_classifier: FailureClassifier
+    breadcrumb_writer: BreadcrumbWriter
+    control_watch: ControlWatchService
 
 
 def build_context(config: HarnessConfig) -> CLIContext:
     store = build_store(config)
     telemetry = build_telemetry(config)
+    control_plane = ControlPlane(store)
+    failure_classifier = FailureClassifier()
+    breadcrumb_writer = BreadcrumbWriter(store, config.workspace_root)
     engine = build_engine_from_config(config, store=store, telemetry=telemetry)
     query_service = HarnessQueryService(store, telemetry=telemetry)
     return CLIContext(
@@ -120,7 +129,16 @@ def build_context(config: HarnessConfig) -> CLIContext:
             telemetry=telemetry,
         ),
         telemetry=telemetry,
-        control_plane=ControlPlane(store),
+        control_plane=control_plane,
+        failure_classifier=failure_classifier,
+        breadcrumb_writer=breadcrumb_writer,
+        control_watch=ControlWatchService(
+            store,
+            control_plane,
+            failure_classifier,
+            breadcrumb_writer,
+            supervisor_control_dir=config.db_path.parent / "supervisors",
+        ),
     )
 
 

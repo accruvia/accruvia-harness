@@ -6,6 +6,9 @@ from pathlib import Path
 
 from accruvia_harness.control_breadcrumbs import BreadcrumbWriter
 from accruvia_harness.control_classifier import FailureClassifier
+from accruvia_harness.control_plane import ControlPlane
+from accruvia_harness.control_watch import ControlWatchService
+from accruvia_harness.domain import Objective, ObjectiveStatus, Project, new_id
 from accruvia_harness.store import SQLiteHarnessStore
 
 
@@ -55,3 +58,53 @@ class BreadcrumbWriterTests(unittest.TestCase):
         self.assertEqual(1, len(indexed))
         self.assertEqual("run_123", indexed[0].worker_run_id)
         self.assertEqual("timeout", indexed[0].classification)
+
+
+class ControlWatchServiceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        root = Path(self.temp_dir.name)
+        self.workspace_root = root / "workspace"
+        self.supervisor_dir = root / "supervisors"
+        self.store = SQLiteHarnessStore(root / "harness.db")
+        self.store.initialize()
+        self.control_plane = ControlPlane(self.store)
+        self.control_plane.turn_on()
+        self.watch = ControlWatchService(
+            self.store,
+            self.control_plane,
+            FailureClassifier(),
+            BreadcrumbWriter(self.store, self.workspace_root),
+            supervisor_control_dir=self.supervisor_dir,
+        )
+
+    def test_watch_degrades_when_no_supervisor_is_running(self) -> None:
+        result = self.watch.run_once()
+
+        self.assertFalse(result["harness"]["ok"])
+        self.assertEqual("degraded", result["status"]["global_state"])
+        breadcrumbs = self.store.list_control_breadcrumbs(entity_type="lane", entity_id="harness")
+        self.assertEqual("system_failure", breadcrumbs[0].classification)
+
+    def test_watch_freezes_on_stalled_objective(self) -> None:
+        project = Project(id=new_id("project"), name="watch-project", description="watch")
+        self.store.create_project(project)
+        objective = Objective(
+            id=new_id("objective"),
+            project_id=project.id,
+            title="Stalled objective",
+            summary="stalled",
+            status=ObjectiveStatus.EXECUTING,
+        )
+        self.store.create_objective(objective)
+        with self.store.connect() as connection:
+            connection.execute(
+                "UPDATE objectives SET updated_at = '2000-01-01T00:00:00+00:00' WHERE id = ?",
+                (objective.id,),
+            )
+
+        result = self.watch.run_once(stalled_objective_hours=1.0)
+
+        self.assertEqual("frozen", result["status"]["global_state"])
+        self.assertEqual(objective.id, result["stalled_objectives"][0]["objective_id"])

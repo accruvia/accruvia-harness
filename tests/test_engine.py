@@ -1960,6 +1960,61 @@ class HarnessEngineTests(unittest.TestCase):
         self.assertTrue(result.cleanup_performed)
         self.assertFalse(any(staging_root.iterdir()) if staging_root.exists() else False)
 
+    def test_repository_promotion_apply_objective_rolls_back_when_post_merge_validation_fails(self) -> None:
+        repo_root = Path(self.temp_dir.name) / "objective-promotion-rollback-repo"
+        repo_root.mkdir()
+        remote_root = self._init_git_repo(repo_root, with_remote=True)
+        assert remote_root is not None
+        tracked = repo_root / "src" / "feature.py"
+        tracked.parent.mkdir(parents=True, exist_ok=True)
+        tracked.write_text("VALUE = 'base'\n", encoding="utf-8")
+        (repo_root / "Makefile").write_text(
+            "verify-test-import-safety:\n"
+            "\t@true\n\n"
+            "test-fast:\n"
+            "\t@true\n\n"
+            "test-post-merge:\n"
+            "\t@echo post merge failed\n"
+            "\t@false\n",
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "add", "-A"], cwd=repo_root, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "commit", "-m", "initial"], cwd=repo_root, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "push", "-u", "origin", "main"], cwd=repo_root, check=True, capture_output=True, text=True)
+
+        tracked.write_text("VALUE = 'objective'\n", encoding="utf-8")
+        project = Project(
+            id=new_id("project"),
+            name="repo-promotion",
+            description="repo promotion",
+            promotion_mode=PromotionMode.DIRECT_MAIN,
+            repo_provider=RepoProvider.GITHUB,
+            repo_name="accruvia/accruvia-harness",
+            base_branch="main",
+        )
+
+        staging_root = Path(self.temp_dir.name) / "objective-promotion-staging-rollback"
+        with self.assertRaisesRegex(RuntimeError, "Post-merge validation failed"):
+            RepositoryPromotionService(
+                post_push_commands=(("make", "test-post-merge"),),
+            ).apply_objective(
+                project,
+                objective_id=new_id("objective"),
+                objective_title="Objective Promotion Review",
+                source_repo_root=repo_root,
+                source_working_root=repo_root,
+                objective_paths=["src/feature.py", "Makefile"],
+                staging_root=staging_root,
+            )
+
+        remote_show = subprocess.run(
+            ["git", "--git-dir", str(remote_root), "show", "main:src/feature.py"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual("VALUE = 'base'\n", remote_show.stdout)
+
     def test_cleanup_stale_run_workspaces_removes_terminal_non_artifact_workspaces(self) -> None:
         service = RunService(
             store=self.store,

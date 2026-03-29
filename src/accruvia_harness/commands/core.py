@@ -937,6 +937,7 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
                 ),
                 flush=True,
             )
+        ctx.control_plane.resume_lane("harness", reason="supervise_start")
         try:
             result = engine.supervise(
                 project_id=args.project_id,
@@ -954,7 +955,9 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
                 stop_requested=lambda: stop_requested["value"] or stop_request_path.exists(),
                 progress_callback=None if args.json else _emit_supervise_progress,
             )
+            ctx.control_plane.mark_healthy(reason="supervise_completed")
         finally:
+            ctx.control_plane.pause_lane("harness", reason="supervise_exit")
             signal.signal(signal.SIGINT, previous_int)
             signal.signal(signal.SIGTERM, previous_term)
             if pid_path.exists():
