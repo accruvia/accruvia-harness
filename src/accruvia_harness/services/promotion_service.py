@@ -534,10 +534,14 @@ class PromotionService:
         artifact_lines = "\n".join(f"- {artifact.kind}: {artifact.path}" for artifact in artifacts)
         artifact_contents = self._artifact_contents(artifacts)
         return (
-            "You are affirming a promotion decision after deterministic validation has already run.\n"
-            "Decide whether the candidate should be promoted.\n"
+            "You are conducting an adversarial audit of a promotion candidate after deterministic validation has already run.\n"
+            "Do not assume the validation results are correct or sufficient.\n"
+            "Actively look for edge cases, hidden failure modes, weak reasoning, incomplete remediation, and any signs that the candidate should not be promoted.\n"
+            "Treat the validator results as inputs to challenge, not proof that the candidate is safe.\n"
+            "Use skeptical, critical reasoning to catch problems deterministic checks may have missed.\n"
+            "Approve only if the evidence is strong and you cannot find a substantive reason to block promotion.\n"
             "Reply on the first line with APPROVE or REJECT.\n"
-            "After the first line, provide a short rationale.\n\n"
+            "After the first line, provide a short rationale that focuses on concrete risks, doubts, or the evidence that resolved them.\n\n"
             f"Task: {task.title}\n"
             f"Objective: {task.objective}\n"
             f"Task ID: {task.id}\n"

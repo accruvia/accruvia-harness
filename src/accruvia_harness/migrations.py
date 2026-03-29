@@ -301,6 +301,31 @@ MIGRATIONS: list[Migration] = [
         ON routing_outcome_history(recorded_at);
         """,
     ),
+    Migration(
+        version=15,
+        name="failure_patterns",
+        sql="""
+        CREATE TABLE IF NOT EXISTS failure_patterns (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            objective_id TEXT,
+            attempt INTEGER NOT NULL DEFAULT 1,
+            category TEXT NOT NULL,
+            fingerprint TEXT NOT NULL DEFAULT '',
+            summary TEXT NOT NULL DEFAULT '',
+            details_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(task_id) REFERENCES tasks(id),
+            FOREIGN KEY(run_id) REFERENCES runs(id),
+            FOREIGN KEY(objective_id) REFERENCES objectives(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_failure_patterns_task_created
+        ON failure_patterns(task_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_failure_patterns_run_created
+        ON failure_patterns(run_id, created_at);
+        """,
+    ),
 ]
 
 

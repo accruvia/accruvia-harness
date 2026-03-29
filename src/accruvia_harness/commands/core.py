@@ -14,7 +14,6 @@ import time
 from ..config import HarnessConfig, default_config_path, write_persisted_config
 from ..domain import Event, PromotionMode, RepoProvider, WorkspacePolicy, new_id, serialize_dataclass
 from ..onboarding import detect_llm_command_candidates, doctor_report, probe_llm_command, prompt_text
-from ..ui import start_ui_server
 from .common import CLIContext, emit, ensure_llm_ready
 
 
@@ -710,6 +709,8 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
             print(_doctor_text(payload))
         return True
     if args.command == "ui":
+        from ..ui import start_ui_server
+
         start_ui_server(
             ctx,
             host=args.host,

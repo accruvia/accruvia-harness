@@ -281,6 +281,31 @@ class PromotionRecord:
     created_at: datetime = field(default_factory=utc_now)
 
 
+class FailureCategory(str):
+    """String-backed failure category with enum-like `.value` access."""
+
+    def __new__(cls, value: str) -> "FailureCategory":
+        return str.__new__(cls, str(value).strip())
+
+    @property
+    def value(self) -> str:
+        return str(self)
+
+
+@dataclass(slots=True)
+class FailurePatternRecord:
+    id: str
+    task_id: str
+    run_id: str
+    objective_id: str | None = None
+    attempt: int = 1
+    category: FailureCategory = FailureCategory("")
+    fingerprint: str = ""
+    summary: str = ""
+    details: dict[str, Any] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=utc_now)
+
+
 @dataclass(slots=True)
 class ContextRecord:
     id: str

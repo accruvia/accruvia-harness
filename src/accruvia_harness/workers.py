@@ -574,10 +574,17 @@ class AgentCommandWorker(CommandWorker):
 
 
 class LLMTaskWorker:
-    def __init__(self, router: LLMRouter, model: str | None = None, telemetry=None) -> None:
+    def __init__(
+        self,
+        router: LLMRouter,
+        model: str | None = None,
+        telemetry=None,
+        routing_hook: RoutingHook | None = None,
+    ) -> None:
         self.router = router
         self.model = model
         self.telemetry = telemetry
+        self.routing_hook = routing_hook
 
     def work(self, task: Task, run: Run, workspace_root: Path) -> WorkResult:
         run_dir = workspace_root / "runs" / run.id
@@ -585,123 +592,149 @@ class LLMTaskWorker:
         project_workspace = _prepared_project_workspace(run_dir)
         prompt = self._build_prompt(task, run)
         routed_backend = self.router.backend
-        try:
-            result, routed_backend = self.router.execute(
-                invocation=LLMInvocation(
-                    task=task, run=run, prompt=prompt, run_dir=project_workspace, model=self.model
-                ),
-                telemetry=self.telemetry,
+        routing_decision = None
+        invocation_model = self.model
+        original_backend = self.router.backend
+        if self.routing_hook is not None:
+            decision = self.routing_hook.select_model_for(
+                self._task_fingerprint(task, run),
+                validation_profile=task.validation_profile,
+                prior_outcomes=self.routing_hook.get_event_log(),
             )
-            outcome = "success"
-            summary = f"Executed routed LLM worker via {routed_backend}."
-            diagnostics = {
-                **result.diagnostics,
-                "worker_backend": "llm",
-                "llm_backend": result.backend,
-                "llm_model": self.model,
-            }
-        except LLMExecutionError as exc:
-            error_text = str(exc)
-            timed_out = "timed out" in error_text.lower()
-            failure_category = "executor_timeout" if timed_out else "llm_executor_failure"
-            worker_outcome = "blocked" if timed_out else "failed"
-            error_path = run_dir / "llm_error.txt"
-            error_path.write_text(error_text, encoding="utf-8")
+            routing_decision = decision.routing_decision
+            invocation_model = routing_decision.model_id
+            self.router.backend = routing_decision.backend
+            routed_backend = routing_decision.backend
+        try:
+            try:
+                result, routed_backend = self.router.execute(
+                    invocation=LLMInvocation(
+                        task=task, run=run, prompt=prompt, run_dir=project_workspace, model=invocation_model
+                    ),
+                    telemetry=self.telemetry,
+                )
+                outcome = "success"
+                summary = f"Executed routed LLM worker via {routed_backend}."
+                diagnostics = {
+                    **result.diagnostics,
+                    "worker_backend": "llm",
+                    "llm_backend": result.backend,
+                    "llm_model": invocation_model,
+                }
+                self._record_routing_outcome(
+                    routing_decision,
+                    success=True,
+                    diagnostics=result.diagnostics,
+                )
+            except LLMExecutionError as exc:
+                error_text = str(exc)
+                timed_out = "timed out" in error_text.lower()
+                failure_category = "executor_timeout" if timed_out else "llm_executor_failure"
+                worker_outcome = "blocked" if timed_out else "failed"
+                self._record_routing_outcome(
+                    routing_decision,
+                    success=False,
+                    diagnostics={"latency_ms": 0.0},
+                )
+                error_path = run_dir / "llm_error.txt"
+                error_path.write_text(error_text, encoding="utf-8")
+                report_path = run_dir / "report.json"
+                report_path.write_text(
+                    json.dumps(
+                        {
+                            "task_id": task.id,
+                            "run_id": run.id,
+                            "attempt": run.attempt,
+                            "strategy": task.strategy,
+                            "objective": task.objective,
+                            "worker_backend": "llm",
+                            "llm_backend": routed_backend,
+                            "error": error_text,
+                            "validation_profile": task.validation_profile,
+                            "project_workspace": str(project_workspace),
+                            "worker_outcome": worker_outcome,
+                            "blocked": timed_out,
+                            "infrastructure_failure": True,
+                            "failure_category": failure_category,
+                            "failure_message": error_text,
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    ),
+                    encoding="utf-8",
+                )
+                return WorkResult(
+                    summary=f"LLM worker failed via {routed_backend} before task work completed.",
+                    artifacts=[
+                        ("report", str(report_path), "Structured run report"),
+                        ("llm_error", str(error_path), "LLM execution failure"),
+                    ],
+                    outcome=worker_outcome,
+                    diagnostics={
+                        "worker_backend": "llm",
+                        "llm_backend": routed_backend,
+                        "llm_model": invocation_model,
+                        "error": error_text,
+                        "worker_outcome": worker_outcome,
+                        "blocked": timed_out,
+                        "infrastructure_failure": True,
+                        "failure_category": failure_category,
+                        "failure_message": error_text,
+                        "project_workspace": str(project_workspace),
+                    },
+                )
+
             report_path = run_dir / "report.json"
+            payload: dict[str, object] = {}
+            if report_path.exists():
+                try:
+                    payload = json.loads(report_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    payload = {}
             report_path.write_text(
                 json.dumps(
                     {
+                        **payload,
                         "task_id": task.id,
                         "run_id": run.id,
                         "attempt": run.attempt,
                         "strategy": task.strategy,
                         "objective": task.objective,
                         "worker_backend": "llm",
-                        "llm_backend": routed_backend,
-                        "error": error_text,
+                        "llm_backend": result.backend,
+                        "llm_model": invocation_model,
                         "validation_profile": task.validation_profile,
                         "project_workspace": str(project_workspace),
-                        "worker_outcome": worker_outcome,
-                        "blocked": timed_out,
-                        "infrastructure_failure": True,
-                        "failure_category": failure_category,
-                        "failure_message": error_text,
+                        "worker_outcome": payload.get("worker_outcome", "success"),
                     },
                     indent=2,
                     sort_keys=True,
                 ),
                 encoding="utf-8",
             )
-            return WorkResult(
-                summary=f"LLM worker failed via {routed_backend} before task work completed.",
-                artifacts=[
+            discovered_artifacts = _discover_required_artifacts(
+                task,
+                run_dir=run_dir,
+                project_workspace=project_workspace,
+                existing=[
+                    ("plan", str(result.prompt_path), "Prompt sent to the routed LLM executor"),
+                    ("llm_response", str(result.response_path), "LLM response artifact"),
                     ("report", str(report_path), "Structured run report"),
-                    ("llm_error", str(error_path), "LLM execution failure"),
                 ],
-                outcome=worker_outcome,
-                diagnostics={
-                    "worker_backend": "llm",
-                    "llm_backend": routed_backend,
-                    "llm_model": self.model,
-                    "error": error_text,
-                    "worker_outcome": worker_outcome,
-                    "blocked": timed_out,
-                    "infrastructure_failure": True,
-                    "failure_category": failure_category,
-                    "failure_message": error_text,
-                    "project_workspace": str(project_workspace),
-                },
             )
-
-        report_path = run_dir / "report.json"
-        payload: dict[str, object] = {}
-        if report_path.exists():
-            try:
-                payload = json.loads(report_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                payload = {}
-        report_path.write_text(
-            json.dumps(
-                {
-                    **payload,
-                    "task_id": task.id,
-                    "run_id": run.id,
-                    "attempt": run.attempt,
-                    "strategy": task.strategy,
-                    "objective": task.objective,
-                    "worker_backend": "llm",
-                    "llm_backend": result.backend,
-                    "llm_model": self.model,
-                    "validation_profile": task.validation_profile,
-                    "project_workspace": str(project_workspace),
-                    "worker_outcome": payload.get("worker_outcome", "success"),
-                },
-                indent=2,
-                sort_keys=True,
-            ),
-            encoding="utf-8",
-        )
-        discovered_artifacts = _discover_required_artifacts(
-            task,
-            run_dir=run_dir,
-            project_workspace=project_workspace,
-            existing=[
-                ("plan", str(result.prompt_path), "Prompt sent to the routed LLM executor"),
-                ("llm_response", str(result.response_path), "LLM response artifact"),
-                ("report", str(report_path), "Structured run report"),
-            ],
-        )
-        return WorkResult(
-            summary=summary,
-            artifacts=[
-                ("plan", str(result.prompt_path), "Prompt sent to the routed LLM executor"),
-                ("llm_response", str(result.response_path), "LLM response artifact"),
-                *discovered_artifacts,
-                ("report", str(report_path), "Structured run report"),
-            ],
-            outcome=outcome,
-            diagnostics=diagnostics,
-        )
+            return WorkResult(
+                summary=summary,
+                artifacts=[
+                    ("plan", str(result.prompt_path), "Prompt sent to the routed LLM executor"),
+                    ("llm_response", str(result.response_path), "LLM response artifact"),
+                    *discovered_artifacts,
+                    ("report", str(report_path), "Structured run report"),
+                ],
+                outcome=outcome,
+                diagnostics=diagnostics,
+            )
+        finally:
+            self.router.backend = original_backend
 
     def _build_prompt(self, task: Task, run: Run) -> str:
         return (
@@ -717,6 +750,49 @@ class LLMTaskWorker:
             "- Preserve durable artifacts in the run directory when appropriate.\n"
             "- Favor test-driven implementation when changing software behavior.\n"
         )
+
+    def _record_routing_outcome(
+        self,
+        routing_decision,
+        *,
+        success: bool,
+        diagnostics: dict[str, object],
+    ) -> None:
+        if self.routing_hook is None or routing_decision is None:
+            return
+
+        from routellect.protocols import RoutingOutcome
+
+        token_metrics = {
+            key: float(value)
+            for key, value in (
+                ("llm_cost_usd", diagnostics.get("cost_usd")),
+                ("llm_prompt_tokens", diagnostics.get("prompt_tokens")),
+                ("llm_completion_tokens", diagnostics.get("completion_tokens")),
+                ("llm_total_tokens", diagnostics.get("total_tokens")),
+                ("llm_latency_ms", diagnostics.get("latency_ms")),
+            )
+            if isinstance(value, (int, float))
+        }
+        self.routing_hook.record_outcome(
+            routing_decision,
+            RoutingOutcome(
+                success=success,
+                latency_ms=float(diagnostics.get("latency_ms") or 0.0),
+            ),
+            token_metrics=token_metrics,
+        )
+
+    def _task_fingerprint(self, task: Task, run: Run) -> dict[str, object]:
+        return {
+            "task_id": task.id,
+            "run_id": run.id,
+            "title": task.title,
+            "objective": task.objective,
+            "strategy": task.strategy,
+            "validation_profile": task.validation_profile,
+            "attempt": run.attempt,
+        }
 
 
 def build_worker(backend: str, shell_command: str | None = None) -> WorkerBackend:
@@ -735,6 +811,7 @@ def build_worker(backend: str, shell_command: str | None = None) -> WorkerBacken
 
 def build_worker_from_config(config: HarnessConfig, telemetry=None) -> WorkerBackend:
     from .resource_limits import ResourceLimitPolicy, resolve_memory_limit_mb
+    from .routing_hook import RoutingHook
     from .timeout_policy import ExecutionTimeoutPolicy
 
     adapter_registry = build_adapter_registry(config.adapter_modules)
@@ -762,7 +839,12 @@ def build_worker_from_config(config: HarnessConfig, telemetry=None) -> WorkerBac
         cpu_time_limit_seconds=config.cpu_time_limit_seconds,
     )
     if config.worker_backend == "llm":
-        return LLMTaskWorker(build_llm_router(config, telemetry=telemetry), model=config.llm_model, telemetry=telemetry)
+        return LLMTaskWorker(
+            build_llm_router(config, telemetry=telemetry),
+            model=config.llm_model,
+            telemetry=telemetry,
+            routing_hook=RoutingHook.from_config(config),
+        )
     if config.worker_backend == "local":
         return LocalArtifactWorker(adapter_registry=adapter_registry)
     if config.worker_backend == "shell":

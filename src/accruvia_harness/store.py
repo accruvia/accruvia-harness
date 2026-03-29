@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 from .migrations import MIGRATIONS, apply_migrations
 from .persistence.context_records import ContextRecordsStoreMixin
 from .persistence.events_metrics import EventsMetricsStoreMixin
+from .persistence.failure_patterns import FailurePatternsStoreMixin
 from .persistence.project_task import ProjectTaskStoreMixin
 from .persistence.run_records import RunRecordsStoreMixin
 
@@ -21,6 +22,7 @@ class SQLiteHarnessStore(
     RunRecordsStoreMixin,
     EventsMetricsStoreMixin,
     ContextRecordsStoreMixin,
+    FailurePatternsStoreMixin,
 ):
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)

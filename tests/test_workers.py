@@ -10,12 +10,17 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from routellect.protocols import ModelCapability
+from routellect.routing_events import ModelUniverseSnapshot
+
 from accruvia_harness.atomicity import atomicity_gate
 from accruvia_harness.agent_worker import _focused_test_command, run_agent_worker, run_validation, select_worker_llm_command
 from accruvia_harness.adapters import build_adapter_registry
 from accruvia_harness.config import HarnessConfig
 from accruvia_harness.domain import Run, RunStatus, Task, new_id
+from accruvia_harness.exploration_policy import EpsilonGreedyPolicy
 from accruvia_harness.llm import CommandLLMExecutor, LLMInvocation, build_llm_router, parse_affirmation_response
+from accruvia_harness.routing_hook import RoutingHook
 from accruvia_harness.resource_limits import resolve_memory_limit_mb
 from accruvia_harness.subprocess_env import build_subprocess_env
 from accruvia_harness.telemetry import TelemetrySink
@@ -259,6 +264,55 @@ class WorkerTests(unittest.TestCase):
         summary = telemetry.summary()
         self.assertEqual(0.12, summary["cost_totals"]["cost_usd"])
         self.assertEqual(30.0, summary["cost_totals"]["total_tokens"])
+
+    def test_build_worker_from_config_records_routing_outcome_end_to_end(self) -> None:
+        config = HarnessConfig(
+            db_path=self.base / "harness.db",
+            workspace_root=self.base,
+            log_path=self.base / "harness.log",
+            default_project_name="demo",
+            default_repo="accruvia/accruvia",
+            runtime_backend="local",
+            temporal_target="localhost:7233",
+            temporal_namespace="default",
+            temporal_task_queue="accruvia-harness",
+            worker_backend="llm",
+            worker_command=None,
+            llm_backend="codex",
+            llm_model=None,
+            llm_command=None,
+            llm_codex_command="printf 'codex response' > \"$ACCRUVIA_LLM_RESPONSE_PATH\"; printf '{\"cost_usd\": 0.12, \"prompt_tokens\": 10, \"completion_tokens\": 20, \"total_tokens\": 30, \"latency_ms\": 250, \"model\": \"gpt-5.4-codex\"}' > \"$ACCRUVIA_LLM_METADATA_PATH\"",
+            llm_claude_command=None,
+            llm_accruvia_client_command=None,
+        )
+        hook = RoutingHook(
+            universe=ModelUniverseSnapshot(
+                models=[
+                    ModelCapability(
+                        backend="codex",
+                        provider="openai",
+                        model_id="gpt-5.4-codex",
+                        available=True,
+                    )
+                ]
+            ),
+            policy=EpsilonGreedyPolicy(epsilon=0.0),
+        )
+
+        with patch("accruvia_harness.routing_hook.RoutingHook.from_config", return_value=hook):
+            worker = build_worker_from_config(config, telemetry=TelemetrySink(self.base / "telemetry"))
+
+        self.assertIs(worker.routing_hook, hook)
+        result = worker.work(self.task, self.run, self.base)
+
+        self.assertEqual("success", result.outcome)
+        self.assertEqual("gpt-5.4-codex", result.diagnostics["llm_model"])
+        event_log = hook.get_event_log()
+        self.assertEqual(2, len(event_log))
+        self.assertIn("decision", event_log[0])
+        self.assertTrue(event_log[1]["outcome"]["success"])
+        self.assertEqual(30.0, event_log[1]["token_metrics"]["llm_total_tokens"])
+        self.assertEqual(250.0, event_log[1]["token_metrics"]["llm_latency_ms"])
 
     def test_command_llm_executor_allows_invocation_timeout_override(self) -> None:
         telemetry = TelemetrySink(self.base / "telemetry")

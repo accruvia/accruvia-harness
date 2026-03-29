@@ -12,6 +12,8 @@ from ..domain import (
     EvaluationVerdict,
     Event,
     Evaluation,
+    FailureCategory,
+    FailurePatternRecord,
     IntentModel,
     MermaidArtifact,
     MermaidStatus,
@@ -219,6 +221,21 @@ def promotion_from_row(row: sqlite3.Row) -> PromotionRecord:
         status=PromotionStatus(row["status"]),
         summary=row["summary"],
         details=_safe_json_loads(row["details_json"], {}, column="promotions.details_json"),
+        created_at=parse_dt(row["created_at"]),
+    )
+
+
+def failure_pattern_from_row(row: sqlite3.Row) -> FailurePatternRecord:
+    return FailurePatternRecord(
+        id=row["id"],
+        task_id=row["task_id"],
+        run_id=row["run_id"],
+        objective_id=row["objective_id"],
+        attempt=int(row["attempt"]),
+        category=FailureCategory(row["category"]),
+        fingerprint=row["fingerprint"],
+        summary=row["summary"],
+        details=_safe_json_loads(row["details_json"], {}, column="failure_patterns.details_json"),
         created_at=parse_dt(row["created_at"]),
     )
 
