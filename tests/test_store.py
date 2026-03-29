@@ -8,6 +8,11 @@ from pathlib import Path
 from unittest import mock
 
 from accruvia_harness.domain import (
+    ControlBreadcrumb,
+    ControlEvent,
+    ControlLaneStateValue,
+    ControlRecoveryAction,
+    GlobalSystemState,
     ContextRecord,
     Event,
     Evaluation,
@@ -24,6 +29,7 @@ from accruvia_harness.domain import (
     TaskStatus,
     new_id,
 )
+from accruvia_harness.control_plane import ControlPlane
 from accruvia_harness.migrations import Migration, apply_migrations
 from accruvia_harness.store import SQLiteHarnessStore
 
@@ -133,6 +139,78 @@ class SQLiteHarnessStoreTests(unittest.TestCase):
         self.assertIsNotNone(loaded)
         assert loaded is not None
         self.assertEqual("private_repo", loaded.adapter_name)
+
+    def test_control_plane_bootstraps_default_state(self) -> None:
+        system = self.store.get_control_system_state()
+        lanes = {lane.lane_name: lane.state for lane in self.store.list_control_lane_states()}
+
+        self.assertEqual(GlobalSystemState.OFF, system.global_state)
+        self.assertFalse(system.master_switch)
+        self.assertEqual(
+            {
+                "api": ControlLaneStateValue.PAUSED,
+                "harness": ControlLaneStateValue.PAUSED,
+                "telegram": ControlLaneStateValue.PAUSED,
+                "watch": ControlLaneStateValue.PAUSED,
+                "worker": ControlLaneStateValue.PAUSED,
+            },
+            lanes,
+        )
+
+    def test_control_plane_service_tracks_state_transitions(self) -> None:
+        control_plane = ControlPlane(self.store)
+
+        started = control_plane.turn_on()
+        frozen = control_plane.freeze("smoke")
+        thawed = control_plane.thaw()
+        stopped = control_plane.turn_off()
+
+        self.assertEqual("starting", started["global_state"])
+        self.assertTrue(started["master_switch"])
+        self.assertEqual("frozen", frozen["global_state"])
+        self.assertEqual("smoke", frozen["frozen_reason"])
+        self.assertEqual("starting", thawed["global_state"])
+        self.assertEqual("off", stopped["global_state"])
+        self.assertFalse(stopped["master_switch"])
+
+    def test_control_plane_persists_events_breadcrumbs_and_recovery_actions(self) -> None:
+        event = ControlEvent(
+            id=new_id("control_event"),
+            event_type="provider_degraded",
+            entity_type="lane",
+            entity_id="worker",
+            producer="test",
+            payload={"class": "provider_rate_limit"},
+            idempotency_key=new_id("event_key"),
+        )
+        breadcrumb = ControlBreadcrumb(
+            id=new_id("breadcrumb"),
+            entity_type="task",
+            entity_id="task_123",
+            worker_run_id="run_123",
+            classification="timeout",
+            path="/tmp/breadcrumb",
+        )
+        recovery = ControlRecoveryAction(
+            id=new_id("recovery"),
+            action_type="restart",
+            target_type="lane",
+            target_id="worker",
+            reason="hung_process",
+            result="applied",
+        )
+
+        self.store.create_control_event(event)
+        self.store.create_control_breadcrumb(breadcrumb)
+        self.store.create_control_recovery_action(recovery)
+
+        loaded_events = self.store.list_control_events(entity_type="lane", entity_id="worker")
+        loaded_breadcrumbs = self.store.list_control_breadcrumbs(entity_type="task", entity_id="task_123")
+        loaded_actions = self.store.list_control_recovery_actions(target_type="lane", target_id="worker")
+
+        self.assertEqual("provider_rate_limit", loaded_events[0].payload["class"])
+        self.assertEqual("/tmp/breadcrumb", loaded_breadcrumbs[0].path)
+        self.assertEqual("hung_process", loaded_actions[0].reason)
 
     def test_event_round_trip_preserves_payload(self) -> None:
         event = Event(

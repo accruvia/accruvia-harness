@@ -6,6 +6,12 @@ import sqlite3
 from datetime import UTC, datetime
 
 from ..domain import (
+    ControlBreadcrumb,
+    ControlEvent,
+    ControlLaneState,
+    ControlLaneStateValue,
+    ControlRecoveryAction,
+    ControlSystemState,
     ContextRecord,
     Decision,
     DecisionAction,
@@ -14,6 +20,7 @@ from ..domain import (
     Evaluation,
     FailureCategory,
     FailurePatternRecord,
+    GlobalSystemState,
     IntentModel,
     MermaidArtifact,
     MermaidStatus,
@@ -135,6 +142,26 @@ def objective_from_row(row: sqlite3.Row) -> Objective:
     )
 
 
+def control_system_state_from_row(row: sqlite3.Row) -> ControlSystemState:
+    return ControlSystemState(
+        id=row["id"],
+        global_state=GlobalSystemState(row["global_state"]),
+        master_switch=bool(int(row["master_switch"])),
+        freeze_reason=row["freeze_reason"],
+        updated_at=parse_dt(row["updated_at"]),
+    )
+
+
+def control_lane_state_from_row(row: sqlite3.Row) -> ControlLaneState:
+    return ControlLaneState(
+        lane_name=row["lane_name"],
+        state=ControlLaneStateValue(row["state"]),
+        reason=row["reason"],
+        cooldown_until=parse_dt(row["cooldown_until"]) if row["cooldown_until"] else None,
+        updated_at=parse_dt(row["updated_at"]),
+    )
+
+
 def intent_model_from_row(row: sqlite3.Row) -> IntentModel:
     return IntentModel(
         id=row["id"],
@@ -213,6 +240,19 @@ def event_from_row(row: sqlite3.Row) -> Event:
     )
 
 
+def control_event_from_row(row: sqlite3.Row) -> ControlEvent:
+    return ControlEvent(
+        id=row["id"],
+        event_type=row["event_type"],
+        entity_type=row["entity_type"],
+        entity_id=row["entity_id"],
+        producer=row["producer"],
+        payload=_safe_json_loads(row["payload_json"], {}, column="control_events.payload_json"),
+        idempotency_key=row["idempotency_key"],
+        created_at=parse_dt(row["created_at"]),
+    )
+
+
 def promotion_from_row(row: sqlite3.Row) -> PromotionRecord:
     return PromotionRecord(
         id=row["id"],
@@ -253,5 +293,29 @@ def context_record_from_row(row: sqlite3.Row) -> ContextRecord:
         author_id=row["author_id"],
         content=row["content"],
         metadata=_safe_json_loads(row["metadata_json"], {}, column="context_records.metadata_json"),
+        created_at=parse_dt(row["created_at"]),
+    )
+
+
+def control_breadcrumb_from_row(row: sqlite3.Row) -> ControlBreadcrumb:
+    return ControlBreadcrumb(
+        id=row["id"],
+        entity_type=row["entity_type"],
+        entity_id=row["entity_id"],
+        worker_run_id=row["worker_run_id"],
+        classification=row["classification"],
+        path=row["path"],
+        created_at=parse_dt(row["created_at"]),
+    )
+
+
+def control_recovery_action_from_row(row: sqlite3.Row) -> ControlRecoveryAction:
+    return ControlRecoveryAction(
+        id=row["id"],
+        action_type=row["action_type"],
+        target_type=row["target_type"],
+        target_id=row["target_id"],
+        reason=row["reason"],
+        result=row["result"],
         created_at=parse_dt(row["created_at"]),
     )

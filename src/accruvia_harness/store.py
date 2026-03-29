@@ -10,6 +10,7 @@ from .domain import Run, RunStatus, TaskStatus
 
 logger = logging.getLogger(__name__)
 from .migrations import MIGRATIONS, apply_migrations
+from .persistence.control_plane import ControlPlaneStoreMixin
 from .persistence.context_records import ContextRecordsStoreMixin
 from .persistence.events_metrics import EventsMetricsStoreMixin
 from .persistence.failure_patterns import FailurePatternsStoreMixin
@@ -23,6 +24,7 @@ class SQLiteHarnessStore(
     EventsMetricsStoreMixin,
     ContextRecordsStoreMixin,
     FailurePatternsStoreMixin,
+    ControlPlaneStoreMixin,
 ):
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
@@ -32,14 +34,19 @@ class SQLiteHarnessStore(
         connection = sqlite3.connect(self.db_path, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA journal_mode = WAL")
-        connection.execute("PRAGMA synchronous = NORMAL")
         connection.execute("PRAGMA busy_timeout = 30000")
+        try:
+            connection.execute("PRAGMA journal_mode = WAL")
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower():
+                raise
+        connection.execute("PRAGMA synchronous = NORMAL")
         return connection
 
     def initialize(self) -> None:
         with self.connect() as connection:
             apply_migrations(connection)
+        self.ensure_control_lanes(["api", "harness", "worker", "watch", "telegram"])
         recovered = self.recover_stale_state()
         if any(v > 0 for v in recovered.values()):
             logger.warning("Startup recovery: %s", recovered)

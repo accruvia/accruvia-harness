@@ -326,6 +326,110 @@ MIGRATIONS: list[Migration] = [
         ON failure_patterns(run_id, created_at);
         """,
     ),
+    Migration(
+        version=16,
+        name="control_plane_v1",
+        sql="""
+        CREATE TABLE IF NOT EXISTS control_system_state (
+            id TEXT PRIMARY KEY,
+            global_state TEXT NOT NULL,
+            master_switch INTEGER NOT NULL,
+            freeze_reason TEXT,
+            updated_at TEXT NOT NULL
+        );
+
+        INSERT OR IGNORE INTO control_system_state (id, global_state, master_switch, freeze_reason, updated_at)
+        VALUES ('system', 'off', 0, NULL, CURRENT_TIMESTAMP);
+
+        CREATE TABLE IF NOT EXISTS control_lane_state (
+            lane_name TEXT PRIMARY KEY,
+            state TEXT NOT NULL,
+            reason TEXT,
+            cooldown_until TEXT,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS control_events (
+            id TEXT PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            entity_type TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            producer TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_control_events_created_at
+        ON control_events(created_at);
+        CREATE INDEX IF NOT EXISTS idx_control_events_entity
+        ON control_events(entity_type, entity_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS control_cooldowns (
+            id TEXT PRIMARY KEY,
+            scope_type TEXT NOT NULL,
+            scope_id TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            until_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_control_cooldowns_scope
+        ON control_cooldowns(scope_type, scope_id, until_at);
+
+        CREATE TABLE IF NOT EXISTS control_budgets (
+            id TEXT PRIMARY KEY,
+            budget_scope TEXT NOT NULL,
+            budget_key TEXT NOT NULL,
+            window_start TEXT NOT NULL,
+            window_end TEXT NOT NULL,
+            usage_count INTEGER NOT NULL,
+            usage_cost_usd REAL NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_control_budgets_scope
+        ON control_budgets(budget_scope, budget_key, window_start, window_end);
+
+        CREATE TABLE IF NOT EXISTS control_worker_runs (
+            id TEXT PRIMARY KEY,
+            task_id TEXT,
+            objective_id TEXT,
+            worker_kind TEXT NOT NULL,
+            runtime_name TEXT NOT NULL,
+            model_name TEXT,
+            attempt INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            classification TEXT,
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            breadcrumb_path TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_control_worker_runs_task
+        ON control_worker_runs(task_id, started_at);
+
+        CREATE TABLE IF NOT EXISTS control_breadcrumb_index (
+            id TEXT PRIMARY KEY,
+            entity_type TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            worker_run_id TEXT,
+            classification TEXT,
+            path TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_control_breadcrumb_index_entity
+        ON control_breadcrumb_index(entity_type, entity_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS control_recovery_actions (
+            id TEXT PRIMARY KEY,
+            action_type TEXT NOT NULL,
+            target_type TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            result TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_control_recovery_actions_target
+        ON control_recovery_actions(target_type, target_id, created_at);
+        """,
+    ),
 ]
 
 

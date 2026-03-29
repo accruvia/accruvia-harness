@@ -8,6 +8,7 @@ from typing import Any
 
 from ..bootstrap import build_engine_from_config, build_store, build_telemetry
 from ..config import HarnessConfig, default_config_path, write_persisted_config
+from ..control_plane import ControlPlane
 from ..domain import serialize_dataclass
 from ..engine import HarnessEngine
 from ..github import GitHubCLI
@@ -89,6 +90,7 @@ class CLIContext:
     query_service: HarnessQueryService
     interrogation_service: InterrogationService
     telemetry: TelemetrySink
+    control_plane: ControlPlane
 
 
 def build_context(config: HarnessConfig) -> CLIContext:
@@ -118,6 +120,7 @@ def build_context(config: HarnessConfig) -> CLIContext:
             telemetry=telemetry,
         ),
         telemetry=telemetry,
+        control_plane=ControlPlane(store),
     )
 
 

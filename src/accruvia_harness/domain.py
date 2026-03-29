@@ -87,6 +87,21 @@ class RepoProvider(StrEnum):
     GITLAB = "gitlab"
 
 
+class GlobalSystemState(StrEnum):
+    OFF = "off"
+    STARTING = "starting"
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
+    FROZEN = "frozen"
+
+
+class ControlLaneStateValue(StrEnum):
+    RUNNING = "running"
+    PAUSED = "paused"
+    COOLDOWN = "cooldown"
+    DISABLED = "disabled"
+
+
 class ObjectiveStatus(StrEnum):
     OPEN = "open"
     INVESTIGATING = "investigating"
@@ -320,6 +335,67 @@ class ContextRecord:
     content: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
+class ControlSystemState:
+    id: str = "system"
+    global_state: GlobalSystemState = GlobalSystemState.OFF
+    master_switch: bool = False
+    freeze_reason: str | None = None
+    updated_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
+class ControlLaneState:
+    lane_name: str
+    state: ControlLaneStateValue = ControlLaneStateValue.PAUSED
+    reason: str | None = None
+    cooldown_until: datetime | None = None
+    updated_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
+class ControlEvent:
+    id: str
+    event_type: str
+    entity_type: str
+    entity_id: str
+    producer: str
+    payload: dict[str, Any]
+    idempotency_key: str
+    created_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
+class ControlBreadcrumb:
+    id: str
+    entity_type: str
+    entity_id: str
+    worker_run_id: str | None = None
+    classification: str | None = None
+    path: str = ""
+    created_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
+class ControlRecoveryAction:
+    id: str
+    action_type: str
+    target_type: str
+    target_id: str
+    reason: str
+    result: str
+    created_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
+class FailureClassification:
+    classification: str
+    confidence: float
+    retry_recommended: bool
+    cooldown_seconds: int = 0
+    evidence: list[str] = field(default_factory=list)
 
 
 def serialize_dataclass(value: Any) -> dict[str, Any]:
