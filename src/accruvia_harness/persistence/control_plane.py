@@ -9,6 +9,7 @@ from .common import (
     control_lane_state_from_row,
     control_recovery_action_from_row,
     control_system_state_from_row,
+    control_worker_run_from_row,
 )
 from ..domain import (
     ControlBreadcrumb,
@@ -17,6 +18,7 @@ from ..domain import (
     ControlLaneStateValue,
     ControlRecoveryAction,
     ControlSystemState,
+    ControlWorkerRun,
 )
 
 
@@ -246,3 +248,68 @@ class ControlPlaneStoreMixin:
         with self.connect() as connection:
             rows = connection.execute(query, tuple(params)).fetchall()
         return [control_recovery_action_from_row(row) for row in rows]
+
+    def upsert_control_worker_run(self, worker_run: ControlWorkerRun) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO control_worker_runs (
+                    id, task_id, objective_id, worker_kind, runtime_name, model_name,
+                    attempt, status, classification, started_at, ended_at, breadcrumb_path
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    task_id = excluded.task_id,
+                    objective_id = excluded.objective_id,
+                    worker_kind = excluded.worker_kind,
+                    runtime_name = excluded.runtime_name,
+                    model_name = excluded.model_name,
+                    attempt = excluded.attempt,
+                    status = excluded.status,
+                    classification = excluded.classification,
+                    started_at = excluded.started_at,
+                    ended_at = excluded.ended_at,
+                    breadcrumb_path = excluded.breadcrumb_path
+                """,
+                (
+                    worker_run.id,
+                    worker_run.task_id,
+                    worker_run.objective_id,
+                    worker_run.worker_kind,
+                    worker_run.runtime_name,
+                    worker_run.model_name,
+                    worker_run.attempt,
+                    worker_run.status,
+                    worker_run.classification,
+                    worker_run.started_at.isoformat(),
+                    worker_run.ended_at.isoformat() if worker_run.ended_at else None,
+                    worker_run.breadcrumb_path,
+                ),
+            )
+
+    def get_control_worker_run(self, worker_run_id: str) -> ControlWorkerRun | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, task_id, objective_id, worker_kind, runtime_name, model_name,
+                       attempt, status, classification, started_at, ended_at, breadcrumb_path
+                FROM control_worker_runs
+                WHERE id = ?
+                """,
+                (worker_run_id,),
+            ).fetchone()
+        return control_worker_run_from_row(row) if row else None
+
+    def list_control_worker_runs(self, task_id: str | None = None) -> list[ControlWorkerRun]:
+        query = """
+            SELECT id, task_id, objective_id, worker_kind, runtime_name, model_name,
+                   attempt, status, classification, started_at, ended_at, breadcrumb_path
+            FROM control_worker_runs
+        """
+        params: list[str] = []
+        if task_id:
+            query += " WHERE task_id = ?"
+            params.append(task_id)
+        query += " ORDER BY started_at DESC"
+        with self.connect() as connection:
+            rows = connection.execute(query, tuple(params)).fetchall()
+        return [control_worker_run_from_row(row) for row in rows]

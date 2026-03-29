@@ -11,6 +11,7 @@ from ..control_breadcrumbs import BreadcrumbWriter
 from ..control_classifier import FailureClassifier
 from ..config import HarnessConfig, default_config_path, write_persisted_config
 from ..control_plane import ControlPlane
+from ..control_runtime import ControlRuntimeObserver
 from ..control_watch import ControlWatchService
 from ..domain import serialize_dataclass
 from ..engine import HarnessEngine
@@ -97,6 +98,7 @@ class CLIContext:
     failure_classifier: FailureClassifier
     breadcrumb_writer: BreadcrumbWriter
     control_watch: ControlWatchService
+    control_runtime: ControlRuntimeObserver
 
 
 def build_context(config: HarnessConfig) -> CLIContext:
@@ -138,6 +140,12 @@ def build_context(config: HarnessConfig) -> CLIContext:
             failure_classifier,
             breadcrumb_writer,
             supervisor_control_dir=config.db_path.parent / "supervisors",
+        ),
+        control_runtime=ControlRuntimeObserver(
+            store,
+            control_plane,
+            failure_classifier,
+            breadcrumb_writer,
         ),
     )
 

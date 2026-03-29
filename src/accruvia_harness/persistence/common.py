@@ -12,6 +12,7 @@ from ..domain import (
     ControlLaneStateValue,
     ControlRecoveryAction,
     ControlSystemState,
+    ControlWorkerRun,
     ContextRecord,
     Decision,
     DecisionAction,
@@ -318,4 +319,21 @@ def control_recovery_action_from_row(row: sqlite3.Row) -> ControlRecoveryAction:
         reason=row["reason"],
         result=row["result"],
         created_at=parse_dt(row["created_at"]),
+    )
+
+
+def control_worker_run_from_row(row: sqlite3.Row) -> ControlWorkerRun:
+    return ControlWorkerRun(
+        id=row["id"],
+        task_id=row["task_id"],
+        objective_id=row["objective_id"],
+        worker_kind=row["worker_kind"],
+        runtime_name=row["runtime_name"],
+        model_name=row["model_name"],
+        attempt=int(row["attempt"]),
+        status=row["status"],
+        classification=row["classification"],
+        started_at=parse_dt(row["started_at"]),
+        ended_at=parse_dt(row["ended_at"]) if row["ended_at"] else None,
+        breadcrumb_path=row["breadcrumb_path"],
     )

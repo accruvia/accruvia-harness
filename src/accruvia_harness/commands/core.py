@@ -937,6 +937,11 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
                 ),
                 flush=True,
             )
+        def _control_aware_progress(event: dict[str, object]) -> None:
+            ctx.control_runtime.handle(event)
+            if not args.json:
+                _emit_supervise_progress(event)
+
         ctx.control_plane.resume_lane("harness", reason="supervise_start")
         try:
             result = engine.supervise(
@@ -953,7 +958,7 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
                 review_check_enabled=args.review_check_enabled or config.pr_check_enabled,
                 review_check_interval_seconds=args.review_check_interval_seconds or config.pr_check_interval_seconds,
                 stop_requested=lambda: stop_requested["value"] or stop_request_path.exists(),
-                progress_callback=None if args.json else _emit_supervise_progress,
+                progress_callback=_control_aware_progress,
             )
             ctx.control_plane.mark_healthy(reason="supervise_completed")
         finally:

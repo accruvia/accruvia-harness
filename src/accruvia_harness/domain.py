@@ -390,6 +390,22 @@ class ControlRecoveryAction:
 
 
 @dataclass(slots=True)
+class ControlWorkerRun:
+    id: str
+    task_id: str | None = None
+    objective_id: str | None = None
+    worker_kind: str = "coding_worker"
+    runtime_name: str = "local"
+    model_name: str | None = None
+    attempt: int = 1
+    status: str = "started"
+    classification: str | None = None
+    started_at: datetime = field(default_factory=utc_now)
+    ended_at: datetime | None = None
+    breadcrumb_path: str | None = None
+
+
+@dataclass(slots=True)
 class FailureClassification:
     classification: str
     confidence: float

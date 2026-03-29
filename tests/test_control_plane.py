@@ -7,6 +7,7 @@ from pathlib import Path
 from accruvia_harness.control_breadcrumbs import BreadcrumbWriter
 from accruvia_harness.control_classifier import FailureClassifier
 from accruvia_harness.control_plane import ControlPlane
+from accruvia_harness.control_runtime import ControlRuntimeObserver
 from accruvia_harness.control_watch import ControlWatchService
 from accruvia_harness.domain import Objective, ObjectiveStatus, Project, new_id
 from accruvia_harness.store import SQLiteHarnessStore
@@ -108,3 +109,54 @@ class ControlWatchServiceTests(unittest.TestCase):
 
         self.assertEqual("frozen", result["status"]["global_state"])
         self.assertEqual(objective.id, result["stalled_objectives"][0]["objective_id"])
+
+
+class ControlRuntimeObserverTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        root = Path(self.temp_dir.name)
+        self.workspace_root = root / "workspace"
+        self.store = SQLiteHarnessStore(root / "harness.db")
+        self.store.initialize()
+        self.control_plane = ControlPlane(self.store)
+        self.control_plane.turn_on()
+        self.observer = ControlRuntimeObserver(
+            self.store,
+            self.control_plane,
+            FailureClassifier(),
+            BreadcrumbWriter(self.store, self.workspace_root),
+        )
+
+    def test_failure_event_records_worker_run_and_breadcrumb(self) -> None:
+        self.observer.handle({"type": "run_created", "task_id": "task_123", "run_id": "run_123", "attempt": 1})
+        self.observer.handle(
+            {
+                "type": "failure_diagnostic",
+                "task_id": "task_123",
+                "run_id": "run_123",
+                "attempt": 1,
+                "run_status": "failed",
+                "task_status": "pending",
+                "failure_category": "validation_timeout",
+                "failure_message": "Worker timed out after validation.",
+                "analysis_summary": "Timed out",
+            }
+        )
+
+        worker_run = self.store.get_control_worker_run("run_123")
+        lane = self.store.get_control_lane_state("worker")
+        breadcrumbs = self.store.list_control_breadcrumbs(entity_type="task", entity_id="task_123")
+
+        self.assertIsNotNone(worker_run)
+        self.assertEqual("timeout", worker_run.classification if worker_run else None)
+        self.assertEqual("paused", lane.state.value if lane else None)
+        self.assertEqual("timeout", breadcrumbs[0].classification)
+
+    def test_task_started_marks_worker_lane_running(self) -> None:
+        self.observer.handle({"type": "task_started", "task_id": "task_123"})
+
+        lane = self.store.get_control_lane_state("worker")
+
+        self.assertIsNotNone(lane)
+        self.assertEqual("running", lane.state.value if lane else None)
