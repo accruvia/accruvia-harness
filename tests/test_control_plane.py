@@ -27,6 +27,12 @@ class FailureClassifierTests(unittest.TestCase):
         self.assertEqual("timeout", result.classification)
         self.assertTrue(result.retry_recommended)
 
+    def test_classifies_missing_required_artifacts_as_system_failure(self) -> None:
+        result = FailureClassifier().classify("Run is missing required artifacts. Retry budget exhausted.")
+
+        self.assertEqual("system_failure", result.classification)
+        self.assertFalse(result.retry_recommended)
+
 
 class BreadcrumbWriterTests(unittest.TestCase):
     def setUp(self) -> None:

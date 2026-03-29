@@ -43,6 +43,19 @@ class FailureClassifier:
                 cooldown_seconds=0,
                 evidence=evidence_list,
             )
+        if (
+            "missing required artifact" in haystack
+            or "missing required artifacts" in haystack
+            or "validation_evidence_missing" in haystack
+            or "retry budget exhausted" in haystack
+        ):
+            return FailureClassification(
+                classification="system_failure",
+                confidence=0.8,
+                retry_recommended=False,
+                cooldown_seconds=0,
+                evidence=evidence_list,
+            )
         if "killed" in haystack or "stale" in haystack or "hung" in haystack:
             return FailureClassification(
                 classification="hung_process",
