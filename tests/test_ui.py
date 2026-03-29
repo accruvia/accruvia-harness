@@ -360,6 +360,67 @@ class FakePromotionEngine:
         )
 
 
+FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
+
+
+def _build_test_context(store: SQLiteHarnessStore, db_path: Path, workspace_root: Path) -> SimpleNamespace:
+    ctx = SimpleNamespace(
+        store=store,
+        query_service=HarnessQueryService(store),
+        is_test=True,
+        config=HarnessConfig.from_payload(
+            {
+                "db_path": str(db_path),
+                "workspace_root": str(workspace_root),
+                "log_path": str(db_path.parent / "harness.log"),
+                "telemetry_dir": str(db_path.parent / "telemetry"),
+                "default_project_name": "demo",
+                "default_repo": "",
+                "runtime_backend": "inline",
+                "temporal_target": "",
+                "temporal_namespace": "",
+                "temporal_task_queue": "",
+                "worker_backend": "process",
+                "worker_command": None,
+                "llm_backend": "codex",
+                "llm_model": None,
+                "llm_command": None,
+                "llm_codex_command": None,
+                "llm_claude_command": None,
+                "llm_accruvia_client_command": None,
+            }
+        ),
+    )
+    ctx.engine = FakePromotionEngine(store)
+    return ctx
+
+
+def _load_state_fixture(store: SQLiteHarnessStore, fixture_name: str) -> dict[str, object]:
+    payload = json.loads((FIXTURE_DIR / fixture_name).read_text(encoding="utf-8"))
+    table_order = [
+        "projects",
+        "objectives",
+        "intent_models",
+        "mermaid_artifacts",
+        "tasks",
+        "runs",
+        "context_records",
+    ]
+    with store.connect() as connection:
+        connection.execute("BEGIN")
+        for table in table_order:
+            rows = list(payload.get(table) or [])
+            if not rows:
+                continue
+            columns = [row["name"] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()]
+            common = [column for column in columns if column in rows[0]]
+            placeholders = ",".join("?" for _ in common)
+            sql = f"INSERT INTO {table} ({', '.join(common)}) VALUES ({placeholders})"
+            connection.executemany(sql, [[row.get(column) for column in common] for row in rows])
+        connection.commit()
+    return payload
+
+
 class HarnessUIDataServiceTests(unittest.TestCase):
     def test_fastapi_app_exposes_api_root_only(self) -> None:
         client = TestClient(ui_module._build_fastapi_app(self.service, ui_module._EventBus()))
@@ -2946,6 +3007,77 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         self.assertTrue(objective_payload["interrogation_review"]["completed"])
         checks = {item["key"]: item for item in objective_payload["execution_gate"]["checks"]}
         self.assertTrue(checks["interrogation_complete"]["ok"])
+
+
+class ProofBackedContainerFixtureTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        base = Path(self.tempdir.name)
+        self.db_path = base / "harness.db"
+        self.workspace_root = base / "workspace"
+        self.workspace_root.mkdir(parents=True, exist_ok=True)
+        self.store = SQLiteHarnessStore(self.db_path)
+        self.store.initialize()
+        self.fixture = _load_state_fixture(self.store, "control_plane_project_8c1e664e7143.json")
+        self.project = self.fixture["projects"][0]
+        self.ctx = _build_test_context(self.store, self.db_path, self.workspace_root)
+        self.service = HarnessUIDataService(self.ctx)
+
+    def test_fixture_import_counts_match_curated_fixture(self) -> None:
+        self.assertEqual(1, len(self.store.list_projects()))
+        self.assertEqual(3, len(self.store.list_objectives(self.project["id"])))
+        self.assertEqual(25, len(self.store.list_tasks(self.project["id"])))
+        self.assertEqual(2, len(self.fixture["intent_models"]))
+        self.assertEqual(5, len(self.fixture["mermaid_artifacts"]))
+        with self.store.connect() as connection:
+            row = connection.execute("SELECT COUNT(*) AS total FROM context_records").fetchone()
+        self.assertEqual(56, int(row["total"]))
+
+    def test_fixture_preserves_planning_remediation_and_override_states(self) -> None:
+        payload = self.service.project_workspace(self.project["id"])
+        objectives = {item["id"]: item for item in payload["objectives"]}
+
+        planning = objectives["objective_af7b341a1621"]
+        self.assertEqual("open", planning["status"])
+        self.assertEqual("planning", planning["workflow"]["current_stage"])
+        planning_checks = {item["key"]: item for item in planning["execution_gate"]["checks"]}
+        self.assertFalse(planning_checks["intent_model"]["ok"])
+        self.assertFalse(planning_checks["interrogation_complete"]["ok"])
+        self.assertFalse(planning_checks["mermaid_finished"]["ok"])
+        self.assertEqual("promotion_review_pending", planning["promotion_review"]["phase"])
+        self.assertEqual(0, planning["promotion_review"]["review_packet_count"])
+
+        remediation = objectives["objective_4d43164c80d5"]
+        self.assertEqual("paused", remediation["status"])
+        self.assertEqual("planning", remediation["workflow"]["current_stage"])
+        self.assertEqual("remediation_required", remediation["promotion_review"]["phase"])
+        self.assertFalse(remediation["promotion_review"]["review_clear"])
+        self.assertEqual(7, remediation["promotion_review"]["review_packet_count"])
+        self.assertEqual(14, remediation["promotion_review"]["objective_review_packet_count"])
+        self.assertEqual(5, remediation["promotion_review"]["historical_failed_count"])
+        self.assertEqual(2, len(remediation["promotion_review"]["review_rounds"]))
+
+        override = objectives["objective_3cb48986ed11"]
+        self.assertEqual("paused", override["status"])
+        self.assertEqual("planning", override["workflow"]["current_stage"])
+        self.assertTrue(override["promotion_review"]["review_clear"])
+        self.assertEqual(7, override["promotion_review"]["review_packet_count"])
+        self.assertEqual(5, override["promotion_review"]["historical_failed_count"])
+        self.assertEqual("operator", override["promotion_review"]["operator_override"]["author"])
+        self.assertEqual(15, len(override["promotion_review"]["operator_override"]["waived_task_ids"]))
+
+    def test_fixture_objective_detail_retains_review_packets_for_target_objectives(self) -> None:
+        remediation = self.service.project_objective_detail(self.project["id"], "objective_4d43164c80d5")
+        override = self.service.project_objective_detail(self.project["id"], "objective_3cb48986ed11")
+
+        self.assertEqual(15, len(remediation["tasks"]))
+        self.assertEqual(7, remediation["objective"]["promotion_review"]["review_packet_count"])
+        self.assertEqual(14, remediation["objective"]["promotion_review"]["objective_review_packet_count"])
+        self.assertEqual("objective_review", remediation["objective"]["promotion_review"]["review_packets"][0]["source"])
+        self.assertEqual("paused", override["objective"]["status"])
+        self.assertTrue(override["objective"]["promotion_review"]["review_clear"])
+        self.assertEqual(7, override["objective"]["promotion_review"]["objective_review_packet_count"])
 
 
 class BackgroundSupervisorCoordinatorTests(unittest.TestCase):
