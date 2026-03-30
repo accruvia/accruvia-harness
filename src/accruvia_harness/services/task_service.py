@@ -19,6 +19,13 @@ from .common import task_created_payload
 
 _REMEDIATION_TREE_CAP = 15
 _RETRY_HISTORY_MAX_OBJECTIVE_CHARS = 280
+_HIGH_RISK_TASK_STRATEGIES = {
+    "objective_review_remediation",
+    "atomic_from_mermaid",
+    "operator_ergonomics",
+    "sa_structural_fix",
+    "sa_watch_direct_repair",
+}
 
 
 class TaskService:
@@ -127,19 +134,29 @@ class TaskService:
                 raise ValueError(f"Unknown objective: {objective_id}")
             if linked_objective.project_id != project_id:
                 raise ValueError(f"Objective {objective_id} does not belong to project {project_id}")
+        amended_objective, amended_metadata = self._apply_task_amendment(
+            objective=objective,
+            strategy=strategy,
+            required_artifacts=required_artifacts or ["plan", "report"],
+            validation_mode=str(validation_mode or "").strip() or "default_focused",
+            scope=scope or {},
+            external_ref_type=external_ref_type,
+            external_ref_id=external_ref_id,
+            external_ref_metadata=external_ref_metadata or {},
+        )
         return self.create_task(
             Task(
                 id=new_id("task"),
                 project_id=project_id,
                 objective_id=objective_id,
                 title=title,
-                objective=objective,
+                objective=amended_objective,
                 priority=priority,
                 parent_task_id=parent_task_id,
                 source_run_id=source_run_id,
                 external_ref_type=external_ref_type,
                 external_ref_id=external_ref_id,
-                external_ref_metadata=external_ref_metadata or {},
+                external_ref_metadata=amended_metadata,
                 validation_profile=validation_profile,
                 validation_mode=str(validation_mode or "").strip() or "default_focused",
                 scope=scope or {},
@@ -149,6 +166,53 @@ class TaskService:
                 required_artifacts=required_artifacts or ["plan", "report"],
             )
         )
+
+    def _apply_task_amendment(
+        self,
+        *,
+        objective: str,
+        strategy: str,
+        required_artifacts: list[str],
+        validation_mode: str,
+        scope: dict[str, object],
+        external_ref_type: str | None,
+        external_ref_id: str | None,
+        external_ref_metadata: dict[str, object],
+    ) -> tuple[str, dict[str, object]]:
+        metadata = dict(external_ref_metadata)
+        if strategy not in _HIGH_RISK_TASK_STRATEGIES:
+            return objective, metadata
+        amendment_lines = [
+            "Task Amendment:",
+            "- Address repository code and test changes before relying on summaries or reports.",
+            "- If no repository files change, the task is not complete.",
+            f"- Required artifacts for completion: {', '.join(required_artifacts)}.",
+            f"- Validation mode for this task: {validation_mode}.",
+        ]
+        if scope:
+            amendment_lines.append("- Follow the task scope strictly when deciding which files to touch.")
+        if strategy == "objective_review_remediation":
+            amendment_lines.extend(
+                [
+                    "- This is a promotion-review remediation task. Artifact-shaped prose is not enough.",
+                    "- The final evidence artifact must be backed by real repository state, real tests, or other durable run artifacts.",
+                ]
+            )
+        if strategy in {"atomic_from_mermaid", "sa_structural_fix", "sa_watch_direct_repair", "operator_ergonomics"}:
+            amendment_lines.append(
+                "- This task is workflow-sensitive. Keep the change set narrow and avoid unrelated worker/control-plane modifications unless the objective explicitly requires them."
+            )
+        metadata["task_amendment"] = {
+            "version": 1,
+            "strategy": strategy,
+            "required_artifacts": list(required_artifacts),
+            "validation_mode": validation_mode,
+            "scope_present": bool(scope),
+            "external_ref_type": external_ref_type or "",
+            "external_ref_id": external_ref_id or "",
+            "lines": amendment_lines[1:],
+        }
+        return objective.rstrip() + "\n\n" + "\n".join(amendment_lines), metadata
 
     def create_follow_on_task(
         self,

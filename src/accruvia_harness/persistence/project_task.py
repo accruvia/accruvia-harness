@@ -367,7 +367,10 @@ class ProjectTaskStoreMixin:
                     continue
                 effective_statuses.append(status)
             if not effective_statuses:
-                phase = ObjectiveStatus.PLANNING
+                # All linked tasks were explicitly ignored for phase purposes
+                # (for example waived obsolete failures), so the objective is
+                # effectively resolved rather than awaiting new work.
+                phase = ObjectiveStatus.RESOLVED
             elif any(s == TaskStatus.ACTIVE for s in effective_statuses):
                 phase = ObjectiveStatus.EXECUTING
             elif all(s == TaskStatus.COMPLETED for s in effective_statuses):

@@ -2262,6 +2262,8 @@ class SAWatchServiceTests(unittest.TestCase):
         repair_records = self.store.list_context_records(objective_id=objective.id, record_type="sa_watch_repair")
         self.assertEqual(1, len(repair_records))
         self.assertIn("repair still failing", json.dumps(repair_records[0].metadata))
+        self.assertEqual("six_whys", repair_records[0].metadata["blameless_review"]["method"])
+        self.assertEqual(6, len(repair_records[0].metadata["blameless_review"]["why_chain"]))
 
     def test_sa_watch_repairs_harness_directly_for_stale_atomic_generation(self) -> None:
         project = Project(id=new_id("project"), name="watch-project", description="watch")
@@ -2361,6 +2363,8 @@ class SAWatchServiceTests(unittest.TestCase):
         self.assertIsNone(self.store.get_task_by_external_ref("sa_watch", f"objective:{objective.id}:stale_atomic_generation"))
         repair_records = self.store.list_context_records(objective_id=objective.id, record_type="sa_watch_repair")
         self.assertEqual(1, len(repair_records))
+        self.assertTrue(repair_records[0].metadata["blameless_review"]["blameless"])
+        self.assertIn("repair_artifact_inventory", repair_records[0].metadata)
         repair_tasks = [task for task in self.store.list_tasks(project.id) if task.strategy == "sa_watch_direct_repair"]
         self.assertEqual(1, len(repair_tasks))
         self.assertEqual(TaskStatus.COMPLETED, repair_tasks[0].status)

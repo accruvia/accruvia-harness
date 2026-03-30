@@ -1618,6 +1618,64 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         self.assertEqual(1, latest_round["remediation_counts"]["total"])
         self.assertEqual("improving", latest_round["packets"][-1]["progress_status"])
         self.assertTrue(latest_round["review_cycle_artifact"]["record_id"])
+        self.assertGreaterEqual(int(latest_round["duration_ms"]), 0)
+
+    def test_objective_review_state_and_rounds_include_duration_ms(self) -> None:
+        review_id = new_id("objective_review")
+        started_at = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=3)
+        completed_at = started_at + dt.timedelta(minutes=2)
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="objective_review_started",
+                project_id=self.project.id,
+                objective_id=self.objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Started automatic objective promotion review.",
+                metadata={"review_id": review_id},
+                created_at=started_at,
+            )
+        )
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="objective_review_packet",
+                project_id=self.project.id,
+                objective_id=self.objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Packet.",
+                metadata={
+                    "review_id": review_id,
+                    "reviewer": "QA",
+                    "dimension": "unit_test_coverage",
+                    "verdict": "pass",
+                    "findings": [],
+                    "evidence": [],
+                },
+                created_at=started_at + dt.timedelta(minutes=1),
+            )
+        )
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="objective_review_completed",
+                project_id=self.project.id,
+                objective_id=self.objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Completed automatic objective review.",
+                metadata={"review_id": review_id, "packet_count": 1},
+                created_at=completed_at,
+            )
+        )
+
+        review_state = self.service._objective_review_state(self.objective.id)
+        review = self.service._promotion_review_for_objective(self.objective.id, [])
+
+        self.assertEqual(120000, review_state["duration_ms"])
+        self.assertEqual(120000, review["review_rounds"][0]["duration_ms"])
 
     def test_objective_review_auto_starts_next_round_after_remediation_completes(self) -> None:
         fake_router = FakeLLMRouter("{}")
@@ -2891,6 +2949,60 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         objective_payload = next(item for item in payload["objectives"] if item["id"] == recovering_objective.id)
 
         self.assertEqual("completed", result["atomic_generation"]["status"])
+
+    def test_atomic_generation_state_includes_duration_ms(self) -> None:
+        objective = Objective(
+            id=new_id("objective"),
+            project_id=self.project.id,
+            title="Atomic duration",
+            summary="Track atomic duration in state payloads",
+        )
+        self.store.create_objective(objective)
+        self.store.create_mermaid_artifact(
+            MermaidArtifact(
+                id=new_id("diagram"),
+                objective_id=objective.id,
+                diagram_type="workflow_control",
+                version=1,
+                status=MermaidStatus.FINISHED,
+                summary="Accepted control flow",
+                content="flowchart TD\nA-->B",
+                required_for_execution=True,
+            )
+        )
+        started_at = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=4)
+        completed_at = started_at + dt.timedelta(minutes=3)
+        generation_id = "atomic_generation_timed"
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="atomic_generation_started",
+                project_id=self.project.id,
+                objective_id=objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Started generating atomic units from Mermaid v1.",
+                metadata={"generation_id": generation_id, "diagram_version": 1},
+                created_at=started_at,
+            )
+        )
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="atomic_generation_completed",
+                project_id=self.project.id,
+                objective_id=objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Generated atomic units.",
+                metadata={"generation_id": generation_id, "diagram_version": 1, "unit_count": 1},
+                created_at=completed_at,
+            )
+        )
+
+        state = self.service._atomic_generation_state(objective.id)
+
+        self.assertEqual(180000, state["duration_ms"])
 
     def test_reconcile_objective_restarts_stale_atomic_generation_when_only_terminal_tasks_remain(self) -> None:
         objective = Objective(

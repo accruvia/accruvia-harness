@@ -963,10 +963,121 @@ class SAWatchService:
             "Do not create product work. Do not stop at a band-aid restart. Fix the machine.\n"
             "Required proof:\n"
             "- identify the root cause precisely in the repair evidence\n"
+            "- record a blameless six-whys review grounded in concrete evidence; if you cannot support a deeper why, say what evidence is missing\n"
             "- implement the durable harness change\n"
             "- validate the repaired path locally\n"
             "- leave durable evidence describing what changed and why tasks should move again\n"
         )
+
+    def _repair_artifact_inventory(self, repair_result: SAWatchRepairResult) -> list[str]:
+        run_dir = repair_result.run_dir
+        if not run_dir.exists():
+            return []
+        artifacts: list[str] = []
+        for path in sorted(run_dir.iterdir()):
+            if path.is_file():
+                artifacts.append(path.name)
+        return artifacts
+
+    def _blameless_six_whys_review(
+        self,
+        *,
+        decision: SAWatchDecision,
+        signal: dict[str, object],
+        repair_result: SAWatchRepairResult,
+        movement_restored: bool,
+    ) -> dict[str, object]:
+        signal_kind = str(signal.get("kind") or "structural_stall")
+        failure_message = str(
+            repair_result.diagnostics.get("failure_message")
+            or repair_result.diagnostics.get("error")
+            or repair_result.summary
+            or "No detailed repair failure message was recorded."
+        ).strip()
+        artifact_inventory = self._repair_artifact_inventory(repair_result)
+        validation = repair_result.validation if isinstance(repair_result.validation, dict) else {}
+        compile_ok = bool((validation.get("compile_check") or {}).get("ok")) if isinstance(validation.get("compile_check"), dict) else False
+        test_ok = bool((validation.get("test_check") or {}).get("ok")) if isinstance(validation.get("test_check"), dict) else False
+        known_facts = [
+            f"sa-watch targeted signal '{signal_kind}'.",
+            f"Repair run status was '{repair_result.status}'.",
+            f"Changed files recorded: {', '.join(repair_result.changed_files) if repair_result.changed_files else 'none'}.",
+            f"Validation status: compile_ok={compile_ok}, test_ok={test_ok}.",
+            f"Movement restored after repair: {movement_restored}.",
+        ]
+        if artifact_inventory:
+            known_facts.append(f"Repair artifacts present: {', '.join(artifact_inventory)}.")
+        why_chain = [
+            {
+                "level": 1,
+                "question": "Why did the pipeline stop moving?",
+                "answer": f"sa-watch observed the continuity signal '{signal_kind}' and treated it as a structural workflow risk.",
+                "evidence": ["signal.kind", "decision.reason"],
+            },
+            {
+                "level": 2,
+                "question": "Why did sa-watch choose a harness repair instead of waiting or restarting?",
+                "answer": decision.reason or "The decision packet selected direct harness repair.",
+                "evidence": ["decision.reason", "decision.action"],
+            },
+            {
+                "level": 3,
+                "question": "Why did the attempted repair succeed or fail to restore movement?",
+                "answer": (
+                    "The repair produced enough validated evidence for forward progress to resume."
+                    if movement_restored
+                    else f"The repair did not provide enough validated evidence to show movement resumed. Latest repair result: {failure_message}"
+                ),
+                "evidence": ["repair_result.summary", "repair_result.validation", "movement_validation"],
+            },
+            {
+                "level": 4,
+                "question": "Why was that gap not resolved within the repair attempt itself?",
+                "answer": (
+                    "The repair scope appears to have addressed the immediate workflow defect but did not fully prove end-to-end movement."
+                    if repair_result.changed_files
+                    else "The repair attempt did not record durable code changes, so the structural hypothesis could not be fully validated."
+                ),
+                "evidence": ["changed_files", "validation"],
+            },
+            {
+                "level": 5,
+                "question": "Why could operators misread the real issue from the run evidence?",
+                "answer": (
+                    "The artifact set is generic unless the repair explicitly records a structured review. Without that, operators mostly see summary strings and validation outputs."
+                ),
+                "evidence": ["repair_evidence.summary", "repair_artifact_inventory"],
+            },
+            {
+                "level": 6,
+                "question": "Why do repeated incidents require deeper questioning?",
+                "answer": (
+                    "Because shallow summaries collapse environment, workflow, and validation issues together. A fixed six-whys structure forces the investigation to separate observed facts, contributing factors, and unresolved unknowns."
+                ),
+                "evidence": ["blameless_review", "diagnostics", "validation"],
+            },
+        ]
+        return {
+            "method": "six_whys",
+            "blameless": True,
+            "known_facts": known_facts,
+            "evidence_reviewed": artifact_inventory,
+            "contributing_factors": [
+                "continuity signal required structural interpretation",
+                "repair quality depended on durable evidence and local validation",
+                "operator diagnosis quality depends on artifact richness, not just terminal status",
+            ],
+            "why_chain": why_chain,
+            "unknowns": [] if movement_restored else [
+                "Whether the underlying workflow defect is fully removed from all similar objectives.",
+                "Whether the repair evidence captured enough detail for future operators without re-reading raw artifacts.",
+            ],
+            "next_questions": [
+                "What exact artifact or trace would have made the causal chain obvious without manual probing?",
+                "What validator or guardrail could reject this failure mode earlier?",
+                "Which similar repair tasks should inherit the same context and questioning pattern?",
+            ],
+        }
 
     def _target_objective_for_signal(self, structural_signal: dict[str, object] | None) -> object | None:
         if not structural_signal:
@@ -1076,6 +1187,9 @@ class SAWatchService:
             "ACCRUVIA_TASK_TITLE": repair_task.title,
             "ACCRUVIA_TASK_OBJECTIVE": repair_task.objective,
             "ACCRUVIA_RUN_SUMMARY": repair_run.summary,
+            "ACCRUVIA_TASK_SCOPE_JSON": json.dumps(repair_task.scope, sort_keys=True),
+            "ACCRUVIA_TASK_EXTERNAL_METADATA_JSON": json.dumps(repair_task.external_ref_metadata, sort_keys=True),
+            "ACCRUVIA_TASK_REQUIRED_ARTIFACTS": json.dumps(repair_task.required_artifacts, sort_keys=True),
             "ACCRUVIA_TASK_STRATEGY": repair_task.strategy,
             "ACCRUVIA_TASK_VALIDATION_PROFILE": repair_task.validation_profile,
             "ACCRUVIA_TASK_VALIDATION_MODE": repair_task.validation_mode,
@@ -1135,6 +1249,13 @@ class SAWatchService:
             "changed_files": repair_result.changed_files,
             "validation": repair_result.validation,
             "diagnostics": repair_result.diagnostics,
+            "repair_artifact_inventory": self._repair_artifact_inventory(repair_result),
+            "blameless_review": self._blameless_six_whys_review(
+                decision=decision,
+                signal=signal,
+                repair_result=repair_result,
+                movement_restored=movement_restored,
+            ),
             "signal": signal,
             "movement_validation": {
                 "before": before_progress,

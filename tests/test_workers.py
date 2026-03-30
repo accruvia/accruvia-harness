@@ -547,12 +547,121 @@ class WorkerTests(unittest.TestCase):
         )
 
         report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
+        prompt_text = (run_dir / "codex_worker_prompt.txt").read_text(encoding="utf-8")
         self.assertEqual(0, result)
         self.assertEqual("codex", report["llm_backend"])
         self.assertEqual("candidate", report["worker_outcome"])
         self.assertIn("changed_module.py", report["changed_files"])
-        self.assertIn("Objective: Verify worker abstraction", (run_dir / "codex_worker_prompt.txt").read_text(encoding="utf-8"))
+        self.assertIn("Objective: Verify worker abstraction", prompt_text)
+        self.assertIn(f"Workspace root: {workspace}", prompt_text)
+        self.assertIn('"validation_command"', prompt_text)
+        self.assertIn('"required_artifacts"', prompt_text)
+        self.assertIn("evidence_reviewed", report)
+        self.assertIn("run_files_present", report["evidence_reviewed"])
         self.assertIn("Objective: Verify worker abstraction", (workspace / "shared_prompt.txt").read_text(encoding="utf-8"))
+
+    def test_run_agent_worker_fails_when_fix_oriented_task_produces_no_changes(self) -> None:
+        workspace = self.base / "workspace-no-changes"
+        tests_dir = workspace / "tests"
+        tests_dir.mkdir(parents=True)
+        for name in ("test_engine.py", "test_store.py", "test_validation.py", "test_phase1.py"):
+            (tests_dir / name).write_text(
+                "import unittest\n\n"
+                "class Smoke(unittest.TestCase):\n"
+                "    def test_ok(self):\n"
+                "        self.assertTrue(True)\n",
+                encoding="utf-8",
+            )
+        subprocess.run(["git", "init", "-b", "main"], cwd=workspace, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
+            cwd=workspace,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        cli_script = self.base / "fake_codex_no_changes.sh"
+        cli_script.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf 'worker summary\\n'\n",
+            encoding="utf-8",
+        )
+        cli_script.chmod(0o755)
+        run_dir = self.base / "run-no-changes"
+
+        result = run_agent_worker(
+            {
+                "ACCRUVIA_RUN_DIR": str(run_dir),
+                "ACCRUVIA_PROJECT_WORKSPACE": str(workspace),
+                "ACCRUVIA_TASK_ID": self.task.id,
+                "ACCRUVIA_RUN_ID": self.run.id,
+                "ACCRUVIA_TASK_OBJECTIVE": self.task.objective,
+                "ACCRUVIA_RUN_SUMMARY": self.run.summary,
+                "ACCRUVIA_TASK_STRATEGY": "objective_review_remediation",
+                "ACCRUVIA_WORKER_LLM_BACKEND": "codex",
+                "ACCRUVIA_LLM_CODEX_COMMAND": str(cli_script),
+            }
+        )
+
+        report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
+        self.assertEqual(1, result)
+        self.assertEqual("failed", report["worker_outcome"])
+        self.assertEqual("no_changes_produced", report["failure_category"])
+        self.assertFalse(report["changed_files"])
+        self.assertFalse(report["suspected_tooling_misread"])
+        self.assertIn("evidence_reviewed", report)
+
+    def test_run_agent_worker_flags_suspected_tooling_misread_when_stdout_claims_write_block(self) -> None:
+        workspace = self.base / "workspace-write-misread"
+        tests_dir = workspace / "tests"
+        tests_dir.mkdir(parents=True)
+        for name in ("test_engine.py", "test_store.py", "test_validation.py", "test_phase1.py"):
+            (tests_dir / name).write_text(
+                "import unittest\n\n"
+                "class Smoke(unittest.TestCase):\n"
+                "    def test_ok(self):\n"
+                "        self.assertTrue(True)\n",
+                encoding="utf-8",
+            )
+        subprocess.run(["git", "init", "-b", "main"], cwd=workspace, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
+            cwd=workspace,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        cli_script = self.base / "fake_codex_write_misread.sh"
+        cli_script.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf 'I am blocked on file writes. The permission system is not granting write access.\\n'\n",
+            encoding="utf-8",
+        )
+        cli_script.chmod(0o755)
+        run_dir = self.base / "run-write-misread"
+
+        result = run_agent_worker(
+            {
+                "ACCRUVIA_RUN_DIR": str(run_dir),
+                "ACCRUVIA_PROJECT_WORKSPACE": str(workspace),
+                "ACCRUVIA_TASK_ID": self.task.id,
+                "ACCRUVIA_RUN_ID": self.run.id,
+                "ACCRUVIA_TASK_OBJECTIVE": self.task.objective,
+                "ACCRUVIA_RUN_SUMMARY": self.run.summary,
+                "ACCRUVIA_TASK_STRATEGY": "default",
+                "ACCRUVIA_WORKER_LLM_BACKEND": "codex",
+                "ACCRUVIA_LLM_CODEX_COMMAND": str(cli_script),
+            }
+        )
+
+        report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
+        self.assertEqual(1, result)
+        self.assertEqual("no_changes_produced", report["failure_category"])
+        self.assertTrue(report["suspected_tooling_misread"])
+        self.assertIn("write-permission problem", report["failure_message"])
+        self.assertIn("blocked on file writes", report["evidence_reviewed"]["claimed_blockers"])
 
     def test_run_agent_worker_emits_heartbeat_during_llm_execution(self) -> None:
         workspace = self.base / "workspace-heartbeat"
@@ -856,7 +965,42 @@ class WorkerTests(unittest.TestCase):
 
         self.assertEqual(1, result)
         self.assertEqual("validation_failure", report["failure_category"])
-        self.assertIn("ERROR", report["failure_message"])
+        self.assertEqual("ERROR: test_ui (unittest.loader._FailedTest.test_ui)", report["failure_message"])
+        self.assertEqual([sys.executable, "-m", "unittest", "-v", "tests.test_ui"], report["evidence_reviewed"]["validation_command"])
+
+    def test_run_validation_refuses_candidate_with_no_changed_files(self) -> None:
+        workspace = self.base / "workspace-no-validation-changes"
+        workspace.mkdir(parents=True)
+        run_dir = self.base / "run-no-validation-changes"
+        run_dir.mkdir(parents=True)
+        report_path = run_dir / "report.json"
+        report_path.write_text(
+            json.dumps(
+                {
+                    "worker_outcome": "candidate",
+                    "changed_files": [],
+                    "effective_validation_mode": "default_focused",
+                    "suspected_tooling_misread": True,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        env = {
+            "ACCRUVIA_RUN_DIR": str(run_dir),
+            "ACCRUVIA_PROJECT_WORKSPACE": str(workspace),
+            "ACCRUVIA_TASK_ID": self.task.id,
+            "ACCRUVIA_RUN_ID": self.run.id,
+            "ACCRUVIA_TASK_VALIDATION_MODE": "default_focused",
+        }
+
+        result = run_validation(env)
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(1, result)
+        self.assertEqual("no_changes_produced", report["failure_category"])
+        self.assertTrue(report["suspected_tooling_misread"])
+        self.assertIn("no changed files", report["failure_message"])
 
     def test_run_validation_adds_workspace_src_to_pythonpath(self) -> None:
         workspace = self.base / "workspace-pythonpath"

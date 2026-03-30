@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -20,6 +21,13 @@ DEFAULT_AGENT_LLM_TIMEOUT_SECONDS = 420
 DEFAULT_AGENT_COMPILE_TIMEOUT_SECONDS = 120
 DEFAULT_AGENT_GIT_TIMEOUT_SECONDS = 30
 DEFAULT_AGENT_PROGRESS_HEARTBEAT_SECONDS = 15.0
+_NO_CHANGE_FAILURE_STRATEGIES = {
+    "default",
+    "objective_review_remediation",
+    "sa_structural_fix",
+    "atomic_from_mermaid",
+    "operator_ergonomics",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,11 +297,181 @@ def _validation_subprocess_env(workspace: Path, environ: Mapping[str, str]) -> d
 
 def _first_validation_failure_line(stdout: str, stderr: str) -> str:
     combined = (stdout or "") + "\n" + (stderr or "")
+    for prefix in ("FAIL:", "ERROR:"):
+        for line in combined.splitlines():
+            stripped = line.strip()
+            if stripped.startswith(prefix):
+                return stripped[:240]
+    for line in combined.splitlines():
+        stripped = line.strip()
+        if stripped.endswith("... FAIL") or stripped.endswith("... ERROR"):
+            return stripped[:240]
     for line in combined.splitlines():
         stripped = line.strip()
         if stripped:
             return stripped[:240]
     return ""
+
+
+def _required_artifacts_from_env(environ: Mapping[str, str]) -> list[str]:
+    raw_value = str(environ.get("ACCRUVIA_TASK_REQUIRED_ARTIFACTS", "")).strip()
+    if not raw_value:
+        return ["plan", "report"]
+    try:
+        payload = json.loads(raw_value)
+    except json.JSONDecodeError:
+        payload = [item.strip() for item in raw_value.split(",")]
+    if not isinstance(payload, list):
+        return ["plan", "report"]
+    parsed = [str(item).strip() for item in payload if str(item).strip()]
+    return parsed or ["plan", "report"]
+
+
+def _json_dict_from_env(environ: Mapping[str, str], key: str) -> dict[str, object]:
+    raw_value = str(environ.get(key, "")).strip()
+    if not raw_value:
+        return {}
+    try:
+        payload = json.loads(raw_value)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _extract_likely_target_files(text: str) -> list[str]:
+    matches = re.findall(r"(?:src|tests)/[A-Za-z0-9_./-]+\.(?:py|js|ts|tsx|jsx|json|md)", text or "")
+    unique: list[str] = []
+    for match in matches:
+        if match not in unique:
+            unique.append(match)
+    return unique[:8]
+
+
+def _task_context_bundle(
+    *,
+    env: Mapping[str, str],
+    workspace: Path,
+    run_dir: Path,
+    objective: str,
+    summary: str,
+    strategy: str,
+    validation_mode: str,
+) -> dict[str, object]:
+    required_artifacts = _required_artifacts_from_env(env)
+    task_scope = _json_dict_from_env(env, "ACCRUVIA_TASK_SCOPE_JSON")
+    external_metadata = _json_dict_from_env(env, "ACCRUVIA_TASK_EXTERNAL_METADATA_JSON")
+    validation_command = _validation_policy(validation_mode, env).command
+    artifact_schema_fields: list[str] = []
+    schema_match = re.search(r"Artifact schema fields:\s*(.+)", objective)
+    if schema_match:
+        artifact_schema_fields = [
+            item.strip() for item in schema_match.group(1).split(",") if item.strip()
+        ]
+    return {
+        "workspace_root": str(workspace),
+        "run_dir": str(run_dir),
+        "task_title": str(env.get("ACCRUVIA_TASK_TITLE", "")).strip(),
+        "strategy": strategy,
+        "required_artifacts": required_artifacts,
+        "validation_profile": str(env.get("ACCRUVIA_TASK_VALIDATION_PROFILE", "")).strip() or "generic",
+        "validation_mode": validation_mode,
+        "task_scope": task_scope,
+        "external_ref_metadata": external_metadata,
+        "artifact_schema_fields": artifact_schema_fields,
+        "likely_target_files": _extract_likely_target_files(objective + "\n" + summary),
+        "validation_command": validation_command,
+    }
+
+
+def _evidence_reviewed(
+    *,
+    run_dir: Path,
+    workspace: Path,
+    changed_files: list[str],
+    test_files: list[str],
+    test_command: list[str] | None = None,
+    summary_text: str = "",
+    stdout_text: str = "",
+    stderr_text: str = "",
+) -> dict[str, object]:
+    run_files = sorted(path.name for path in run_dir.iterdir() if path.is_file()) if run_dir.exists() else []
+    blocker_claims: list[str] = []
+    haystack = "\n".join([summary_text, stdout_text, stderr_text]).lower()
+    for marker in (
+        "blocked on file writes",
+        "permission system is not granting write access",
+        "failed to get write permission",
+        "read-only",
+    ):
+        if marker in haystack:
+            blocker_claims.append(marker)
+    return {
+        "workspace_root": str(workspace),
+        "run_dir": str(run_dir),
+        "run_files_present": run_files,
+        "changed_files_seen": list(changed_files),
+        "test_files_seen": list(test_files),
+        "validation_command": list(test_command or []),
+        "stdout_first_line": _first_nonempty_line(stdout_text),
+        "stderr_first_line": _first_nonempty_line(stderr_text),
+        "claimed_blockers": blocker_claims,
+        "workspace_exists": workspace.exists(),
+    }
+
+
+def _task_specific_guidance(
+    *,
+    strategy: str,
+    external_metadata: dict[str, object],
+    task_scope: dict[str, object],
+) -> list[str]:
+    guidance: list[str] = []
+    if task_scope:
+        guidance.append(
+            "Honor the task scope JSON when choosing files. If the scope is empty, use the likely target files and objective text."
+        )
+    if strategy in {"objective_review_remediation", "review_remediation"}:
+        remediation = (
+            external_metadata.get("objective_review_remediation")
+            if isinstance(external_metadata.get("objective_review_remediation"), dict)
+            else {}
+        )
+        evidence_contract = (
+            remediation.get("evidence_contract")
+            if isinstance(remediation.get("evidence_contract"), dict)
+            else {}
+        )
+        required_artifact_type = str(evidence_contract.get("required_artifact_type") or "").strip()
+        if required_artifact_type:
+            guidance.append(
+                f"This is a promotion-review remediation task. The final run must produce the required artifact type '{required_artifact_type}' with real repository-backed evidence."
+            )
+        guidance.append(
+            "For promotion-review remediation, do not return an artifact-shaped summary without making the code or test changes needed to satisfy the finding."
+        )
+    if strategy in {"atomic_from_mermaid", "sa_structural_fix", "operator_ergonomics"}:
+        guidance.append(
+            "Atomicity-sensitive task: keep the change set narrowly scoped to the intended files and avoid modifying worker/validation/control-plane machinery unless the objective explicitly requires it."
+        )
+    return guidance
+
+
+def _looks_like_permission_misread(summary_text: str, stdout_text: str, stderr_text: str) -> bool:
+    haystack = "\n".join([summary_text, stdout_text, stderr_text]).lower()
+    markers = (
+        "blocked on file writes",
+        "permission system is not granting write access",
+        "failed to get write permission",
+        "sandbox does not grant write access",
+        "read-only",
+    )
+    return any(marker in haystack for marker in markers)
+
+
+def _should_fail_for_no_changes(strategy: str, summary_text: str, stdout_text: str, stderr_text: str) -> bool:
+    if _looks_like_permission_misread(summary_text, stdout_text, stderr_text):
+        return True
+    return strategy in _NO_CHANGE_FAILURE_STRATEGIES
 
 
 def select_worker_llm_command(environ: Mapping[str, str]) -> tuple[str, str]:
@@ -350,6 +528,20 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
     strategy = env.get("ACCRUVIA_TASK_STRATEGY", "default")
     validation_profile = env.get("ACCRUVIA_TASK_VALIDATION_PROFILE", "generic")
     validation_mode = env.get("ACCRUVIA_TASK_VALIDATION_MODE", "default_focused")
+    task_context = _task_context_bundle(
+        env=env,
+        workspace=workspace,
+        run_dir=run_dir,
+        objective=objective,
+        summary=summary,
+        strategy=strategy,
+        validation_mode=validation_mode,
+    )
+    task_guidance = _task_specific_guidance(
+        strategy=strategy,
+        external_metadata=task_context.get("external_ref_metadata", {}) if isinstance(task_context.get("external_ref_metadata"), dict) else {},
+        task_scope=task_context.get("task_scope", {}) if isinstance(task_context.get("task_scope"), dict) else {},
+    )
 
     run_dir.mkdir(parents=True, exist_ok=True)
     plan_path = run_dir / "plan.txt"
@@ -382,8 +574,13 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
                 f"Task {task_id}",
                 f"Run {run_id}",
                 f"Strategy: {strategy}",
+                f"Workspace root: {workspace}",
                 f"Objective: {objective}",
                 f"Plan summary: {summary}",
+                "Task context bundle:",
+                json.dumps(task_context, indent=2, sort_keys=True),
+                "Task-specific guidance:",
+                *[f"- {item}" for item in task_guidance],
                 "",
             ]
         ),
@@ -392,17 +589,29 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
     prompt_text = "\n".join(
         [
             "You are operating inside an isolated git worktree for the repository under test.",
+            "Edits inside the workspace root below are expected and allowed.",
+            "If any edit tool appears blocked, verify that claim with a trivial write inside the workspace before concluding the workspace is read-only.",
+            "If you still cannot persist a change after that write check, print the exact command or tool failure you observed.",
             "",
             f"Task ID: {task_id}",
             f"Run ID: {run_id}",
+            f"Workspace root: {workspace}",
+            f"Run directory: {run_dir}",
             f"Objective: {objective}",
             f"Plan summary: {summary}",
+            "",
+            "Task context bundle:",
+            json.dumps(task_context, indent=2, sort_keys=True),
+            "",
+            "Task-specific guidance:",
+            *[f"- {item}" for item in task_guidance],
             "",
             "Requirements:",
             "- Make the smallest reasonable code changes to accomplish the objective.",
             "- Work only inside the current repository checkout.",
             "- Prefer touching tests when behavior or UX changes.",
             "- Do not ask for interactive approval.",
+            "- Do not stop at a design-only plan if the task requires a code or test change.",
             "- Before finishing, run a focused validation command if practical.",
             "- Print a short plain-English completion summary to stdout.",
             "",
@@ -474,6 +683,12 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
                     "timeout_seconds": llm_timeout_seconds,
                     "changed_files": [],
                     "test_files": [],
+                    "evidence_reviewed": _evidence_reviewed(
+                        run_dir=run_dir,
+                        workspace=workspace,
+                        changed_files=[],
+                        test_files=[],
+                    ),
                 },
                 indent=2,
                 sort_keys=True,
@@ -572,6 +787,15 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
                     "changed_files": all_changed,
                     "test_files": [],
                     "summary": summary_text,
+                    "evidence_reviewed": _evidence_reviewed(
+                        run_dir=run_dir,
+                        workspace=workspace,
+                        changed_files=all_changed,
+                        test_files=[],
+                        summary_text=summary_text,
+                        stdout_text=completed.stdout,
+                        stderr_text=completed.stderr,
+                    ),
                     "atomicity_gate": {
                         "score": gate_result.score,
                         "flags": gate_result.flags,
@@ -607,6 +831,15 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
         "changed_files": all_changed,
         "test_files": test_files,
         "summary": summary_text,
+        "evidence_reviewed": _evidence_reviewed(
+            run_dir=run_dir,
+            workspace=workspace,
+            changed_files=all_changed,
+            test_files=test_files,
+            summary_text=summary_text,
+            stdout_text=completed.stdout,
+            stderr_text=completed.stderr,
+        ),
         "command": llm_command,
         "atomicity_gate": {
             "score": gate_result.score,
@@ -616,7 +849,41 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
         },
         "atomicity_telemetry_path": str(atomicity_path),
         "effective_validation_mode": gate_result.effective_validation_mode,
+        "task_context_bundle": task_context,
     }
+    if not all_changed and _should_fail_for_no_changes(strategy, summary_text, completed.stdout, completed.stderr):
+        failure_message = (
+            "Worker completed without any repository file changes for a fix-oriented task. "
+            "This usually indicates a tooling misread or an incomplete remediation attempt."
+        )
+        if _looks_like_permission_misread(summary_text, completed.stdout, completed.stderr):
+            failure_message += " The worker also reported a write-permission problem that was not independently verified."
+        report_path.write_text(
+            json.dumps(
+                {
+                    **candidate_payload,
+                    "worker_outcome": "failed",
+                "failure_category": "no_changes_produced",
+                "failure_message": failure_message,
+                "suspected_tooling_misread": _looks_like_permission_misread(
+                    summary_text, completed.stdout, completed.stderr
+                ),
+                "evidence_reviewed": _evidence_reviewed(
+                    run_dir=run_dir,
+                    workspace=workspace,
+                    changed_files=[],
+                    test_files=test_files,
+                    summary_text=summary_text,
+                    stdout_text=completed.stdout,
+                    stderr_text=completed.stderr,
+                ),
+            },
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        return 1
     report_path.write_text(json.dumps(candidate_payload, indent=2, sort_keys=True), encoding="utf-8")
 
     # Candidate produced. Validation runs as a separate step orchestrated by run_service.
@@ -668,6 +935,49 @@ def run_validation(environ: Mapping[str, str] | None = None) -> int:
     validation_env = _validation_subprocess_env(workspace, env)
     _validation_start = time.monotonic()
 
+    if not all_changed:
+        failure_message = (
+            "Validation refused to run because the worker produced no changed files for a task that requires durable remediation output."
+        )
+        payload.update(
+            {
+                "worker_outcome": "failed",
+                "compile_check": {
+                    "passed": False,
+                    "targets": [],
+                    "mode": "py_compile",
+                    "output_path": str(compile_output_path),
+                    "timeout_seconds": compile_timeout_seconds,
+                    "timed_out": False,
+                },
+                "test_check": {
+                    "passed": False,
+                    "framework": "unittest",
+                    "command": test_command,
+                    "output_path": str(test_output_path),
+                    "selection": effective_validation_mode,
+                    "timeout_seconds": test_timeout_seconds,
+                    "startup_timeout_seconds": test_startup_timeout_seconds,
+                    "timed_out": False,
+                },
+                "validation_elapsed_seconds": round(time.monotonic() - _validation_start, 2),
+                "failure_category": "no_changes_produced",
+                "failure_message": failure_message,
+                "suspected_tooling_misread": bool(payload.get("suspected_tooling_misread")),
+                "evidence_reviewed": _evidence_reviewed(
+                    run_dir=run_dir,
+                    workspace=workspace,
+                    changed_files=[],
+                    test_files=test_files,
+                    test_command=test_command,
+                    summary_text=str(payload.get("summary") or ""),
+                ),
+            }
+        )
+        compile_output_path.write_text(failure_message + "\n", encoding="utf-8")
+        test_output_path.write_text(failure_message + "\n", encoding="utf-8")
+        report_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        return 1
     workspace_contract_issues = _workspace_contract_issues(
         workspace,
         changed_files=[path for path in all_changed if isinstance(path, str)],
@@ -704,6 +1014,14 @@ def run_validation(environ: Mapping[str, str] | None = None) -> int:
                 "workspace_contract_failure": True,
                 "workspace_contract_issues": workspace_contract_issues,
                 "infrastructure_failure": True,
+                "evidence_reviewed": _evidence_reviewed(
+                    run_dir=run_dir,
+                    workspace=workspace,
+                    changed_files=[path for path in all_changed if isinstance(path, str)],
+                    test_files=test_files,
+                    test_command=test_command,
+                    summary_text=str(payload.get("summary") or ""),
+                ),
             }
         )
         report_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
@@ -794,6 +1112,16 @@ def run_validation(environ: Mapping[str, str] | None = None) -> int:
             "timed_out": test_timed_out,
         },
         "validation_elapsed_seconds": round(_validation_elapsed, 2),
+        "evidence_reviewed": _evidence_reviewed(
+            run_dir=run_dir,
+            workspace=workspace,
+            changed_files=[path for path in all_changed if isinstance(path, str)],
+            test_files=test_files,
+            test_command=test_command,
+            summary_text=str(payload.get("summary") or ""),
+            stdout_text=test_completed.stdout or "",
+            stderr_text=test_completed.stderr or "",
+        ),
     })
     if test_timeout_category == "validation_startup_timeout":
         payload.update(

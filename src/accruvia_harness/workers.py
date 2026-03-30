@@ -282,7 +282,9 @@ class CommandWorker:
             "ACCRUVIA_RUN_DIR": str(run_dir),
             "ACCRUVIA_PROJECT_WORKSPACE": str(project_workspace),
             "ACCRUVIA_TASK_SCOPE_JSON": json.dumps(task.scope, sort_keys=True),
+            "ACCRUVIA_TASK_EXTERNAL_METADATA_JSON": json.dumps(task.external_ref_metadata, sort_keys=True),
             "ACCRUVIA_TASK_STRATEGY": task.strategy,
+            "ACCRUVIA_TASK_REQUIRED_ARTIFACTS": json.dumps(task.required_artifacts, sort_keys=True),
             "ACCRUVIA_TASK_VALIDATION_PROFILE": task.validation_profile,
             "ACCRUVIA_TASK_VALIDATION_MODE": task.validation_mode,
             **self.extra_env,
@@ -792,6 +794,27 @@ class LLMTaskWorker:
             self.router.backend = original_backend
 
     def _build_prompt(self, task: Task, run: Run) -> str:
+        prompt_bundle = {
+            "required_artifacts": list(task.required_artifacts),
+            "validation_profile": task.validation_profile,
+            "validation_mode": task.validation_mode,
+            "scope": task.scope,
+            "external_ref_type": task.external_ref_type,
+            "external_ref_id": task.external_ref_id,
+            "external_ref_metadata": task.external_ref_metadata,
+        }
+        extra_guidance = [
+            "- Use the task context bundle to choose the target files before broad repository exploration.",
+            "- If the task is remediation or review-driven, satisfy the evidence contract with real code/test/artifact changes.",
+        ]
+        if task.strategy in {"atomic_from_mermaid", "sa_structural_fix", "operator_ergonomics"}:
+            extra_guidance.append(
+                "- This task is atomicity-sensitive. Keep the change set narrow and avoid self-modifying worker or validation machinery unless explicitly requested."
+            )
+        if task.strategy == "objective_review_remediation":
+            extra_guidance.append(
+                "- This is a promotion-review remediation task. Do not stop at a report-shaped response; produce the repository changes and durable evidence the reviewer asked for."
+            )
         return (
             f"Task: {task.title}\n"
             f"Objective: {task.objective}\n"
@@ -800,10 +823,13 @@ class LLMTaskWorker:
             f"Run ID: {run.id}\n"
             f"Attempt: {run.attempt}\n"
             f"Plan Summary: {run.summary}\n"
+            "Task Context Bundle:\n"
+            f"{json.dumps(prompt_bundle, indent=2, sort_keys=True)}\n"
             "Instructions:\n"
             "- Produce the work needed for the objective.\n"
             "- Preserve durable artifacts in the run directory when appropriate.\n"
             "- Favor test-driven implementation when changing software behavior.\n"
+            + "\n".join(extra_guidance) + "\n"
         )
 
     def _record_routing_outcome(

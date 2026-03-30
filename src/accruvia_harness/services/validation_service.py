@@ -60,6 +60,8 @@ class ValidationService:
                 "infrastructure_failure": bool(report.get("infrastructure_failure") or diagnostics.get("infrastructure_failure")),
                 "workspace_contract_failure": bool(report.get("workspace_contract_failure")),
                 "workspace_contract_issues": list(report.get("workspace_contract_issues") or []),
+                "suspected_tooling_misread": bool(report.get("suspected_tooling_misread")),
+                "evidence_reviewed": report.get("evidence_reviewed"),
             }
         )
         outcome = str(report.get("worker_outcome") or work_result.outcome or "success")

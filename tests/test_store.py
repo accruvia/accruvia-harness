@@ -99,6 +99,44 @@ class SQLiteHarnessStoreTests(unittest.TestCase):
         self.assertEqual(5, loaded.max_attempts)
         self.assertEqual(["plan", "report", "diff"], loaded.required_artifacts)
 
+    def test_update_objective_phase_resolves_when_only_failed_tasks_are_waived_obsolete(self) -> None:
+        project = Project(
+            id=new_id("project"),
+            name="phase-project",
+            description="Objective phase persistence",
+            adapter_name="generic",
+        )
+        self.store.create_project(project)
+        objective = Objective(
+            id=new_id("objective"),
+            project_id=project.id,
+            title="Objective phase",
+            summary="Waived obsolete failures should not keep the objective planning.",
+            status=ObjectiveStatus.PLANNING,
+        )
+        self.store.create_objective(objective)
+        task = Task(
+            id=new_id("task"),
+            project_id=project.id,
+            objective_id=objective.id,
+            title="Obsolete failed task",
+            objective="Superseded path",
+            status=TaskStatus.FAILED,
+            external_ref_metadata={
+                "failed_task_disposition": {
+                    "kind": "waive_obsolete",
+                    "rationale": "Superseded by manual implementation.",
+                }
+            },
+        )
+        self.store.create_task(task)
+
+        phase = self.store.update_objective_phase(objective.id)
+        objective_after = self.store.get_objective(objective.id)
+
+        self.assertEqual(ObjectiveStatus.RESOLVED, phase)
+        self.assertEqual(ObjectiveStatus.RESOLVED, objective_after.status if objective_after else None)
+
     def test_concurrent_initialize_serializes_pending_migrations(self) -> None:
         db_path = Path(self.temp_dir.name) / "concurrent-harness.db"
         errors: list[Exception] = []

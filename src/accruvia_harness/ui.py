@@ -42,6 +42,7 @@ from .frustration_triage import triage_frustration
 from .llm import LLMExecutionError, LLMInvocation
 from .services.red_team_service import RedTeamLoopService
 from .services.task_service import TaskService
+from .services.workflow_timing_service import WorkflowTimingService
 from .services.workflow_service import WorkflowService
 from .ui_memory import LocalContextMemoryProvider
 from .ui_responder import (
@@ -380,6 +381,7 @@ class HarnessUIDataService:
         self.workspace_root = ctx.config.workspace_root
         self.task_service = TaskService(self.store)
         self.workflow_service = WorkflowService(self.store)
+        self.workflow_timing = WorkflowTimingService()
         self.memory_provider = LocalContextMemoryProvider(self.store)
         self.auto_resume_atomic_generation = not bool(getattr(ctx, "is_test", False))
         self.auto_resume_objective_review = not bool(getattr(ctx, "is_test", False))
@@ -2060,6 +2062,12 @@ class HarnessUIDataService:
             "completed_at": completed.created_at.isoformat() if completed is not None else "",
             "failed_at": failed.created_at.isoformat() if failed is not None else "",
             "last_activity_at": max(related).isoformat() if related else "",
+            "duration_ms": self.workflow_timing.duration_ms(
+                start.created_at,
+                completed_at=completed.created_at if completed is not None else None,
+                failed_at=failed.created_at if failed is not None else None,
+                last_activity_at=max(related) if related else None,
+            ),
             "packet_count": len(packets),
             "error": failed.content if failed is not None else "",
         }
@@ -5844,6 +5852,12 @@ class HarnessUIDataService:
             "unit_count": unit_count,
             "phase": phase,
             "last_activity_at": last_activity_at,
+            "duration_ms": self.workflow_timing.duration_ms(
+                start.created_at,
+                completed_at=completed.created_at if completed is not None else None,
+                failed_at=failed.created_at if failed is not None else None,
+                last_activity_at=max(related_times) if related_times else None,
+            ),
             "error": failed.content if failed is not None else "",
             "refinement_round": refinement_round,
             "critique_accepted": critique_accepted,
@@ -6231,6 +6245,12 @@ class HarnessUIDataService:
                     "completed_at": completed.created_at.isoformat() if completed is not None else "",
                     "failed_at": failed.created_at.isoformat() if failed is not None else "",
                     "last_activity_at": max(round_activity).isoformat() if round_activity else "",
+                    "duration_ms": self.workflow_timing.duration_ms(
+                        start.created_at,
+                        completed_at=completed.created_at if completed is not None else None,
+                        failed_at=failed.created_at if failed is not None else None,
+                        last_activity_at=max(round_activity) if round_activity else None,
+                    ),
                     "packet_count": len(packets),
                     "verdict_counts": verdict_counts,
                     "packets": sorted(

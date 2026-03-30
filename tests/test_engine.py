@@ -815,6 +815,40 @@ class HarnessEngineTests(unittest.TestCase):
         assert refreshed is not None
         self.assertEqual(TaskStatus.COMPLETED, refreshed.status)
 
+    def test_create_task_with_policy_applies_structured_amendment_for_high_risk_strategy(self) -> None:
+        objective = Objective(
+            id=new_id("objective"),
+            project_id=self.project_id,
+            title="Amended objective",
+            summary="Needs stronger operator guidance",
+        )
+        self.store.create_objective(objective)
+        task = self.engine.create_task_with_policy(
+            project_id=self.project_id,
+            objective_id=objective.id,
+            title="Produce objective review packet",
+            objective="Fix the reviewer finding and produce the required packet.",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type="objective_review",
+            external_ref_id="objective:review:unit_test_coverage",
+            external_ref_metadata={
+                "objective_review_remediation": {
+                    "review_id": "review_1",
+                    "dimension": "unit_test_coverage",
+                }
+            },
+            strategy="objective_review_remediation",
+            max_attempts=3,
+            required_artifacts=["plan", "report", "objective_review_packet"],
+        )
+
+        self.assertIn("Task Amendment:", task.objective)
+        self.assertIn("If no repository files change, the task is not complete.", task.objective)
+        self.assertIn("task_amendment", task.external_ref_metadata)
+        self.assertEqual("objective_review_remediation", task.external_ref_metadata["task_amendment"]["strategy"])
+
     def test_project_adapter_can_supply_real_worker_override(self) -> None:
         registry = ProjectAdapterRegistry()
         registry.register(OverrideProjectAdapter())
