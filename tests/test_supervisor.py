@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 
 from accruvia_harness.services.supervisor_service import SupervisorService
 
@@ -107,6 +109,12 @@ class _FakeStore:
             return self.recoveries.pop(0)
         return {"runs": 0, "tasks": 0, "leases": 0}
 
+    def list_control_events(self, *, event_type: str | None = None, entity_type: str | None = None, entity_id: str | None = None, limit: int | None = None):
+        return []
+
+    def get_objective(self, objective_id: str):
+        return None
+
 
 class _FakeReviewWatcher:
     def __init__(self, counts: list[int]) -> None:
@@ -182,6 +190,128 @@ class _FakeClock:
     def sleep(self, seconds: float) -> None:
         self.sleeps.append(seconds)
         self.now += seconds
+
+
+class _ArtifactQueue:
+    def __init__(self, run_dir: Path) -> None:
+        self.run_dir = run_dir
+        self.calls = 0
+
+    def process_next_task(
+        self,
+        project_id=None,
+        worker_id="supervisor",
+        lease_seconds=300,
+        exclude_task_ids=None,
+        progress_callback=None,
+    ):
+        self.calls += 1
+        if self.calls == 1 and progress_callback is not None:
+            self.run_dir.mkdir(parents=True, exist_ok=True)
+            (self.run_dir / "worker.heartbeat.json").write_text("{}", encoding="utf-8")
+            (self.run_dir / "phase.txt").write_text("llm_generation\n", encoding="utf-8")
+            (self.run_dir / "plan.txt").write_text("plan\n", encoding="utf-8")
+            progress_callback(
+                {
+                    "type": "worker_status",
+                    "project_id": project_id or "project",
+                    "task_id": "task-artifact",
+                    "task_title": "task-artifact",
+                    "run_id": "run-artifact",
+                    "backend_name": "agent",
+                    "pid": 42,
+                    "elapsed_seconds": 605,
+                    "latest_artifact": "worker.heartbeat.json",
+                    "latest_artifact_path": str(self.run_dir / "worker.heartbeat.json"),
+                    "latest_artifact_kind": "heartbeat",
+                    "latest_artifact_age_seconds": 0.0,
+                    "worker_phase": "llm_generation",
+                    "command_summary": "bin/accruvia-codex-worker",
+                    "stale": False,
+                }
+            )
+        return None
+
+
+class _DwellQueue:
+    def __init__(self, run_dir: Path) -> None:
+        self.run_dir = run_dir
+        self.calls = 0
+
+    def process_next_task(
+        self,
+        project_id=None,
+        worker_id="supervisor",
+        lease_seconds=300,
+        exclude_task_ids=None,
+        progress_callback=None,
+    ):
+        self.calls += 1
+        if self.calls == 1 and progress_callback is not None:
+            self.run_dir.mkdir(parents=True, exist_ok=True)
+            (self.run_dir / "worker.heartbeat.json").write_text("{}", encoding="utf-8")
+            (self.run_dir / "phase.txt").write_text("llm_generation\n", encoding="utf-8")
+            progress_callback(
+                {
+                    "type": "worker_status",
+                    "project_id": project_id or "project",
+                    "task_id": "task-dwell",
+                    "task_title": "task-dwell",
+                    "run_id": "run-dwell",
+                    "backend_name": "agent",
+                    "pid": 43,
+                    "elapsed_seconds": 605,
+                    "latest_artifact": "worker.heartbeat.json",
+                    "latest_artifact_path": str(self.run_dir / "worker.heartbeat.json"),
+                    "latest_artifact_kind": "heartbeat",
+                    "latest_artifact_age_seconds": 0.0,
+                    "worker_phase": "llm_generation",
+                    "command_summary": "bin/accruvia-codex-worker",
+                    "stale": False,
+                }
+            )
+        return None
+
+
+class _MaintenanceQueue:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def process_next_task(
+        self,
+        project_id=None,
+        worker_id="supervisor",
+        lease_seconds=300,
+        exclude_task_ids=None,
+        progress_callback=None,
+    ):
+        self.calls += 1
+        if self.calls == 1:
+            return None
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "type": "task_started",
+                    "task_id": "task-maintained",
+                    "task_title": "task-maintained",
+                    "project_id": project_id or "project",
+                }
+            )
+            progress_callback(
+                {
+                    "type": "task_finished",
+                    "task_id": "task-maintained",
+                    "task_title": "task-maintained",
+                    "project_id": project_id or "project",
+                    "status": "completed",
+                    "run_id": "run-task-maintained",
+                    "run_status": "completed",
+                    "summary": "completed",
+                    "backlog_before": {"tasks_by_status": {"pending": 1}, "pending_promotions": 0},
+                    "backlog_after": {"tasks_by_status": {"completed": 1}, "pending_promotions": 0},
+                }
+            )
+        return {"task": _FakeTask("task-maintained"), "runs": []}
 
 
 class SupervisorServiceTests(unittest.TestCase):
@@ -320,15 +450,22 @@ class SupervisorServiceTests(unittest.TestCase):
         sleeping = next(event for event in events if event["type"] == "sleeping")
         self.assertEqual(45.0, heartbeat["heartbeat_interval_seconds"])
         self.assertEqual("brain_recommended", heartbeat["heartbeat_schedule_source"])
+        self.assertEqual({"pending": 0, "active": 0, "stalled": 0}, heartbeat["queue_snapshot"])
         self.assertEqual(0, sleeping["queue_depth"])
+        self.assertEqual({"pending": 0, "active": 0, "stalled": 0}, sleeping["queue_snapshot"])
         self.assertAlmostEqual(45.0, sleeping["next_heartbeat_seconds"])
 
     def test_supervisor_resets_retry_exclusion_when_pending_work_remains(self) -> None:
+        class _RetryMetricsStore(_FakeStore):
+            def metrics_snapshot(self, project_id: str | None = None):
+                self.metrics_calls[project_id] = self.metrics_calls.get(project_id, 0) + 1
+                return {"tasks_by_status": {"pending": 1}, "pending_promotions": 0}
+
         clock = _FakeClock()
         queue = _RetryingQueue()
         events: list[dict[str, object]] = []
         service = SupervisorService(
-            _FakeStore(),
+            _RetryMetricsStore(),
             queue,
             _FakeCognition(),
             sleeper=clock.sleep,
@@ -349,6 +486,93 @@ class SupervisorServiceTests(unittest.TestCase):
         self.assertIn(("task-retry",), [call[3] for call in queue.calls])
         reset = next(event for event in events if event["type"] == "queue_retry_cycle_reset")
         self.assertEqual(1, reset["queue_depth"])
+
+    def test_supervisor_emits_artifact_events_from_worker_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir) / "runs" / "run-artifact"
+            events: list[dict[str, object]] = []
+            service = SupervisorService(
+                _FakeStore(),
+                _ArtifactQueue(run_dir),
+                _FakeCognition(),
+            )
+
+            result = service.run(
+                project_id="project-a",
+                watch=False,
+                max_iterations=1,
+                progress_callback=events.append,
+            )
+
+        self.assertEqual("idle", result.exit_reason)
+        artifact_event = next(event for event in events if event["type"] == "artifact_observed" and event["artifact"] == "plan.txt")
+        self.assertEqual("plan", artifact_event["artifact_kind"])
+        self.assertEqual("created", artifact_event["change"])
+        worker_status = next(event for event in events if event["type"] == "worker_status")
+        self.assertEqual(["plan.txt"], worker_status["milestone_artifacts"])
+        self.assertEqual(1, worker_status["milestone_artifact_count"])
+        self.assertAlmostEqual(0.0, float(worker_status["meaningful_artifact_age_seconds"]))
+
+    def test_supervisor_emits_phase_dwell_warning_when_only_heartbeat_artifacts_advance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir) / "runs" / "run-dwell"
+            events: list[dict[str, object]] = []
+            service = SupervisorService(
+                _FakeStore(),
+                _DwellQueue(run_dir),
+                _FakeCognition(),
+            )
+
+            service.run(
+                project_id="project-a",
+                watch=False,
+                progress_callback=events.append,
+            )
+
+        dwell_warning = next(event for event in events if event["type"] == "phase_dwell_warning")
+        self.assertEqual("llm_generation", dwell_warning["worker_phase"])
+        self.assertAlmostEqual(605.0, float(dwell_warning["phase_elapsed_seconds"]))
+
+    def test_supervisor_runs_idle_maintenance_before_sleeping(self) -> None:
+        clock = _FakeClock()
+        events: list[dict[str, object]] = []
+        queue = _MaintenanceQueue()
+        service = SupervisorService(
+            _FakeStore(),
+            queue,
+            _FakeCognition(),
+            sleeper=clock.sleep,
+            monotonic=clock.monotonic,
+        )
+        maintenance_calls: list[str | None] = []
+        maintenance_state = {"first": True}
+
+        def idle_maintenance(project_id, emit):
+            maintenance_calls.append(project_id)
+            emit(
+                {
+                    "type": "objective_backlog_resumed",
+                    "objective_count": 1,
+                    "action_count": 1,
+                    "objectives": ["Context Management"],
+                }
+            )
+            changed = maintenance_state["first"]
+            maintenance_state["first"] = False
+            return {"changed": changed}
+
+        result = service.run(
+            project_id="project-a",
+            watch=False,
+            max_iterations=3,
+            idle_maintenance_callback=idle_maintenance,
+            progress_callback=events.append,
+        )
+
+        self.assertEqual(["project-a"], maintenance_calls)
+        self.assertEqual(3, queue.calls)
+        self.assertEqual(2, result.processed_count)
+        self.assertTrue(any(event["type"] == "objective_backlog_resumed" for event in events))
 
     def test_supervisor_survives_heartbeat_failure_and_records_event(self) -> None:
         class FailingCognition:

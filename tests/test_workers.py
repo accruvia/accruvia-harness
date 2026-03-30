@@ -252,7 +252,12 @@ class WorkerTests(unittest.TestCase):
             monotonic=lambda: next(monotonic_values),
             sleep_fn=lambda _seconds: None,
         )
-        worker._latest_artifact_details = lambda _run_dir: ("plan.txt", float(STRUCTURAL_FIX_STALE_PROGRESS_SECONDS) + 1.0)  # type: ignore[method-assign]
+        worker._latest_artifact_details = lambda _run_dir: (  # type: ignore[method-assign]
+            "plan.txt",
+            "/tmp/run/plan.txt",
+            "plan",
+            float(STRUCTURAL_FIX_STALE_PROGRESS_SECONDS) + 1.0,
+        )
 
         with patch("accruvia_harness.workers.subprocess.Popen", return_value=_FakeProcess()):
             result = worker.work(self.task, self.run, self.base)
@@ -466,6 +471,8 @@ class WorkerTests(unittest.TestCase):
         status_events = [event for event in progress_events if event["type"] == "worker_status"]
         self.assertTrue(status_events)
         self.assertTrue(any(event["latest_artifact"] == "plan.txt" for event in status_events))
+        self.assertTrue(any(event["latest_artifact_kind"] == "plan" for event in status_events))
+        self.assertTrue(any(str(event["latest_artifact_path"]).endswith("/plan.txt") for event in status_events))
         self.assertTrue(all(not bool(event["stale"]) for event in status_events))
 
     def test_shell_worker_kills_stale_progress_before_full_run_timeout(self) -> None:
@@ -546,6 +553,50 @@ class WorkerTests(unittest.TestCase):
         self.assertIn("changed_module.py", report["changed_files"])
         self.assertIn("Objective: Verify worker abstraction", (run_dir / "codex_worker_prompt.txt").read_text(encoding="utf-8"))
         self.assertIn("Objective: Verify worker abstraction", (workspace / "shared_prompt.txt").read_text(encoding="utf-8"))
+
+    def test_run_agent_worker_emits_heartbeat_during_llm_execution(self) -> None:
+        workspace = self.base / "workspace-heartbeat"
+        tests_dir = workspace / "tests"
+        tests_dir.mkdir(parents=True)
+        for name in ("test_engine.py", "test_store.py", "test_validation.py", "test_phase1.py"):
+            (tests_dir / name).write_text(
+                "import unittest\n\n"
+                "class Smoke(unittest.TestCase):\n"
+                "    def test_ok(self):\n"
+                "        self.assertTrue(True)\n",
+                encoding="utf-8",
+            )
+        subprocess.run(["git", "init", "-b", "main"], cwd=workspace, check=True, capture_output=True, text=True)
+        cli_script = self.base / "fake_codex_heartbeat.sh"
+        cli_script.write_text(
+            "#!/usr/bin/env bash\n"
+            "sleep 0.2\n"
+            "printf 'worker summary\\n'\n"
+            "printf 'value = 1\\n' > changed_module.py\n",
+            encoding="utf-8",
+        )
+        cli_script.chmod(0o755)
+        run_dir = self.base / "run-heartbeat"
+
+        result = run_agent_worker(
+            {
+                "ACCRUVIA_RUN_DIR": str(run_dir),
+                "ACCRUVIA_PROJECT_WORKSPACE": str(workspace),
+                "ACCRUVIA_TASK_ID": self.task.id,
+                "ACCRUVIA_RUN_ID": self.run.id,
+                "ACCRUVIA_TASK_OBJECTIVE": self.task.objective,
+                "ACCRUVIA_RUN_SUMMARY": self.run.summary,
+                "ACCRUVIA_TASK_STRATEGY": "default",
+                "ACCRUVIA_WORKER_LLM_BACKEND": "codex",
+                "ACCRUVIA_LLM_CODEX_COMMAND": str(cli_script),
+                "ACCRUVIA_PROGRESS_HEARTBEAT_SECONDS": "0.05",
+            }
+        )
+
+        self.assertEqual(0, result)
+        heartbeat = json.loads((run_dir / "worker.heartbeat.json").read_text(encoding="utf-8"))
+        self.assertEqual("llm_generation", heartbeat["phase"])
+        self.assertEqual("llm_generation", (run_dir / "phase.txt").read_text(encoding="utf-8"))
 
     def test_run_agent_worker_fails_fast_when_focused_tests_exceed_timeout(self) -> None:
         workspace = self.base / "workspace"

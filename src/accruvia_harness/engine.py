@@ -250,8 +250,8 @@ class HarnessEngine:
     def run_once(self, task_id: str):
         return self.runs.run_once(task_id)
 
-    def run_until_stable(self, task_id: str):
-        return self.runs.run_until_stable(task_id)
+    def run_until_stable(self, task_id: str, progress_callback=None, post_task_callback=None):
+        return self.runs.run_until_stable(task_id, progress_callback=progress_callback, post_task_callback=post_task_callback)
 
     def process_next_task(
         self,
@@ -296,6 +296,7 @@ class HarnessEngine:
         heartbeat_all_projects: bool = False,
         review_check_enabled: bool = False,
         review_check_interval_seconds: int | None = None,
+        idle_maintenance_callback=None,
         stop_requested=None,
         progress_callback=None,
     ):
@@ -313,6 +314,7 @@ class HarnessEngine:
             review_check_enabled=review_check_enabled,
             review_check_interval_seconds=review_check_interval_seconds,
             review_watcher=self.review_watcher,
+            idle_maintenance_callback=idle_maintenance_callback,
             stop_requested=stop_requested,
             progress_callback=progress_callback,
         )

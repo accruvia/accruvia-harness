@@ -19,6 +19,7 @@ DEFAULT_AGENT_TEST_STARTUP_TIMEOUT_SECONDS = 30
 DEFAULT_AGENT_LLM_TIMEOUT_SECONDS = 420
 DEFAULT_AGENT_COMPILE_TIMEOUT_SECONDS = 120
 DEFAULT_AGENT_GIT_TIMEOUT_SECONDS = 30
+DEFAULT_AGENT_PROGRESS_HEARTBEAT_SECONDS = 15.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +131,17 @@ def _env_timeout_seconds(environ: Mapping[str, str], key: str, default: int) -> 
         return default
     try:
         parsed = int(raw_value)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _env_float_seconds(environ: Mapping[str, str], key: str, default: float) -> float:
+    raw_value = str(environ.get(key, "")).strip()
+    if not raw_value:
+        return default
+    try:
+        parsed = float(raw_value)
     except ValueError:
         return default
     return parsed if parsed > 0 else default
@@ -349,6 +361,8 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
     atomicity_path = run_dir / "atomicity_telemetry.json"
     prompt_path = run_dir / "codex_worker_prompt.txt"
     metadata_path = run_dir / "codex_worker.metadata.json"
+    heartbeat_path = run_dir / "worker.heartbeat.json"
+    phase_path = run_dir / "phase.txt"
     llm_timeout_seconds = _env_timeout_seconds(env, "ACCRUVIA_TASK_LLM_TIMEOUT_SECONDS", DEFAULT_AGENT_LLM_TIMEOUT_SECONDS)
     compile_timeout_seconds = _env_timeout_seconds(
         env,
@@ -356,6 +370,11 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
         DEFAULT_AGENT_COMPILE_TIMEOUT_SECONDS,
     )
     git_timeout_seconds = _env_timeout_seconds(env, "ACCRUVIA_TASK_GIT_TIMEOUT_SECONDS", DEFAULT_AGENT_GIT_TIMEOUT_SECONDS)
+    progress_heartbeat_seconds = _env_float_seconds(
+        env,
+        "ACCRUVIA_PROGRESS_HEARTBEAT_SECONDS",
+        DEFAULT_AGENT_PROGRESS_HEARTBEAT_SECONDS,
+    )
 
     plan_path.write_text(
         "\n".join(
@@ -414,6 +433,10 @@ def run_agent_worker(environ: Mapping[str, str] | None = None) -> int:
                 env=llm_env,
                 timeout_seconds=llm_timeout_seconds,
                 stdin_text=prompt_text if not command_uses_file_contract(llm_command) else None,
+                progress_path=heartbeat_path,
+                progress_interval_seconds=progress_heartbeat_seconds,
+                phase_path=phase_path,
+                phase_name="llm_generation",
             )
             if completed.returncode == 0:
                 break

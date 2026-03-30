@@ -7,6 +7,8 @@ from datetime import UTC, datetime
 
 from ..domain import (
     ControlBreadcrumb,
+    ControlBudget,
+    ControlCooldown,
     ControlEvent,
     ControlLaneState,
     ControlLaneStateValue,
@@ -159,6 +161,30 @@ def control_lane_state_from_row(row: sqlite3.Row) -> ControlLaneState:
         state=ControlLaneStateValue(row["state"]),
         reason=row["reason"],
         cooldown_until=parse_dt(row["cooldown_until"]) if row["cooldown_until"] else None,
+        updated_at=parse_dt(row["updated_at"]),
+    )
+
+
+def control_cooldown_from_row(row: sqlite3.Row) -> ControlCooldown:
+    return ControlCooldown(
+        id=row["id"],
+        scope_type=row["scope_type"],
+        scope_id=row["scope_id"],
+        reason=row["reason"],
+        until_at=parse_dt(row["until_at"]),
+        created_at=parse_dt(row["created_at"]),
+    )
+
+
+def control_budget_from_row(row: sqlite3.Row) -> ControlBudget:
+    return ControlBudget(
+        id=row["id"],
+        budget_scope=row["budget_scope"],
+        budget_key=row["budget_key"],
+        window_start=parse_dt(row["window_start"]),
+        window_end=parse_dt(row["window_end"]),
+        usage_count=int(row["usage_count"]),
+        usage_cost_usd=float(row["usage_cost_usd"]),
         updated_at=parse_dt(row["updated_at"]),
     )
 

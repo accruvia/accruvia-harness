@@ -90,6 +90,12 @@ class SAWatchService:
         self.restart_stack = restart_stack
         self.repair_runner = repair_runner or self._run_direct_repair
 
+    @staticmethod
+    def _local_time(value: datetime | None) -> str | None:
+        if value is None:
+            return None
+        return value.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+
     def observe(self, event: dict[str, object]) -> dict[str, object] | None:
         if str(event.get("type") or "") != "sleeping":
             return None
@@ -112,13 +118,14 @@ class SAWatchService:
         status = self.control_plane.status()
         continuity_signals = self._continuity_signals()
         structural_signal = continuity_signals[0] if continuity_signals else None
+        now_local = datetime.now().astimezone()
         recent_events = [
             {
                 "event_type": event.event_type,
                 "entity_type": event.entity_type,
                 "entity_id": event.entity_id,
                 "payload": event.payload,
-                "created_at": event.created_at.isoformat(),
+                "created_at": self._local_time(event.created_at),
             }
             for event in self.store.list_control_events(limit=8)
         ]
@@ -128,8 +135,8 @@ class SAWatchService:
                 "task_id": item.task_id,
                 "status": item.status,
                 "classification": item.classification,
-                "started_at": item.started_at.isoformat(),
-                "ended_at": item.ended_at.isoformat() if item.ended_at else None,
+                "started_at": self._local_time(item.started_at),
+                "ended_at": self._local_time(item.ended_at),
             }
             for item in self.store.list_control_worker_runs()[:5]
         ]
@@ -140,11 +147,16 @@ class SAWatchService:
                 "target_id": item.target_id,
                 "reason": item.reason,
                 "result": item.result,
-                "created_at": item.created_at.isoformat(),
+                "created_at": self._local_time(item.created_at),
             }
             for item in self.store.list_control_recovery_actions()[:5]
         ]
         return {
+            "time_context": {
+                "now_local": now_local.strftime("%Y-%m-%d %H:%M:%S %Z"),
+                "timezone": now_local.tzname() or "local",
+                "note": "All timestamps in this packet are local time.",
+            },
             "status": status,
             "continuity_goal": "Work should keep moving. Detect loops, stalls, and dead workflow states, then restore forward progress safely.",
             "continuity_signals": continuity_signals,
@@ -178,6 +190,7 @@ class SAWatchService:
             "The control plane already handles routine hot-path checks. You are here to recover the big picture when work is looping, paused too long, or no longer advancing.\n"
             "You must read the structured state below and choose exactly one action.\n\n"
             "Rules:\n"
+            "- Interpret all packet timestamps in the declared local timezone. Do not mix UTC and local clock time in your reason.\n"
             "- Work should not stay stopped without a strong reason.\n"
             "- Prefer the cheapest safe action that restores forward progress.\n"
             "- Prefer resume_worker or restart_stack before editing code when existing work can likely continue.\n"
@@ -762,7 +775,7 @@ class SAWatchService:
             },
             "latest_atomic_generation": {
                 **latest_atomic,
-                "last_activity_at": latest_atomic["last_activity_at"].isoformat() if latest_atomic is not None else None,
+                "last_activity_at": self._local_time(latest_atomic["last_activity_at"]) if latest_atomic is not None else None,
             }
             if latest_atomic is not None
             else None,
@@ -818,8 +831,11 @@ class SAWatchService:
     def _repeated_failure_signal(self) -> dict[str, object] | None:
         recent_runs = self.store.list_control_worker_runs()[:8]
         grouped: dict[tuple[str, str], list[object]] = {}
+        ignorable = {"artifact_contract_failure"}
         for run in recent_runs:
             if not run.task_id or not run.classification:
+                continue
+            if run.classification in ignorable:
                 continue
             grouped.setdefault((run.task_id, run.classification), []).append(run)
         for (task_id, classification), runs in grouped.items():
@@ -888,7 +904,7 @@ class SAWatchService:
             "kind": "workflow_gap",
             "objective_id": oldest.id,
             "objective_status": oldest.status.value,
-            "last_activity_at": oldest.updated_at.isoformat(),
+            "last_activity_at": self._local_time(oldest.updated_at),
             "latest_atomic_generation": latest_atomic["status"] if latest_atomic is not None else None,
         }
 
@@ -902,14 +918,14 @@ class SAWatchService:
                     "objective_id": objective.id,
                     "title": objective.title,
                     "status": objective.status.value,
-                    "updated_at": objective.updated_at.isoformat(),
+                    "updated_at": self._local_time(objective.updated_at),
                     "pending_tasks": sum(1 for task in linked_tasks if task.status == TaskStatus.PENDING),
                     "active_tasks": sum(1 for task in linked_tasks if task.status == TaskStatus.ACTIVE),
                     "completed_tasks": sum(1 for task in linked_tasks if task.status == TaskStatus.COMPLETED),
                     "failed_tasks": sum(1 for task in linked_tasks if task.status == TaskStatus.FAILED),
                     "latest_atomic_generation": {
                         **latest_atomic,
-                        "last_activity_at": latest_atomic["last_activity_at"].isoformat() if latest_atomic is not None else None,
+                        "last_activity_at": self._local_time(latest_atomic["last_activity_at"]) if latest_atomic is not None else None,
                     }
                     if latest_atomic is not None
                     else None,
@@ -984,7 +1000,7 @@ class SAWatchService:
                 "objective_id": objective.id,
                 "generation_id": latest_atomic.get("generation_id"),
                 "phase": latest_atomic.get("phase"),
-                "last_activity_at": latest_atomic.get("last_activity_at").isoformat(),
+                "last_activity_at": self._local_time(latest_atomic.get("last_activity_at")),
             }
         return None
 

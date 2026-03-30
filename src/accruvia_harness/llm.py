@@ -5,6 +5,7 @@ import os
 import re
 import signal
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -93,7 +94,13 @@ def run_command_process(
     timeout_seconds: int | None,
     stdin_text: str | None,
     resource_policy=None,
+    progress_path: Path | None = None,
+    progress_interval_seconds: float | None = None,
+    phase_path: Path | None = None,
+    phase_name: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    if phase_path is not None and phase_name:
+        phase_path.write_text(phase_name, encoding="utf-8")
     preexec = resource_policy.preexec_fn() if resource_policy is not None else None
     process = subprocess.Popen(
         command,
@@ -107,8 +114,48 @@ def run_command_process(
         start_new_session=preexec is None,
         preexec_fn=preexec,
     )
+    heartbeat_interval = None
+    if progress_interval_seconds is not None and progress_interval_seconds > 0:
+        heartbeat_interval = float(progress_interval_seconds)
     try:
-        stdout, stderr = process.communicate(input=stdin_text, timeout=timeout_seconds)
+        if heartbeat_interval is None:
+            stdout, stderr = process.communicate(input=stdin_text, timeout=timeout_seconds)
+        else:
+            stdout = ""
+            stderr = ""
+            input_sent = False
+            started_at = time.monotonic()
+            while True:
+                communicate_timeout = heartbeat_interval
+                if timeout_seconds is not None:
+                    elapsed = time.monotonic() - started_at
+                    remaining = timeout_seconds - elapsed
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(command, timeout=timeout_seconds, output=stdout, stderr=stderr)
+                    communicate_timeout = min(heartbeat_interval, remaining)
+                try:
+                    stdout, stderr = process.communicate(
+                        input=stdin_text if stdin_text is not None and not input_sent else None,
+                        timeout=communicate_timeout,
+                    )
+                    break
+                except subprocess.TimeoutExpired:
+                    input_sent = True
+                    if progress_path is not None:
+                        progress_path.write_text(
+                            json.dumps(
+                                {
+                                    "phase": phase_name or "running",
+                                    "heartbeat_at": time.time(),
+                                    "command": command,
+                                },
+                                indent=2,
+                                sort_keys=True,
+                            ),
+                            encoding="utf-8",
+                        )
+                    if phase_path is not None and phase_name:
+                        phase_path.write_text(phase_name, encoding="utf-8")
     except subprocess.TimeoutExpired as exc:
         os.killpg(process.pid, signal.SIGKILL)
         try:

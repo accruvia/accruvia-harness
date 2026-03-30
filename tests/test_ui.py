@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 import threading
@@ -8,6 +9,7 @@ import unittest
 import datetime as dt
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import accruvia_harness.ui as ui_module
 from fastapi.testclient import TestClient
@@ -15,6 +17,8 @@ from accruvia_harness.config import HarnessConfig
 from accruvia_harness.domain import (
     Artifact,
     ContextRecord,
+    Evaluation,
+    EvaluationVerdict,
     Event,
     MermaidArtifact,
     MermaidStatus,
@@ -33,7 +37,7 @@ from accruvia_harness.interrogation import HarnessQueryService, InterrogationSer
 from accruvia_harness.llm import LLMExecutionResult
 from accruvia_harness.services.repository_promotion_service import PromotionApplyResult
 from accruvia_harness.store import SQLiteHarnessStore
-from accruvia_harness.ui import BackgroundSupervisorCoordinator, HarnessUIDataService
+from accruvia_harness.ui import BackgroundSupervisorCoordinator, HarnessUIDataService, _auto_start_supervisors
 
 
 class FakeLLMRouter:
@@ -449,6 +453,31 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         self.assertEqual("http://localhost:3000", response.headers["access-control-allow-origin"])
 
+    def test_fastapi_intent_update_accepts_request_body(self) -> None:
+        client = TestClient(ui_module._build_fastapi_app(self.service, ui_module._EventBus()))
+
+        response = client.put(
+            f"/api/objectives/{self.objective.id}/intent",
+            json={
+                "intent_summary": "Clarify the operator workflow state machine.",
+                "success_definition": "Operators can see the next safe action deterministically.",
+                "non_negotiables": ["Keep status deterministic"],
+                "frustration_signals": ["Operator confusion"],
+            },
+        )
+
+        self.assertEqual(200, response.status_code)
+        payload = response.json()
+        self.assertEqual(self.objective.id, payload["intent_model"]["objective_id"])
+        self.assertEqual(
+            "Clarify the operator workflow state machine.",
+            payload["intent_model"]["intent_summary"],
+        )
+        self.assertEqual(
+            ["Keep status deterministic"],
+            payload["intent_model"]["non_negotiables"],
+        )
+
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
@@ -634,6 +663,67 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         project = next(item for item in overview["projects"] if item["id"] == self.project.id)
         self.assertIn("pending_queue_states", project)
         self.assertEqual(1, project["pending_queue_states"]["blocked_by_gate"])
+
+    def test_harness_overview_detects_external_supervisor_records(self) -> None:
+        control_dir = self.db_path.parent / "supervisors"
+        control_dir.mkdir(parents=True, exist_ok=True)
+        (control_dir / f"{os.getpid()}.json").write_text(
+            json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "worker_id": "external-supervisor",
+                    "project_id": None,
+                    "command": "supervise",
+                    "watch": True,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        overview = self.service.harness_overview()
+
+        project = next(item for item in overview["projects"] if item["id"] == self.project.id)
+        self.assertTrue(project["supervisor"]["running"])
+        self.assertEqual("running", project["supervisor"]["state"])
+        self.assertEqual(1, project["supervisor"]["external_supervisor_count"])
+        self.assertEqual("external-supervisor", project["supervisor"]["external_supervisors"][0]["worker_id"])
+
+    def test_auto_start_supervisors_skips_projects_with_external_supervisor(self) -> None:
+        control_dir = self.db_path.parent / "supervisors"
+        control_dir.mkdir(parents=True, exist_ok=True)
+        (control_dir / f"{os.getpid()}.json").write_text(
+            json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "worker_id": "external-supervisor",
+                    "project_id": None,
+                    "command": "supervise",
+                    "watch": True,
+                }
+            ),
+            encoding="utf-8",
+        )
+        pending_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            title="Pending external work",
+            objective="Wait for external supervisor",
+            status=TaskStatus.PENDING,
+            strategy="atomic_from_mermaid",
+        )
+        self.store.create_task(pending_task)
+        leased = self.store.acquire_task_lease("external-supervisor", 300, self.project.id)
+        self.assertIsNotNone(leased)
+
+        previous = ui_module._BACKGROUND_SUPERVISOR
+        ui_module._BACKGROUND_SUPERVISOR = BackgroundSupervisorCoordinator()
+        try:
+            _auto_start_supervisors(self.service, self.ctx)
+            self.assertEqual([(pending_task.id, "external-supervisor")], [(l.task_id, l.worker_id) for l in self.store.list_task_leases(self.project.id)])
+            self.assertEqual("idle", ui_module._BACKGROUND_SUPERVISOR.status(self.project.id).get("state"))
+        finally:
+            ui_module._BACKGROUND_SUPERVISOR = previous
 
     def test_new_objective_starts_with_guided_next_step_data(self) -> None:
         created = self.service.create_objective(self.project.id, "Harness UI", "Build the local control surface")
@@ -2441,6 +2531,71 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         self.assertEqual("retry_as_is", metadata["disposition"])
         self.assertEqual(failed_run.id, metadata["source_run_id"])
 
+    def test_objective_review_requeues_failed_remediation_when_auto_restart_marker_is_stale(self) -> None:
+        fake_router = FakeLLMRouter("{}")
+        self.ctx.interrogation_service = SimpleNamespace(llm_router=fake_router)
+        self.service = HarnessUIDataService(self.ctx)
+        completed_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            title="Review-ready task",
+            objective="Execution is complete",
+            status=TaskStatus.COMPLETED,
+        )
+        self.store.create_task(completed_task)
+        self.store.update_objective_status(self.objective.id, ObjectiveStatus.RESOLVED)
+
+        self.service.queue_objective_review(self.objective.id, async_mode=False)
+        remediation_task = next(
+            task for task in self.store.list_tasks(self.project.id)
+            if task.objective_id == self.objective.id and task.strategy == "objective_review_remediation"
+        )
+        failed_run = Run(
+            id=new_id("run"),
+            task_id=remediation_task.id,
+            status=RunStatus.BLOCKED,
+            attempt=2,
+            summary="Executor/infrastructure failure captured; retry suppressed in favor of bounded remediation.",
+        )
+        self.store.create_run(failed_run)
+        self.store.create_evaluation(
+            Evaluation(
+                id=new_id("evaluation"),
+                run_id=failed_run.id,
+                verdict=EvaluationVerdict.BLOCKED,
+                confidence=1.0,
+                summary="restart-safe failure",
+                details={
+                    "diagnostics": {
+                        "failure_category": "executor_timeout",
+                        "infrastructure_failure": True,
+                    }
+                },
+            )
+        )
+        self.store.update_task_external_metadata(
+            remediation_task.id,
+            {
+                **dict(remediation_task.external_ref_metadata or {}),
+                "auto_restart_triage": {
+                    "disposition": "retry_as_is",
+                    "reason": "executor_timeout",
+                    "source_run_id": failed_run.id,
+                    "source_attempt": failed_run.attempt,
+                },
+            },
+        )
+        self.store.update_task_status(remediation_task.id, TaskStatus.FAILED)
+
+        self.service._maybe_resume_objective_review(self.objective.id)
+
+        updated_task = self.store.get_task(remediation_task.id)
+        self.assertIsNotNone(updated_task)
+        self.assertEqual(TaskStatus.PENDING, updated_task.status)
+        metadata = updated_task.external_ref_metadata.get("auto_restart_triage")
+        self.assertEqual(failed_run.id, metadata["source_run_id"])
+
     def test_completed_remediation_persists_worker_response_record(self) -> None:
         fake_router = FakeLLMRouter("{}")
         self.ctx.interrogation_service = SimpleNamespace(llm_router=fake_router)
@@ -2736,8 +2891,205 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         objective_payload = next(item for item in payload["objectives"] if item["id"] == recovering_objective.id)
 
         self.assertEqual("completed", result["atomic_generation"]["status"])
-        self.assertNotEqual("atomic_generation_stale", objective_payload["atomic_generation"]["generation_id"])
-        self.assertIsInstance(objective_payload["atomic_units"], list)
+
+    def test_reconcile_objective_restarts_stale_atomic_generation_when_only_terminal_tasks_remain(self) -> None:
+        objective = Objective(
+            id=new_id("objective"),
+            project_id=self.project.id,
+            title="Restart stale atomic generation",
+            summary="Historical failed tasks should not deadlock decomposition",
+            status=ObjectiveStatus.PAUSED,
+        )
+        self.store.create_objective(objective)
+        self.service.update_intent_model(
+            objective.id,
+            intent_summary="Resume decomposition after failed remediation",
+            success_definition="Atomic generation restarts when only terminal historical tasks remain",
+            non_negotiables=["No deadlock on historical failed tasks"],
+            frustration_signals=["Objective pauses forever"],
+        )
+        self.service.complete_interrogation_review(objective.id)
+        self.store.create_mermaid_artifact(
+            MermaidArtifact(
+                id=new_id("diagram"),
+                objective_id=objective.id,
+                diagram_type="workflow_control",
+                version=1,
+                status=MermaidStatus.FINISHED,
+                summary="Accepted control flow",
+                content="flowchart TD\nA[Intent]-->B[Plan]-->C[Review]",
+                required_for_execution=True,
+            )
+        )
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="atomic_generation_started",
+                project_id=self.project.id,
+                objective_id=objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Started generating atomic units from Mermaid v1.",
+                metadata={"generation_id": "atomic_generation_stale", "diagram_version": 1},
+                created_at=dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=10),
+            )
+        )
+        completed_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=objective.id,
+            title="Completed remediation",
+            objective="Completed historical remediation",
+            status=TaskStatus.COMPLETED,
+        )
+        failed_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=objective.id,
+            title="Failed remediation",
+            objective="Failed historical remediation",
+            status=TaskStatus.FAILED,
+        )
+        self.store.create_task(completed_task)
+        self.store.create_task(failed_task)
+        self.service.auto_resume_atomic_generation = True
+
+        result = self.service.reconcile_objective_workflow(objective.id)
+
+        self.assertTrue(result["changed"])
+        self.assertIn("restart_atomic_generation", result["actions"])
+        atomic_state = self.service._atomic_generation_state(objective.id)
+        self.assertIn(atomic_state["status"], {"running", "completed"})
+        self.assertNotEqual("atomic_generation_stale", atomic_state["generation_id"])
+
+    def test_completed_structural_fix_restarts_atomic_generation_when_only_terminal_work_remains(self) -> None:
+        objective = Objective(
+            id=new_id("objective"),
+            project_id=self.project.id,
+            title="Structural repair resume",
+            summary="resume after structural fix",
+            status=ObjectiveStatus.PAUSED,
+        )
+        self.store.create_objective(objective)
+        self.service.update_intent_model(
+            objective.id,
+            intent_summary="Resume work after a successful structural repair",
+            success_definition="A completed structural fix reopens decomposition when only terminal historical work remains",
+            non_negotiables=["No idle objective after successful structural repair"],
+            frustration_signals=["Structural fix completes but no new work appears"],
+        )
+        self.service.complete_interrogation_review(objective.id)
+        self.store.create_mermaid_artifact(
+            MermaidArtifact(
+                id=new_id("diagram"),
+                objective_id=objective.id,
+                diagram_type="workflow_control",
+                version=1,
+                status=MermaidStatus.FINISHED,
+                summary="Accepted control flow",
+                content="flowchart TD\nA[Intent]-->B[Plan]-->C[Review]",
+                required_for_execution=True,
+            )
+        )
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="atomic_generation_started",
+                project_id=self.project.id,
+                objective_id=objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Started generating atomic units from Mermaid v1.",
+                metadata={"generation_id": "atomic_generation_stale", "diagram_version": 1},
+                created_at=dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=10),
+            )
+        )
+        failed_task = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=objective.id,
+            title="Failed remediation",
+            objective="Failed historical remediation",
+            status=TaskStatus.FAILED,
+        )
+        structural_fix = Task(
+            id=new_id("task"),
+            project_id=self.project.id,
+            objective_id=objective.id,
+            title="Structural fix",
+            objective="Prevent recurrence structurally",
+            status=TaskStatus.COMPLETED,
+            strategy="sa_structural_fix",
+            external_ref_type="sa_watch",
+            external_ref_id=f"{failed_task.id}:timeout",
+        )
+        self.store.create_task(failed_task)
+        self.store.create_task(structural_fix)
+        self.service.auto_resume_atomic_generation = True
+
+        before_atomic = self.service._atomic_generation_state(objective.id)
+        with patch.object(
+            self.service,
+            "_derive_atomic_units",
+            return_value=[
+                {
+                    "title": "Resume decomposition task",
+                    "objective": "Resume work after the structural fix.",
+                    "strategy": "atomic_from_mermaid",
+                    "rationale": "Structural repair succeeded; continue decomposition.",
+                }
+            ],
+        ):
+            self.service.reconcile_task_workflow(structural_fix)
+
+        atomic_state = self.service._atomic_generation_state(objective.id)
+        linked_tasks = [task for task in self.store.list_tasks(self.project.id) if task.objective_id == objective.id]
+
+        self.assertEqual("atomic_generation_stale", before_atomic["generation_id"])
+        self.assertNotEqual("atomic_generation_stale", atomic_state["generation_id"])
+        self.assertIn(atomic_state["status"], {"running", "completed", "failed"})
+        self.assertGreater(len(linked_tasks), 2)
+
+    def test_derive_atomic_units_ignores_mismatched_stale_intent_model(self) -> None:
+        objective = Objective(
+            id=new_id("objective"),
+            project_id=self.project.id,
+            title="Persist success breadcrumbs for completed runs",
+            summary="Write durable breadcrumb bundles for successful worker runs so the control plane has symmetric evidence on pass and fail paths.",
+            status=ObjectiveStatus.PLANNING,
+        )
+        self.store.create_objective(objective)
+        self.service.update_intent_model(
+            objective.id,
+            intent_summary="Persist success breadcrumbs via API route test.",
+            success_definition="The PUT route must accept JSON bodies and persist intent updates.",
+            non_negotiables=["Route must read request body correctly"],
+            frustration_signals=["Route body parsing regressed"],
+        )
+        self.service.complete_interrogation_review(objective.id)
+        mermaid = MermaidArtifact(
+            id=new_id("diagram"),
+            objective_id=objective.id,
+            diagram_type="workflow_control",
+            version=1,
+            status=MermaidStatus.FINISHED,
+            summary="Accepted control flow",
+            content="flowchart TD\nA[Intent]-->B[Plan]-->C[Review]",
+            required_for_execution=True,
+        )
+        self.store.create_mermaid_artifact(mermaid)
+        captured: dict[str, object] = {}
+        self.ctx.interrogation_service = SimpleNamespace(llm_router=FakeLLMRouter("[]"))
+        self.service = HarnessUIDataService(self.ctx)
+
+        def _fake_iterative(objective_arg, intent_model_arg, mermaid_arg, comments, llm_router, repo_context, **kwargs):
+            captured["intent_model"] = intent_model_arg
+            return []
+
+        with patch.object(self.service, "_iterative_atomic_decomposition", side_effect=_fake_iterative):
+            self.service._derive_atomic_units(objective.id, generation_id="gen_1", diagram_version=1)
+
+        self.assertIsNone(captured["intent_model"])
 
     def test_latest_resolved_proposal_does_not_fall_back_to_older_unresolved_proposal(self) -> None:
         fake_router = FakeLLMRouter(
@@ -3104,6 +3456,33 @@ class BackgroundSupervisorCoordinatorTests(unittest.TestCase):
         self.assertTrue(called.wait(timeout=2))
         self.assertTrue(seen["watch"])
         self.assertIsNone(seen["max_idle_cycles"])
+
+
+class UIServerPortBindingTests(unittest.TestCase):
+    def test_resolve_ui_port_refuses_to_fallback_when_preferred_port_is_busy(self) -> None:
+        busy_error = OSError()
+        busy_error.errno = 98
+
+        class _Probe:
+            def setsockopt(self, *args, **kwargs) -> None:
+                return None
+
+            def bind(self, *_args, **_kwargs) -> None:
+                raise busy_error
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> bool:
+                return False
+
+        probe = _Probe()
+
+        with patch.object(ui_module.socket, "socket", return_value=probe):
+            with self.assertRaises(OSError) as ctx:
+                ui_module._resolve_ui_port("127.0.0.1", 9100)
+
+        self.assertIn("UI port 9100 is already in use", str(ctx.exception))
 
 
 if __name__ == "__main__":

@@ -22,7 +22,7 @@ from enum import Enum
 from queue import Queue, Empty
 from fastapi import Request
 
-from .commands.common import resolve_project_ref
+from .commands.common import clear_ui_runtime_state, resolve_project_ref, update_ui_runtime_state
 
 def _get_git_commit() -> str:
     try:
@@ -383,8 +383,44 @@ class HarnessUIDataService:
         self.memory_provider = LocalContextMemoryProvider(self.store)
         self.auto_resume_atomic_generation = not bool(getattr(ctx, "is_test", False))
         self.auto_resume_objective_review = not bool(getattr(ctx, "is_test", False))
+        self.background_workflow_enabled = not bool(getattr(ctx, "is_test", False))
+        self.progress_callback = None
         self._harness_overview_cache_lock = threading.Lock()
         self._harness_overview_cache: tuple[float, dict[str, object]] | None = None
+
+    def _workflow_async_mode(self) -> bool:
+        return bool(self.background_workflow_enabled)
+
+    def _emit_workflow_progress(self, event: dict[str, object]) -> None:
+        callback = self.progress_callback
+        if callback is not None:
+            callback(dict(event))
+
+    def _supervisor_control_dir(self) -> Path:
+        return self.ctx.config.db_path.parent / "supervisors"
+
+    def _live_supervisor_records(self, project_id: str) -> list[dict[str, object]]:
+        control_dir = self._supervisor_control_dir()
+        if not control_dir.exists():
+            return []
+        live_records: list[dict[str, object]] = []
+        for path in sorted(control_dir.glob("*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            pid = int(payload.get("pid") or 0)
+            if pid <= 0:
+                continue
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                continue
+            record_project_id = str(payload.get("project_id") or "").strip()
+            if record_project_id and record_project_id != project_id:
+                continue
+            live_records.append(payload)
+        return live_records
 
     def list_projects(self) -> dict[str, object]:
         projects = []
@@ -405,6 +441,7 @@ class HarnessUIDataService:
 
     def reconcile_objective_workflow(self, objective_id: str) -> dict[str, object]:
         atomic_state = self._atomic_generation_state(objective_id)
+        atomic_running = str(atomic_state.get("status") or "") == "running" and not bool(atomic_state.get("is_stale"))
         review_summary = self._promotion_review_for_objective(
             objective_id,
             [task for task in self.store.list_tasks(self.store.get_objective(objective_id).project_id) if task.objective_id == objective_id]
@@ -415,16 +452,16 @@ class HarnessUIDataService:
         return self.workflow_service.reconcile_objective(
             objective_id,
             start_atomic=(
-                (lambda oid: self.queue_atomic_generation(oid, async_mode=not bool(getattr(self.ctx, "is_test", False))))
+                (lambda oid: self.queue_atomic_generation(oid, async_mode=self._workflow_async_mode()))
                 if self.auto_resume_atomic_generation
                 else None
             ),
             start_review=(
-                (lambda oid: self.queue_objective_review(oid, async_mode=not bool(getattr(self.ctx, "is_test", False))))
+                (lambda oid: self.queue_objective_review(oid, async_mode=self._workflow_async_mode()))
                 if self.auto_resume_objective_review
                 else None
             ),
-            atomic_running=str(atomic_state.get("status") or "") == "running",
+            atomic_running=atomic_running,
             review_running=str(review_state.get("status") or "") == "running",
             review_start_allowed=bool(review_summary.get("can_start_new_round", False)),
         )
@@ -1754,6 +1791,17 @@ class HarnessUIDataService:
                 metadata={"kind": "atomic_generation", "status": "started", "generation_id": generation_id, "diagram_version": mermaid.version},
             )
         )
+        self._emit_workflow_progress(
+            {
+                "type": "workflow_stage_changed",
+                "stage_kind": "atomic_generation",
+                "stage_status": "started",
+                "objective_id": objective.id,
+                "objective_title": objective.title,
+                "generation_id": generation_id,
+                "detail": f"Started atomic generation from Mermaid v{mermaid.version}.",
+            }
+        )
 
         def worker() -> None:
             self._run_atomic_generation(objective.id, generation_id, mermaid.version)
@@ -1801,6 +1849,17 @@ class HarnessUIDataService:
                 },
             )
         )
+        self._emit_workflow_progress(
+            {
+                "type": "workflow_stage_changed",
+                "stage_kind": "atomic_generation",
+                "stage_status": "interrupted",
+                "objective_id": objective.id,
+                "objective_title": objective.title,
+                "generation_id": generation_id,
+                "detail": "Atomic generation was interrupted and is eligible for restart.",
+            }
+        )
         self.store.create_context_record(
             ContextRecord(
                 id=new_id("context"),
@@ -1828,13 +1887,17 @@ class HarnessUIDataService:
             return
         generation = self._atomic_generation_state(objective_id)
         linked_tasks = [task for task in self.store.list_tasks(objective.project_id) if task.objective_id == objective_id]
+        if generation.get("status") == "running" and self._atomic_generation_is_stale(generation, objective_id):
+            self._mark_atomic_generation_interrupted(objective, generation)
+            generation = self._atomic_generation_state(objective_id)
         if generation.get("status") == "completed":
             return
         if generation.get("status") == "running" and not self._atomic_generation_is_stale(generation, objective_id):
             return
-        if linked_tasks:
+        has_runnable_linked_work = any(task.status in {TaskStatus.PENDING, TaskStatus.ACTIVE} for task in linked_tasks)
+        if linked_tasks and has_runnable_linked_work:
             return
-        self.queue_atomic_generation(objective_id, async_mode=not bool(getattr(self.ctx, "is_test", False)))
+        self.queue_atomic_generation(objective_id, async_mode=self._workflow_async_mode())
 
     def queue_objective_review(self, objective_id: str, *, async_mode: bool = True) -> dict[str, object]:
         objective = self.store.get_objective(objective_id)
@@ -1876,6 +1939,17 @@ class HarnessUIDataService:
                 metadata={"kind": "objective_review", "status": "started", "review_id": review_id},
             )
         )
+        self._emit_workflow_progress(
+            {
+                "type": "workflow_stage_changed",
+                "stage_kind": "objective_review",
+                "stage_status": "started",
+                "objective_id": objective.id,
+                "objective_title": objective.title,
+                "review_id": review_id,
+                "detail": "Started automatic objective promotion review.",
+            }
+        )
 
         def worker() -> None:
             self._run_objective_review(objective.id, review_id)
@@ -1916,6 +1990,17 @@ class HarnessUIDataService:
                 content="Objective promotion review was interrupted before reviewer packets were recorded. The harness can restart the round.",
                 metadata={"review_id": review_id, "interrupted": True},
             )
+        )
+        self._emit_workflow_progress(
+            {
+                "type": "workflow_stage_changed",
+                "stage_kind": "objective_review",
+                "stage_status": "interrupted",
+                "objective_id": objective.id,
+                "objective_title": objective.title,
+                "review_id": review_id,
+                "detail": "Objective promotion review was interrupted and can restart.",
+            }
         )
         self.store.create_context_record(
             ContextRecord(
@@ -2036,7 +2121,7 @@ class HarnessUIDataService:
             return
         if not bool(review_summary.get("can_start_new_round", False)):
             return
-        self.queue_objective_review(objective_id, async_mode=not bool(getattr(self.ctx, "is_test", False)))
+        self.queue_objective_review(objective_id, async_mode=self._workflow_async_mode())
 
     def _run_objective_review(self, objective_id: str, review_id: str) -> None:
         objective = self.store.get_objective(objective_id)
@@ -2113,7 +2198,30 @@ class HarnessUIDataService:
                     metadata={"kind": "objective_review", "status": "completed", "review_id": review_id, "packet_count": len(packets)},
                 )
             )
+            self._emit_workflow_progress(
+                {
+                    "type": "workflow_stage_changed",
+                    "stage_kind": "objective_review",
+                    "stage_status": "completed",
+                    "objective_id": objective.id,
+                    "objective_title": objective.title,
+                    "review_id": review_id,
+                    "detail": f"Objective review produced {len(packets)} reviewer packet(s).",
+                }
+            )
             created_task_ids = self._create_objective_review_remediation_tasks(objective, review_id, packets)
+            if created_task_ids:
+                self._emit_workflow_progress(
+                    {
+                        "type": "workflow_stage_changed",
+                        "stage_kind": "objective_review",
+                        "stage_status": "remediation_created",
+                        "objective_id": objective.id,
+                        "objective_title": objective.title,
+                        "review_id": review_id,
+                        "detail": f"Queued {len(created_task_ids)} remediation task(s) from review findings.",
+                    }
+                )
             self._record_objective_review_cycle_artifact(
                 objective=objective,
                 review_id=review_id,
@@ -2157,6 +2265,17 @@ class HarnessUIDataService:
                     content=f"Automatic objective review failed: {exc}",
                     metadata={"review_id": review_id},
                 )
+            )
+            self._emit_workflow_progress(
+                {
+                    "type": "workflow_stage_changed",
+                    "stage_kind": "objective_review",
+                    "stage_status": "failed",
+                    "objective_id": objective.id,
+                    "objective_title": objective.title,
+                    "review_id": review_id,
+                    "detail": f"Objective review failed: {exc}",
+                }
             )
 
     def _generate_objective_review_packets(self, objective_id: str, review_id: str) -> list[dict[str, object]]:
@@ -2793,6 +2912,17 @@ class HarnessUIDataService:
                     metadata={"kind": "atomic_generation", "status": "completed", "generation_id": generation_id, "unit_count": len(units)},
                 )
             )
+            self._emit_workflow_progress(
+                {
+                    "type": "workflow_stage_changed",
+                    "stage_kind": "atomic_generation",
+                    "stage_status": "completed",
+                    "objective_id": objective.id,
+                    "objective_title": objective.title,
+                    "generation_id": generation_id,
+                    "detail": f"Generated {len(units)} atomic unit(s) from Mermaid v{diagram_version}.",
+                }
+            )
             self.store.update_objective_phase(objective.id)
             if self.auto_resume_atomic_generation:
                 _BACKGROUND_SUPERVISOR.start(objective.project_id, self.ctx.engine, watch=True)
@@ -2821,6 +2951,17 @@ class HarnessUIDataService:
                     metadata={"kind": "atomic_generation", "status": "failed", "generation_id": generation_id},
                 )
             )
+            self._emit_workflow_progress(
+                {
+                    "type": "workflow_stage_changed",
+                    "stage_kind": "atomic_generation",
+                    "stage_status": "failed",
+                    "objective_id": objective.id,
+                    "objective_title": objective.title,
+                    "generation_id": generation_id,
+                    "detail": f"Atomic generation failed: {exc}",
+                }
+            )
             self.store.update_objective_status(objective.id, ObjectiveStatus.PAUSED)
 
     def _record_atomic_generation_progress(
@@ -2843,6 +2984,17 @@ class HarnessUIDataService:
                 content=content,
                 metadata={"generation_id": generation_id, "diagram_version": diagram_version, "phase": phase},
             )
+        )
+        self._emit_workflow_progress(
+            {
+                "type": "workflow_stage_changed",
+                "stage_kind": "atomic_generation",
+                "stage_status": "progress",
+                "objective_id": objective.id,
+                "objective_title": objective.title,
+                "generation_id": generation_id,
+                "detail": f"Atomic generation phase: {phase}.",
+            }
         )
         self.store.create_context_record(
             ContextRecord(
@@ -2868,6 +3020,12 @@ class HarnessUIDataService:
         if objective is None:
             return []
         intent_model = self.store.latest_intent_model(objective_id)
+        if intent_model is not None and not self._intent_model_matches_objective_contract(objective, intent_model):
+            # Decomposition must follow the current objective contract. If an
+            # older intent model drifts away from the objective title/summary,
+            # continuing to feed it into decomposition produces self-consistent
+            # but irrelevant task sets that never unblock the objective.
+            intent_model = None
         mermaid = self.store.latest_mermaid_artifact(objective_id, "workflow_control")
         comments = self.store.list_context_records(objective_id=objective_id, record_type="operator_comment")[-12:]
         interrogation_service = getattr(self.ctx, "interrogation_service", None)
@@ -2882,6 +3040,37 @@ class HarnessUIDataService:
                 return units
 
         return []
+
+    def _intent_model_matches_objective_contract(self, objective: Objective, intent_model) -> bool:
+        objective_tokens = self._contract_tokens(f"{objective.title}\n{objective.summary}")
+        intent_tokens = self._contract_tokens(
+            "\n".join(
+                [
+                    str(getattr(intent_model, "intent_summary", "") or ""),
+                    str(getattr(intent_model, "success_definition", "") or ""),
+                    " ".join(str(item) for item in list(getattr(intent_model, "non_negotiables", []) or [])),
+                ]
+            )
+        )
+        if not objective_tokens or not intent_tokens:
+            return True
+        overlap = len(objective_tokens & intent_tokens)
+        return (overlap / len(intent_tokens)) >= 0.35
+
+    def _contract_tokens(self, text: str) -> set[str]:
+        stop_words = {
+            "the", "and", "for", "with", "that", "this", "from", "into", "must",
+            "should", "will", "have", "has", "had", "are", "was", "were", "via",
+            "route", "test", "tests", "task", "tasks", "work", "step", "steps",
+            "into", "over", "under", "after", "before", "when", "where", "then",
+            "than", "only", "keep", "small", "machine", "readable", "current",
+        }
+        tokens = {
+            token
+            for token in re.findall(r"[a-z0-9_]+", text.lower())
+            if len(token) > 2 and token not in stop_words
+        }
+        return tokens
 
     def _gather_repo_context(self, project_id: str) -> str:
         """Gather repo file tree and key file snippets for grounding atomic decomposition."""
@@ -3629,7 +3818,7 @@ class HarnessUIDataService:
         latest_run = runs[-1]
         metadata = dict(task.external_ref_metadata) if isinstance(task.external_ref_metadata, dict) else {}
         triage = metadata.get("auto_restart_triage") if isinstance(metadata.get("auto_restart_triage"), dict) else {}
-        if str(triage.get("source_run_id") or "") == latest_run.id:
+        if str(triage.get("source_run_id") or "") == latest_run.id and task.status in {TaskStatus.PENDING, TaskStatus.ACTIVE}:
             return False
 
         reason = ""
@@ -3835,12 +4024,21 @@ class HarnessUIDataService:
                     gen = self._atomic_generation_state(obj.id)
                     active_objective = {**obj_data, "atomic_generation": gen}
             supervisor = _BACKGROUND_SUPERVISOR.status(project.id)
+            external_supervisors = self._live_supervisor_records(project.id)
+            in_process_running = _BACKGROUND_SUPERVISOR.is_running(project.id)
+            running = in_process_running or bool(external_supervisors)
+            supervisor_state = supervisor.get("state", "idle")
+            if not in_process_running and external_supervisors:
+                supervisor_state = "running"
             projects.append({
                 "id": project.id,
                 "name": project.name,
                 "supervisor": {
-                    "running": _BACKGROUND_SUPERVISOR.is_running(project.id),
                     **supervisor,
+                    "running": running,
+                    "state": supervisor_state,
+                    "external_supervisor_count": len(external_supervisors),
+                    "external_supervisors": external_supervisors,
                 },
                 "tasks_by_status": dict(tasks_by_status),
                 "pending_queue_states": {
@@ -7101,7 +7299,7 @@ def _build_fastapi_app(data_service: HarnessUIDataService, event_bus: _EventBus)
         ), notify=True)
 
     @app.put("/api/objectives/{objective_id}/intent")
-    async def update_intent(objective_id: str, request):
+    async def update_intent(objective_id: str, request: Request):
         payload = await request.json()
         return _dispatch(lambda: data_service.update_intent_model(
             objective_id, intent_summary=str(payload.get("intent_summary") or ""),
@@ -7143,6 +7341,9 @@ def start_ui_server(ctx, *, host: str, port: int, open_browser: bool, project_re
     data_service = HarnessUIDataService(ctx)
     if hasattr(ctx, "engine") and hasattr(ctx.engine, "queue"):
         ctx.engine.queue.post_task_callback = data_service.reconcile_task_workflow
+    # The control plane must own a single canonical UI port. Silently hopping
+    # to 9101/9102 creates split-brain status where runtime state and the real
+    # serving process disagree about which API endpoint is authoritative.
     resolved_port = _resolve_ui_port(host, port)
     event_bus = _EventBus()
     app = _build_fastapi_app(data_service, event_bus)
@@ -7150,8 +7351,13 @@ def start_ui_server(ctx, *, host: str, port: int, open_browser: bool, project_re
     if project_ref:
         project_id = resolve_project_ref(ctx, project_ref)
         url = f"{url}?project_id={project_id}"
-    if resolved_port != port:
-        print(f"Port {port} is busy. Using {resolved_port} instead.", flush=True)
+    update_ui_runtime_state(
+        ctx.config,
+        host=host,
+        preferred_port=port,
+        resolved_port=resolved_port,
+        project_ref=project_ref,
+    )
     print(f"Harness API running at {url} (commit {_GIT_COMMIT})", flush=True)
     print("Press Ctrl+C to stop.", flush=True)
     if open_browser:
@@ -7189,6 +7395,7 @@ def start_ui_server(ctx, *, host: str, port: int, open_browser: bool, project_re
     except KeyboardInterrupt:
         pass
     finally:
+        clear_ui_runtime_state(ctx.config)
         _stop_change_detector.set()
         for project in data_service.store.list_projects():
             _BACKGROUND_SUPERVISOR.stop(project.id)
@@ -7196,13 +7403,18 @@ def start_ui_server(ctx, *, host: str, port: int, open_browser: bool, project_re
 
 def _auto_start_supervisors(data_service: HarnessUIDataService, ctx) -> None:
     """Start background supervisors for projects with pending tasks, and resume stalled atomic generation."""
-    # A fresh server has zero workers — clear all leases unconditionally
-    # so recover_stale_state can reset any active tasks from prior sessions.
-    with data_service.store.connect() as connection:
-        cleared = connection.execute("DELETE FROM task_leases").rowcount
-    recovered = data_service.store.recover_stale_state()
-    if cleared or any(int(count or 0) > 0 for count in recovered.values()):
-        print(f"  Startup recovery: cleared {cleared} leases, recovered {recovered}", flush=True)
+    external_supervisors_present = any(data_service._live_supervisor_records(project.id) for project in data_service.store.list_projects())
+    cleared = 0
+    recovered = {"runs": 0, "tasks": 0, "leases": 0}
+    if not external_supervisors_present:
+        # Only perform aggressive lease cleanup when the UI owns supervision.
+        # If an external supervisor already exists, clearing leases here creates
+        # a second scheduler and breaks single-owner control-plane semantics.
+        with data_service.store.connect() as connection:
+            cleared = connection.execute("DELETE FROM task_leases").rowcount
+        recovered = data_service.store.recover_stale_state()
+        if cleared or any(int(count or 0) > 0 for count in recovered.values()):
+            print(f"  Startup recovery: cleared {cleared} leases, recovered {recovered}", flush=True)
     for project in data_service.store.list_projects():
         # Resume any stalled atomic generation
         for objective in data_service.store.list_objectives(project.id):
@@ -7216,6 +7428,8 @@ def _auto_start_supervisors(data_service: HarnessUIDataService, ctx) -> None:
         metrics = data_service.store.metrics_snapshot(project.id)
         pending = int(metrics.get("tasks_by_status", {}).get("pending", 0))
         active = int(metrics.get("tasks_by_status", {}).get("active", 0))
+        if data_service._live_supervisor_records(project.id):
+            continue
         if pending + active > 0:
             started = _BACKGROUND_SUPERVISOR.start(project.id, ctx.engine, watch=True)
             if started:
@@ -7223,14 +7437,15 @@ def _auto_start_supervisors(data_service: HarnessUIDataService, ctx) -> None:
 
 
 def _resolve_ui_port(host: str, preferred_port: int) -> int:
-    for port in range(preferred_port, preferred_port + 25):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            try:
-                probe.bind((host, port))
-            except OSError as exc:
-                if exc.errno in {errno.EADDRINUSE, 48, 98}:
-                    continue
-                raise
-            return port
-    raise OSError(f"No free UI port found in range {preferred_port}-{preferred_port + 24}")
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind((host, preferred_port))
+        except OSError as exc:
+            if exc.errno in {errno.EADDRINUSE, 48, 98}:
+                raise OSError(
+                    f"UI port {preferred_port} is already in use on {host}. "
+                    "Refusing to fall back to another port because the control plane requires a single canonical API endpoint."
+                ) from exc
+            raise
+    return preferred_port

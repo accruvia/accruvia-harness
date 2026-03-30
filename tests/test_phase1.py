@@ -240,6 +240,184 @@ class Phase1Tests(unittest.TestCase):
         self.assertIn("Reason: policy_self_modification", output)
         self.assertIn("Retryable tasks still pending; starting another sweep of 2 queued tasks", output)
 
+    def test_supervise_progress_prints_queue_snapshot_for_worker_and_idle_updates(self) -> None:
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            _emit_supervise_progress(
+                {
+                    "type": "worker_status",
+                    "run_id": "run_123",
+                    "backend_name": "agent",
+                    "pid": 42,
+                    "elapsed_seconds": 75,
+                    "latest_artifact": "worker.heartbeat.json",
+                    "latest_artifact_kind": "heartbeat",
+                    "latest_artifact_path": "/tmp/run_123/worker.heartbeat.json",
+                    "latest_artifact_age_seconds": 14,
+                    "worker_phase": "working",
+                    "phase_elapsed_seconds": 75,
+                    "meaningful_artifact_age_seconds": 75,
+                    "milestone_artifact_count": 0,
+                    "milestone_artifacts": [],
+                    "command_summary": "bin/accruvia-codex-worker",
+                    "queue_snapshot": {"pending": 0, "active": 1, "stalled": 1},
+                }
+            )
+            _emit_supervise_progress(
+                {
+                    "type": "sleeping",
+                    "seconds": 30.0,
+                    "idle_cycles": 1,
+                    "queue_depth": 0,
+                    "next_heartbeat_seconds": 45.0,
+                    "queue_snapshot": {"pending": 0, "active": 0, "stalled": 1},
+                }
+            )
+
+        output = stdout.getvalue()
+        self.assertIn("alive; no milestone artifacts yet after 01:15", output)
+        self.assertIn("queue: pending 0, active 1, stalled objectives 1", output)
+        self.assertIn("[pending 0, active 0, stalled objectives 1]", output)
+
+    def test_supervise_progress_prints_blocked_worker_and_gate_states(self) -> None:
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            _emit_supervise_progress(
+                {
+                    "type": "worker_lane_blocked",
+                    "task_id": "task_123",
+                    "task_title": "Produce packet",
+                    "message": "Worker lane is paused.",
+                    "queue_snapshot": {"pending": 1, "active": 0, "stalled": 1},
+                }
+            )
+            _emit_supervise_progress(
+                {
+                    "type": "objective_gate_blocked",
+                    "task_id": "task_124",
+                    "task_title": "Promote objective",
+                    "message": "Intent model is required before execution.",
+                    "queue_snapshot": {"pending": 1, "active": 0, "stalled": 1},
+                }
+            )
+            _emit_supervise_progress(
+                {
+                    "type": "backends_unavailable",
+                    "message": "No LLM backends reachable. Retry in 30s.",
+                    "retry_in_seconds": 30.0,
+                    "probe_results": {"codex": "timeout"},
+                }
+            )
+            _emit_supervise_progress(
+                {
+                    "type": "gate_backoff",
+                    "seconds": 30.0,
+                    "queue_snapshot": {"pending": 1, "active": 0, "stalled": 1},
+                }
+            )
+            _emit_supervise_progress(
+                {
+                    "type": "sleeping",
+                    "seconds": 30.0,
+                    "idle_cycles": 1,
+                    "queue_depth": 1,
+                    "queue_snapshot": {"pending": 1, "active": 0, "stalled": 1},
+                }
+            )
+
+        output = stdout.getvalue()
+        self.assertIn("Worker lane blocked for Produce packet (task_123): Worker lane is paused.", output)
+        self.assertIn("Objective gate blocked for Promote objective (task_124): Intent model is required before execution.", output)
+        self.assertIn("Backend gate blocked: No LLM backends reachable. Retry in 30s.; retry in 30s; probes={'codex': 'timeout'}", output)
+        self.assertIn("Gate blocked. Backing off for 30.0s", output)
+        self.assertIn("Blocked backlog. Sleeping 30.0s (idle cycle 1)", output)
+
+    def test_supervise_progress_prints_workflow_stage_changes(self) -> None:
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            _emit_supervise_progress(
+                {
+                    "type": "workflow_stage_changed",
+                    "stage_kind": "atomic_generation",
+                    "stage_status": "started",
+                    "objective_id": "objective_123",
+                    "objective_title": "Refactor pipeline",
+                    "detail": "Started atomic generation from Mermaid v2.",
+                }
+            )
+            _emit_supervise_progress(
+                {
+                    "type": "workflow_stage_changed",
+                    "stage_kind": "objective_review",
+                    "stage_status": "remediation_created",
+                    "objective_id": "objective_123",
+                    "objective_title": "Refactor pipeline",
+                    "detail": "Queued 2 remediation task(s) from review findings.",
+                }
+            )
+
+        output = stdout.getvalue()
+        self.assertIn("Workflow: Refactor pipeline - atomic generation started", output)
+        self.assertIn("Started atomic generation from Mermaid v2.", output)
+        self.assertIn("Workflow: Refactor pipeline - objective review remediation_created", output)
+        self.assertIn("Queued 2 remediation task(s) from review findings.", output)
+
+    def test_supervise_progress_prints_artifact_and_failure_events(self) -> None:
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            _emit_supervise_progress(
+                {
+                    "type": "artifact_observed",
+                    "change": "created",
+                    "artifact_kind": "plan",
+                    "artifact": "plan.txt",
+                    "artifact_path": "/tmp/run/plan.txt",
+                    "worker_phase": "llm_generation",
+                }
+            )
+            _emit_supervise_progress(
+                {
+                    "type": "phase_dwell_warning",
+                    "run_id": "run_123",
+                    "worker_phase": "llm_generation",
+                    "phase_elapsed_seconds": 600,
+                    "meaningful_artifact_age_seconds": 600,
+                    "milestone_artifact_count": 0,
+                }
+            )
+            _emit_supervise_progress(
+                {
+                    "type": "failure_diagnostic",
+                    "task_title": "Produce packet",
+                    "run_id": "run_123",
+                    "failure_category": "validation_evidence_missing",
+                    "failure_message": "Expected objective review packet artifact was not persisted.",
+                    "decision": "retry",
+                    "decision_rationale": "Artifacts were insufficient; retry within bounded task budget.",
+                }
+            )
+
+        output = stdout.getvalue()
+        self.assertIn("Artifact created: plan plan.txt @ /tmp/run/plan.txt during llm_generation", output)
+        self.assertIn("Phase dwell warning: run_123 has remained in llm_generation for 10:00", output)
+        self.assertIn("No milestone artifacts observed after 10:00.", output)
+        self.assertIn("Failure diagnostic for Produce packet (run_123): validation_evidence_missing", output)
+        self.assertIn("Expected objective review packet artifact was not persisted.", output)
+        self.assertIn("Decision retry; Artifacts were insufficient; retry within bounded task budget.", output)
+
+    def test_supervise_progress_prints_objective_backlog_resumed(self) -> None:
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            _emit_supervise_progress(
+                {
+                    "type": "objective_backlog_resumed",
+                    "objective_count": 2,
+                    "action_count": 3,
+                    "objectives": ["Context Management", "Refactor task execution pipeline"],
+                }
+            )
+
+        output = stdout.getvalue()
+        self.assertIn(
+            "Objective backlog resumed 3 action(s) across 2 objective(s): Context Management, Refactor task execution pipeline",
+            output,
+        )
+
     def test_otlp_signal_endpoints_are_derived_per_signal(self) -> None:
         self.assertEqual(
             ("http://localhost:4318/v1/traces", "http://localhost:4318/v1/metrics"),

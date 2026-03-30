@@ -144,6 +144,11 @@ def _ci_local_text(payload: dict[str, object]) -> str:
         f"- Finished: {payload.get('finished_at')}",
         f"- Summary: {payload.get('summary')}",
     ]
+    command_summary = payload.get("command_summary") or []
+    if isinstance(command_summary, (list, tuple)) and command_summary:
+        lines.append("- Commands:")
+        for command in command_summary:
+            lines.append(f"  - {command}")
     logs = payload.get("logs") or {}
     if isinstance(logs, dict) and logs:
         lines.append("- Logs:")
@@ -232,25 +237,69 @@ def _format_duration(seconds: object) -> str:
 
 def _worker_status_operator_text(event: dict[str, object]) -> str:
     latest_artifact = event.get("latest_artifact")
+    latest_artifact_kind = str(event.get("latest_artifact_kind") or "").strip()
+    latest_artifact_path = str(event.get("latest_artifact_path") or "").strip()
+    milestone_artifacts = list(event.get("milestone_artifacts") or [])
+    milestone_artifact_count = int(event.get("milestone_artifact_count", 0) or 0)
+    meaningful_artifact_age_seconds = event.get("meaningful_artifact_age_seconds")
+    worker_phase = str(event.get("worker_phase") or "").strip()
+    phase_elapsed_seconds = event.get("phase_elapsed_seconds")
     latest_age = event.get("latest_artifact_age_seconds")
     strategy = str(event.get("strategy") or "")
     stale = bool(event.get("stale"))
     age_text = _format_duration(latest_age)
-    if strategy == "sa_structural_fix":
+    phase_prefix = f"phase {worker_phase}" if worker_phase else ""
+    if isinstance(phase_elapsed_seconds, (int, float)) and worker_phase:
+        phase_prefix = f"{phase_prefix} ({_format_duration(phase_elapsed_seconds)} in phase)"
+    phase_prefix = f"{phase_prefix}; " if phase_prefix else ""
+    milestone_summary = ""
+    if milestone_artifact_count > 0:
+        preview = ", ".join(str(name) for name in milestone_artifacts[:3])
+        more = milestone_artifact_count - min(len(milestone_artifacts), 3)
+        if more > 0:
+            preview = f"{preview}, +{more} more"
+        milestone_summary = f"; milestones {preview}" if preview else ""
+    artifact_detail = latest_artifact
+    if latest_artifact_kind and latest_artifact:
+        artifact_detail = f"{latest_artifact_kind} {latest_artifact}"
+    if latest_artifact_path:
+        artifact_detail = f"{artifact_detail} @ {latest_artifact_path}" if artifact_detail else latest_artifact_path
+    if strategy in {"sa_structural_fix", "sa_watch_direct_repair"}:
         if latest_artifact:
             if stale:
-                return f"recovery run likely stuck; no new durable artifacts for {age_text} (latest {latest_artifact})"
-            return f"recovery run active; no new durable artifacts for {age_text} (latest {latest_artifact})"
+                return f"{phase_prefix}recovery run likely stuck; no new durable artifacts for {age_text} (latest {artifact_detail})"
+            return f"{phase_prefix}recovery run active; no new durable artifacts for {age_text} (latest {artifact_detail})"
         if stale:
-            return "recovery run likely stuck; no durable artifacts yet"
-        return "recovery run active; no durable artifacts yet"
+            return f"{phase_prefix}recovery run likely stuck; no durable artifacts yet"
+        return f"{phase_prefix}recovery run active; no durable artifacts yet"
     if latest_artifact:
         if stale:
-            return f"likely stuck; no new durable artifacts for {age_text} (latest {latest_artifact})"
-        return f"last artifact {latest_artifact} {age_text} ago"
+            return f"{phase_prefix}likely stuck; no new durable artifacts for {age_text} (latest {artifact_detail})"
+        if latest_artifact_kind in {"heartbeat", "phase"}:
+            if isinstance(meaningful_artifact_age_seconds, (int, float)):
+                if milestone_artifact_count > 0:
+                    return (
+                        f"{phase_prefix}alive; no new milestone artifacts for {_format_duration(meaningful_artifact_age_seconds)}"
+                        f"{milestone_summary}; last artifact {artifact_detail} {age_text} ago"
+                    )
+                return (
+                    f"{phase_prefix}alive; no milestone artifacts yet after {_format_duration(meaningful_artifact_age_seconds)}; "
+                    f"last artifact {artifact_detail} {age_text} ago"
+                )
+        return f"{phase_prefix}last artifact {artifact_detail} {age_text} ago"
     if stale:
-        return "likely stuck; no durable artifacts yet"
-    return "no durable artifacts yet"
+        return f"{phase_prefix}likely stuck; no durable artifacts yet"
+    return f"{phase_prefix}no durable artifacts yet"
+
+
+def _queue_snapshot_operator_text(event: dict[str, object]) -> str:
+    snapshot = event.get("queue_snapshot")
+    if not isinstance(snapshot, dict):
+        return ""
+    pending = int(snapshot.get("pending", 0) or 0)
+    active = int(snapshot.get("active", 0) or 0)
+    stalled = int(snapshot.get("stalled", 0) or 0)
+    return f"pending {pending}, active {active}, stalled objectives {stalled}"
 
 
 def _emit_supervise_progress(event: dict[str, object]) -> None:
@@ -284,13 +333,27 @@ def _emit_supervise_progress(event: dict[str, object]) -> None:
         return
     if event_type == "worker_status":
         artifact_text = _worker_status_operator_text(event)
+        queue_text = _queue_snapshot_operator_text(event)
         stale_text = " [stale]" if event.get("stale") else ""
+        queue_suffix = f", queue: {queue_text}" if queue_text else ""
         print(
             _timestamped(
-                f"Working: {event['run_id']} via {event['backend_name']} pid {event['pid']}, elapsed {_format_duration(event.get('elapsed_seconds'))}, {artifact_text}, child: {event['command_summary']}{stale_text}"
+                f"Working: {event['run_id']} via {event['backend_name']} pid {event['pid']}, elapsed {_format_duration(event.get('elapsed_seconds'))}, {artifact_text}{queue_suffix}, child: {event['command_summary']}{stale_text}"
             ),
             flush=True,
         )
+        return
+    if event_type == "artifact_observed":
+        change = str(event.get("change") or "observed")
+        artifact_kind = str(event.get("artifact_kind") or "").strip()
+        artifact = str(event.get("artifact") or "").strip()
+        artifact_path = str(event.get("artifact_path") or "").strip()
+        phase = str(event.get("worker_phase") or "").strip()
+        phase_prefix = f" during {phase}" if phase else ""
+        label = f"{artifact_kind} {artifact}".strip()
+        if artifact_path:
+            label = f"{label} @ {artifact_path}".strip()
+        print(_timestamped(f"Artifact {change}: {label}{phase_prefix}"), flush=True)
         return
     if event_type == "task_finished":
         print(
@@ -327,6 +390,38 @@ def _emit_supervise_progress(event: dict[str, object]) -> None:
             flush=True,
         )
         return
+    if event_type == "workflow_stage_changed":
+        stage_kind = str(event.get("stage_kind") or "workflow")
+        stage_status = str(event.get("stage_status") or "updated")
+        objective_title = str(event.get("objective_title") or event.get("objective_id") or "objective")
+        detail = str(event.get("detail") or "").strip()
+        label = stage_kind.replace("_", " ")
+        print(
+            _timestamped(
+                f"Workflow: {objective_title} - {label} {stage_status}"
+            ),
+            flush=True,
+        )
+        if detail:
+            print(_timestamped(f"  Detail: {detail}"), flush=True)
+        return
+    if event_type == "phase_dwell_warning":
+        print(
+            _timestamped(
+                f"Phase dwell warning: {event['run_id']} has remained in {event['worker_phase']} for {_format_duration(event.get('phase_elapsed_seconds'))}"
+            ),
+            flush=True,
+        )
+        meaningful_age = event.get("meaningful_artifact_age_seconds")
+        milestone_count = int(event.get("milestone_artifact_count", 0) or 0)
+        if isinstance(meaningful_age, (int, float)):
+            detail = (
+                f"No new milestone artifacts for {_format_duration(meaningful_age)}."
+                if milestone_count > 0
+                else f"No milestone artifacts observed after {_format_duration(meaningful_age)}."
+            )
+            print(_timestamped(f"  Detail: {detail}"), flush=True)
+        return
     if event_type == "heartbeat_succeeded":
         print(
             _timestamped(
@@ -340,6 +435,9 @@ def _emit_supervise_progress(event: dict[str, object]) -> None:
         backlog_delta = _backlog_delta_text(event.get("backlog_before"), event.get("backlog_after"))
         if backlog_delta:
             print(_timestamped(f"  Backlog delta: {backlog_delta}"), flush=True)
+        queue_text = _queue_snapshot_operator_text(event)
+        if queue_text:
+            print(_timestamped(f"  Queue: {queue_text}"), flush=True)
         interval_seconds = event.get("heartbeat_interval_seconds")
         if interval_seconds is not None:
             source = str(event.get("heartbeat_schedule_source") or "default")
@@ -369,6 +467,63 @@ def _emit_supervise_progress(event: dict[str, object]) -> None:
             flush=True,
         )
         return
+    if event_type == "worker_lane_blocked":
+        queue_text = _queue_snapshot_operator_text(event)
+        queue_suffix = f" [{queue_text}]" if queue_text else ""
+        print(
+            _timestamped(
+                f"Worker lane blocked for {event['task_title']} ({event['task_id']}): {event['message']}{queue_suffix}"
+            ),
+            flush=True,
+        )
+        return
+    if event_type == "objective_gate_blocked":
+        queue_text = _queue_snapshot_operator_text(event)
+        queue_suffix = f" [{queue_text}]" if queue_text else ""
+        print(
+            _timestamped(
+                f"Objective gate blocked for {event['task_title']} ({event['task_id']}): {event['message']}{queue_suffix}"
+            ),
+            flush=True,
+        )
+        return
+    if event_type == "backends_unavailable":
+        probe_results = event.get("probe_results")
+        retry_in_seconds = event.get("retry_in_seconds")
+        detail = f"; retry in {retry_in_seconds:.0f}s" if isinstance(retry_in_seconds, (int, float)) else ""
+        if isinstance(probe_results, dict) and probe_results:
+            detail += f"; probes={probe_results}"
+        print(_timestamped(f"Backend gate blocked: {event['message']}{detail}"), flush=True)
+        return
+    if event_type == "gate_backoff":
+        queue_text = _queue_snapshot_operator_text(event)
+        queue_suffix = f" [{queue_text}]" if queue_text else ""
+        print(
+            _timestamped(
+                f"Gate blocked. Backing off for {event['seconds']}s{queue_suffix}"
+            ),
+            flush=True,
+        )
+        return
+    if event_type == "failure_diagnostic":
+        failure_category = str(event.get("failure_category") or "unknown_failure").strip()
+        failure_message = str(event.get("failure_message") or "").strip()
+        decision = str(event.get("decision") or "").strip()
+        rationale = str(event.get("decision_rationale") or "").strip()
+        print(
+            _timestamped(
+                f"Failure diagnostic for {event['task_title']} ({event['run_id']}): {failure_category}"
+            ),
+            flush=True,
+        )
+        if failure_message:
+            print(_timestamped(f"  Detail: {failure_message}"), flush=True)
+        if decision or rationale:
+            summary = f"Decision {decision}" if decision else "Decision recorded"
+            if rationale:
+                summary = f"{summary}; {rationale}"
+            print(_timestamped(f"  Retry: {summary}"), flush=True)
+        return
     if event_type == "review_checked":
         print(
             _timestamped(
@@ -381,8 +536,13 @@ def _emit_supervise_progress(event: dict[str, object]) -> None:
         message = f"Idle. Sleeping {event['seconds']}s (idle cycle {event['idle_cycles']})"
         next_heartbeat = event.get("next_heartbeat_seconds")
         queue_depth = event.get("queue_depth")
+        queue_text = _queue_snapshot_operator_text(event)
+        if isinstance(queue_depth, (int, float)) and queue_depth > 0:
+            message = f"Blocked backlog. Sleeping {event['seconds']}s (idle cycle {event['idle_cycles']})"
         if queue_depth == 0 and next_heartbeat is not None:
             message += f" - healthy idle, next heartbeat due in {next_heartbeat:.0f}s"
+        if queue_text:
+            message += f" [{queue_text}]"
         print(_timestamped(message), flush=True)
         return
     if event_type == "stale_state_recovered":
@@ -399,6 +559,19 @@ def _emit_supervise_progress(event: dict[str, object]) -> None:
         print(
             _timestamped(
                 f"Retryable tasks still pending; starting another sweep of {event['queue_depth']} queued tasks"
+            ),
+            flush=True,
+        )
+        return
+    if event_type == "objective_backlog_resumed":
+        objectives = list(event.get("objectives") or [])
+        preview = ", ".join(str(item) for item in objectives[:3])
+        if len(objectives) > 3:
+            preview = f"{preview}, +{len(objectives) - 3} more"
+        suffix = f": {preview}" if preview else ""
+        print(
+            _timestamped(
+                f"Objective backlog resumed {event['action_count']} action(s) across {event['objective_count']} objective(s){suffix}"
             ),
             flush=True,
         )
@@ -1017,6 +1190,71 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
             if not args.json:
                 _emit_supervise_progress(event)
 
+        workflow_data_service = getattr(ctx, "workflow_data_service", None)
+        if workflow_data_service is not None:
+            workflow_data_service.progress_callback = _control_aware_progress
+            workflow_data_service.background_workflow_enabled = False
+
+        def _resume_objective_backlog(
+            target_project_id: str | None,
+            emit_progress,
+        ) -> dict[str, object]:
+            if workflow_data_service is None:
+                return {"changed": False}
+            objectives = []
+            if target_project_id is not None:
+                objectives = list(ctx.store.list_objectives(target_project_id))
+            else:
+                for project in ctx.store.list_projects():
+                    objectives.extend(ctx.store.list_objectives(project.id))
+            action_count = 0
+            changed_objectives: list[str] = []
+            runnable_backlog_changed = False
+            for objective in objectives:
+                before_objective = ctx.store.get_objective(objective.id)
+                before_metrics = ctx.store.metrics_snapshot(objective.project_id)
+                before_pending = int(before_metrics.get("tasks_by_status", {}).get("pending", 0) or 0)
+                before_active = int(before_metrics.get("tasks_by_status", {}).get("active", 0) or 0)
+                reconcile = workflow_data_service.reconcile_objective_workflow(objective.id)
+                workflow_data_service._maybe_resume_atomic_generation(objective.id)
+                workflow_data_service._maybe_resume_objective_review(objective.id)
+                after_objective = ctx.store.get_objective(objective.id)
+                after_metrics = ctx.store.metrics_snapshot(objective.project_id)
+                after_pending = int(after_metrics.get("tasks_by_status", {}).get("pending", 0) or 0)
+                after_active = int(after_metrics.get("tasks_by_status", {}).get("active", 0) or 0)
+                reconcile_actions = list(reconcile.get("actions") or []) if isinstance(reconcile, dict) else []
+                delta_actions = len(reconcile_actions)
+                if after_pending > before_pending:
+                    delta_actions += after_pending - before_pending
+                if after_active > before_active:
+                    delta_actions += after_active - before_active
+                if delta_actions > 0:
+                    action_count += delta_actions
+                    changed_objectives.append(str(objective.title or objective.id))
+                if after_pending > before_pending or after_active > before_active:
+                    runnable_backlog_changed = True
+                elif (
+                    before_objective is not None
+                    and after_objective is not None
+                    and before_objective.status != after_objective.status
+                ):
+                    runnable_backlog_changed = True
+            if action_count > 0:
+                emit_progress(
+                    {
+                        "type": "objective_backlog_resumed",
+                        "objective_count": len(changed_objectives),
+                        "action_count": action_count,
+                        "objectives": changed_objectives[:5],
+                    }
+                )
+                return {
+                    "changed": runnable_backlog_changed,
+                    "action_count": action_count,
+                    "objective_count": len(changed_objectives),
+                }
+            return {"changed": False}
+
         ctx.control_plane.resume_lane("harness", reason="supervise_start")
         interrupted = False
         try:
@@ -1033,6 +1271,7 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
                 heartbeat_all_projects=args.heartbeat_all_projects,
                 review_check_enabled=args.review_check_enabled or config.pr_check_enabled,
                 review_check_interval_seconds=args.review_check_interval_seconds or config.pr_check_interval_seconds,
+                idle_maintenance_callback=_resume_objective_backlog,
                 stop_requested=lambda: stop_requested["value"] or stop_request_path.exists(),
                 progress_callback=_control_aware_progress,
             )

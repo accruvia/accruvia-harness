@@ -390,6 +390,28 @@ class ControlRecoveryAction:
 
 
 @dataclass(slots=True)
+class ControlCooldown:
+    id: str
+    scope_type: str
+    scope_id: str
+    reason: str
+    until_at: datetime
+    created_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
+class ControlBudget:
+    id: str
+    budget_scope: str
+    budget_key: str
+    window_start: datetime
+    window_end: datetime
+    usage_count: int = 0
+    usage_cost_usd: float = 0.0
+    updated_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
 class ControlWorkerRun:
     id: str
     task_id: str | None = None

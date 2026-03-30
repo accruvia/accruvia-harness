@@ -5,6 +5,8 @@ from datetime import UTC, datetime
 
 from .common import (
     control_breadcrumb_from_row,
+    control_budget_from_row,
+    control_cooldown_from_row,
     control_event_from_row,
     control_lane_state_from_row,
     control_recovery_action_from_row,
@@ -13,6 +15,8 @@ from .common import (
 )
 from ..domain import (
     ControlBreadcrumb,
+    ControlBudget,
+    ControlCooldown,
     ControlEvent,
     ControlLaneState,
     ControlLaneStateValue,
@@ -23,6 +27,112 @@ from ..domain import (
 
 
 class ControlPlaneStoreMixin:
+    def create_control_cooldown(self, cooldown: ControlCooldown) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO control_cooldowns (id, scope_type, scope_id, reason, until_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    cooldown.id,
+                    cooldown.scope_type,
+                    cooldown.scope_id,
+                    cooldown.reason,
+                    cooldown.until_at.isoformat(),
+                    cooldown.created_at.isoformat(),
+                ),
+            )
+
+    def list_control_cooldowns(
+        self,
+        *,
+        scope_type: str | None = None,
+        scope_id: str | None = None,
+        active_only: bool = False,
+    ) -> list[ControlCooldown]:
+        query = """
+            SELECT id, scope_type, scope_id, reason, until_at, created_at
+            FROM control_cooldowns
+        """
+        clauses: list[str] = []
+        params: list[str] = []
+        if scope_type:
+            clauses.append("scope_type = ?")
+            params.append(scope_type)
+        if scope_id:
+            clauses.append("scope_id = ?")
+            params.append(scope_id)
+        if active_only:
+            clauses.append("until_at > ?")
+            params.append(datetime.now(UTC).isoformat())
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at DESC"
+        with self.connect() as connection:
+            rows = connection.execute(query, tuple(params)).fetchall()
+        return [control_cooldown_from_row(row) for row in rows]
+
+    def upsert_control_budget(self, budget: ControlBudget) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO control_budgets (
+                    id, budget_scope, budget_key, window_start, window_end, usage_count, usage_cost_usd, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    budget_scope = excluded.budget_scope,
+                    budget_key = excluded.budget_key,
+                    window_start = excluded.window_start,
+                    window_end = excluded.window_end,
+                    usage_count = excluded.usage_count,
+                    usage_cost_usd = excluded.usage_cost_usd,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    budget.id,
+                    budget.budget_scope,
+                    budget.budget_key,
+                    budget.window_start.isoformat(),
+                    budget.window_end.isoformat(),
+                    budget.usage_count,
+                    budget.usage_cost_usd,
+                    budget.updated_at.isoformat(),
+                ),
+            )
+
+    def get_control_budget(self, budget_scope: str, budget_key: str, window_start: datetime, window_end: datetime) -> ControlBudget | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, budget_scope, budget_key, window_start, window_end, usage_count, usage_cost_usd, updated_at
+                FROM control_budgets
+                WHERE budget_scope = ? AND budget_key = ? AND window_start = ? AND window_end = ?
+                """,
+                (budget_scope, budget_key, window_start.isoformat(), window_end.isoformat()),
+            ).fetchone()
+        return control_budget_from_row(row) if row else None
+
+    def list_control_budgets(self, *, budget_scope: str | None = None, budget_key: str | None = None) -> list[ControlBudget]:
+        query = """
+            SELECT id, budget_scope, budget_key, window_start, window_end, usage_count, usage_cost_usd, updated_at
+            FROM control_budgets
+        """
+        clauses: list[str] = []
+        params: list[str] = []
+        if budget_scope:
+            clauses.append("budget_scope = ?")
+            params.append(budget_scope)
+        if budget_key:
+            clauses.append("budget_key = ?")
+            params.append(budget_key)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY updated_at DESC"
+        with self.connect() as connection:
+            rows = connection.execute(query, tuple(params)).fetchall()
+        return [control_budget_from_row(row) for row in rows]
+
     def get_control_system_state(self) -> ControlSystemState:
         with self.connect() as connection:
             row = connection.execute(

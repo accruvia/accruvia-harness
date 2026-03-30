@@ -5,6 +5,7 @@ import subprocess
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Callable
 
 from ..control_breadcrumbs import BreadcrumbWriter
 from ..domain import ControlRecoveryAction, Project, Task, new_id
@@ -21,6 +22,7 @@ class StructuralFixPromotionResult:
     ci_passed: bool
     failed_stage: str
     summary: str
+    command_summary: tuple[str, ...] = ()
     commit_sha: str | None = None
     push_status: str = "not_attempted"
     workspace_root: str | None = None
@@ -33,10 +35,13 @@ class StructuralFixPromotionService:
         store: SQLiteHarnessStore,
         breadcrumb_writer: BreadcrumbWriter,
         repository_promotions: RepositoryPromotionService,
+        *,
+        announce: Callable[[str], None] | None = None,
     ) -> None:
         self.store = store
         self.breadcrumb_writer = breadcrumb_writer
         self.repository_promotions = repository_promotions
+        self.announce = announce
 
     def promote_completed_structural_fix(self, task: Task, run_id: str) -> dict[str, object]:
         if str(task.strategy or "") != "sa_structural_fix":
@@ -71,6 +76,7 @@ class StructuralFixPromotionService:
             self._record(task, run_id, result)
             return {"status": "skipped", "reason": "workspace_missing", **self._serialize(result)}
 
+        self._announce("running full local CI before pushing a recovery fix")
         ci_result = self.repository_promotions.run_local_ci(workspace_root)
         result = StructuralFixPromotionResult(
             task_id=task.id,
@@ -80,10 +86,14 @@ class StructuralFixPromotionService:
             ci_passed=ci_result.passed,
             failed_stage=ci_result.failed_stage,
             summary=ci_result.summary,
+            command_summary=tuple(ci_result.command_summary),
             workspace_root=str(workspace_root),
             logs=dict(ci_result.logs),
         )
         if not ci_result.passed:
+            self._announce(
+                f"local CI failed during the {ci_result.failed_stage} stage; recovery changes were kept local"
+            )
             self._record_failure_action(task, ci_result, reason="structural_fix_ci_failed")
             self._record(task, run_id, result)
             return {"status": "blocked", "reason": "ci_failed", **self._serialize(result)}
@@ -92,14 +102,17 @@ class StructuralFixPromotionService:
             project = self.store.get_project(task.project_id)
             if project is None:
                 raise RuntimeError(f"Unknown project for task {task.id}")
+            self._announce("local CI passed; pushing the recovery fix to main")
             result.commit_sha = self._commit_and_push(project, task, run_id, workspace_root, workspace_details)
             result.push_status = "pushed"
             result.summary = "Local CI parity passed and the structural fix was pushed to main."
+            self._announce(f"recovery fix pushed to main as {result.commit_sha}")
             self._record(task, run_id, result)
             return {"status": "pushed", **self._serialize(result)}
         except Exception as exc:
             result.push_status = f"failed: {exc}"
             result.summary = f"Local CI parity passed, but promotion to main failed: {exc}"
+            self._announce("local CI passed, but push to main failed; recovery changes were kept local")
             self._record_failure_action(task, ci_result, reason="structural_fix_promotion_failed")
             self._record(task, run_id, result)
             return {"status": "blocked", "reason": "push_failed", **self._serialize(result)}
@@ -228,11 +241,13 @@ class StructuralFixPromotionService:
                 "ci_finished_at": payload["ci_finished_at"],
                 "commit_sha": result.commit_sha,
                 "push_status": result.push_status,
+                "command_summary": list(result.command_summary),
             },
             evidence={
                 "ci_passed": result.ci_passed,
                 "failed_stage": result.failed_stage,
                 "summary": result.summary,
+                "command_summary": list(result.command_summary),
                 "logs": result.logs or {},
                 "workspace_root": result.workspace_root,
             },
@@ -257,3 +272,7 @@ class StructuralFixPromotionService:
         payload["ci_started_at"] = result.ci_started_at.isoformat()
         payload["ci_finished_at"] = result.ci_finished_at.isoformat()
         return payload
+
+    def _announce(self, message: str) -> None:
+        if self.announce is not None:
+            self.announce(message)

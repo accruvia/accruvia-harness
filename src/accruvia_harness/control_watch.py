@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Callable
 from urllib.request import urlopen
 
 from .control_breadcrumbs import BreadcrumbWriter
@@ -23,12 +25,26 @@ class ControlWatchService:
         breadcrumb_writer: BreadcrumbWriter,
         *,
         supervisor_control_dir: str | Path,
+        restart_api: Callable[[], dict[str, object] | None] | None = None,
+        restart_harness: Callable[[], dict[str, object] | None] | None = None,
     ) -> None:
         self.store = store
         self.control_plane = control_plane
         self.classifier = classifier
         self.breadcrumb_writer = breadcrumb_writer
         self.supervisor_control_dir = Path(supervisor_control_dir)
+        self.restart_api = restart_api
+        self.restart_harness = restart_harness
+        self.interval_seconds = 60
+        self._last_invoked_at = 0.0
+
+    def observe(self, event: dict[str, object], *, api_url: str | None = None) -> dict[str, object] | None:
+        if str(event.get("type") or "") != "sleeping":
+            return None
+        if time.monotonic() - self._last_invoked_at < self.interval_seconds:
+            return None
+        self._last_invoked_at = time.monotonic()
+        return self.run_once(api_url=api_url)
 
     def run_once(
         self,
@@ -77,8 +93,7 @@ class ControlWatchService:
         lane = self.store.get_control_lane_state("api")
         assert lane is not None
         try:
-            with urlopen(api_url, timeout=5) as response:
-                body = response.read(2000).decode("utf-8", errors="replace")
+            body = self._fetch_api_body(api_url)
             self.store.update_control_lane_state(
                 replace(lane, state=ControlLaneStateValue.RUNNING, reason="api_up", cooldown_until=None, updated_at=datetime.now(UTC))
             )
@@ -88,23 +103,43 @@ class ControlWatchService:
             return {"ok": True, "url": api_url, "body_preview": body[:200]}
         except Exception as exc:
             classification = self.classifier.classify(str(exc))
-            self.store.update_control_lane_state(
-                replace(
-                    lane,
-                    state=ControlLaneStateValue.PAUSED,
-                    reason=classification.classification,
-                    cooldown_until=None,
-                    updated_at=datetime.now(UTC),
+            if "connection refused" in str(exc).lower():
+                classification = replace(classification, classification="system_failure", retry_recommended=True, cooldown_seconds=0)
+            restarted = False
+            if self.restart_api is not None and self._restart_allowed("api", classification.classification):
+                restarted = bool(self.restart_api())
+                if restarted:
+                    body = self._await_api_recovery(api_url)
+                    if body is not None:
+                        self._record_restart("api", classification.classification, "restarted")
+                        self.store.update_control_lane_state(
+                            replace(lane, state=ControlLaneStateValue.RUNNING, reason="api_restarted", cooldown_until=None, updated_at=datetime.now(UTC))
+                        )
+                        self.store.create_control_event(
+                            self._control_event("api_up", "lane", "api", {"url": api_url, "body_preview": body[:200], "restarted": True})
+                        )
+                        return {"ok": True, "url": api_url, "body_preview": body[:200], "restarted": True}
+                    self._record_restart("api", classification.classification, "restart_failed")
+            if classification.classification in {"provider_rate_limit", "provider_outage"} and classification.cooldown_seconds > 0:
+                self.control_plane.enter_cooldown("api", reason=classification.classification, seconds=classification.cooldown_seconds)
+            else:
+                self.store.update_control_lane_state(
+                    replace(
+                        lane,
+                        state=ControlLaneStateValue.PAUSED,
+                        reason=classification.classification,
+                        cooldown_until=None,
+                        updated_at=datetime.now(UTC),
+                    )
                 )
-            )
-            self.store.create_control_event(
-                self._control_event(
-                    "api_down",
-                    "lane",
-                    "api",
-                    {"url": api_url, "class": classification.classification, "message": str(exc)},
+                self.store.create_control_event(
+                    self._control_event(
+                        "api_down",
+                        "lane",
+                        "api",
+                        {"url": api_url, "class": classification.classification, "message": str(exc)},
+                    )
                 )
-            )
             self.breadcrumb_writer.write_bundle(
                 entity_type="lane",
                 entity_id="api",
@@ -133,6 +168,20 @@ class ControlWatchService:
             )
             return {"ok": True, "supervisor_count": len(running), "supervisors": running}
 
+        if self.restart_harness is not None and self._restart_allowed("harness", "no_supervisor"):
+            restarted = self.restart_harness()
+            if restarted:
+                running = self._await_supervisor_recovery()
+                self._record_restart("harness", "no_supervisor", "restarted" if running else "restart_failed")
+                if running:
+                    self.store.update_control_lane_state(
+                        replace(lane, state=ControlLaneStateValue.RUNNING, reason="supervisor_restarted", cooldown_until=None, updated_at=datetime.now(UTC))
+                    )
+                    self.store.create_control_event(
+                        self._control_event("harness_up", "lane", "harness", {"supervisor_count": len(running), "restarted": True})
+                    )
+                    return {"ok": True, "supervisor_count": len(running), "supervisors": running, "restarted": True}
+
         self.store.update_control_lane_state(
             replace(lane, state=ControlLaneStateValue.PAUSED, reason="no_supervisor", cooldown_until=None, updated_at=datetime.now(UTC))
         )
@@ -149,6 +198,46 @@ class ControlWatchService:
             summary="Harness watch detected no running supervisor processes.",
         )
         return {"ok": False, "supervisor_count": 0, "supervisors": []}
+
+    def _fetch_api_body(self, api_url: str) -> str:
+        with urlopen(api_url, timeout=5) as response:
+            return response.read(2000).decode("utf-8", errors="replace")
+
+    def _await_api_recovery(self, api_url: str, *, timeout_seconds: float = 10.0) -> str | None:
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            try:
+                return self._fetch_api_body(api_url)
+            except Exception:
+                time.sleep(0.25)
+        return None
+
+    def _await_supervisor_recovery(self, *, timeout_seconds: float = 10.0) -> list[dict[str, object]]:
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            running = self._running_supervisors()
+            if running:
+                return running
+            time.sleep(0.25)
+        return []
+
+    def _restart_allowed(self, target_id: str, reason: str) -> bool:
+        recent = self.store.list_control_recovery_actions(target_type="lane", target_id=target_id)
+        now = datetime.now(UTC)
+        for action in recent[:5]:
+            if action.action_type != "restart":
+                continue
+            if action.reason != reason:
+                continue
+            age_seconds = (now - action.created_at).total_seconds()
+            if age_seconds < 60:
+                return False
+        return True
+
+    def _record_restart(self, target_id: str, reason: str, result: str) -> None:
+        self.store.create_control_recovery_action(
+            self._recovery_action("restart", "lane", target_id, reason, result)
+        )
 
     def find_stalled_objectives(self, *, hours: float = 6.0) -> list[dict[str, object]]:
         stalled: list[dict[str, object]] = []
@@ -214,4 +303,16 @@ class ControlWatchService:
             producer="control-watch",
             payload=payload,
             idempotency_key=new_id("event_key"),
+        )
+
+    def _recovery_action(self, action_type: str, target_type: str, target_id: str, reason: str, result: str):
+        from .domain import ControlRecoveryAction
+
+        return ControlRecoveryAction(
+            id=new_id("recovery"),
+            action_type=action_type,
+            target_type=target_type,
+            target_id=target_id,
+            reason=reason,
+            result=result,
         )

@@ -36,6 +36,10 @@ def _coerce_subprocess_output(value: str | bytes | None) -> str:
     return value
 
 
+def _is_bounded_repair_strategy(strategy: str | None) -> bool:
+    return str(strategy or "") in {"sa_structural_fix", "sa_watch_direct_repair"}
+
+
 def _prepared_project_workspace(run_dir: Path) -> Path:
     workspace = run_dir / "workspace"
     return workspace if workspace.exists() else run_dir
@@ -217,7 +221,27 @@ class CommandWorker:
             return self.command.strip() or self.backend_name
         return " ".join(tokens[:6])
 
-    def _latest_artifact_details(self, run_dir: Path) -> tuple[str | None, float | None]:
+    def _artifact_kind(self, path: Path) -> str:
+        name = path.name
+        if name == "worker.heartbeat.json":
+            return "heartbeat"
+        if name == "phase.txt":
+            return "phase"
+        if name == "plan.txt":
+            return "plan"
+        if name == "report.json":
+            return "report"
+        if name == "compile_output.txt":
+            return "compile-output"
+        if name == "test_output.txt":
+            return "test-output"
+        if name.endswith(".stdout.txt"):
+            return "stdout"
+        if name.endswith(".stderr.txt"):
+            return "stderr"
+        return "artifact"
+
+    def _latest_artifact_details(self, run_dir: Path) -> tuple[str | None, str | None, str | None, float | None]:
         latest_path: Path | None = None
         latest_mtime = 0.0
         for child in run_dir.iterdir():
@@ -228,19 +252,19 @@ class CommandWorker:
                 latest_mtime = stat.st_mtime
                 latest_path = child
         if latest_path is None:
-            return None, None
+            return None, None, None, None
         age_seconds = max(0.0, time.time() - latest_mtime)
-        return latest_path.name, age_seconds
+        return latest_path.name, str(latest_path), self._artifact_kind(latest_path), age_seconds
 
     def _effective_timeout_seconds(self, task: Task, configured_timeout_seconds: int | None) -> int | None:
-        if str(task.strategy or "") != "sa_structural_fix":
+        if not _is_bounded_repair_strategy(task.strategy):
             return configured_timeout_seconds
         if configured_timeout_seconds is None:
             return STRUCTURAL_FIX_MAX_RUN_SECONDS
         return min(configured_timeout_seconds, STRUCTURAL_FIX_MAX_RUN_SECONDS)
 
     def _effective_stale_after_seconds(self, task: Task) -> float:
-        if str(task.strategy or "") != "sa_structural_fix":
+        if not _is_bounded_repair_strategy(task.strategy):
             return self.stale_after_seconds
         return min(self.stale_after_seconds, float(STRUCTURAL_FIX_STALE_PROGRESS_SECONDS))
 
@@ -326,7 +350,12 @@ class CommandWorker:
                         stderr=stderr_text,
                     )
                 if self.status_interval_seconds > 0 and now - last_status_at >= self.status_interval_seconds:
-                    latest_artifact, latest_artifact_age_seconds = self._latest_artifact_details(run_dir)
+                    (
+                        latest_artifact,
+                        latest_artifact_path,
+                        latest_artifact_kind,
+                        latest_artifact_age_seconds,
+                    ) = self._latest_artifact_details(run_dir)
                     stale = bool(
                         latest_artifact_age_seconds is not None
                         and latest_artifact_age_seconds >= effective_stale_after_seconds
@@ -345,6 +374,8 @@ class CommandWorker:
                             "pid": process.pid,
                             "elapsed_seconds": now - started_at,
                             "latest_artifact": latest_artifact,
+                            "latest_artifact_path": latest_artifact_path,
+                            "latest_artifact_kind": latest_artifact_kind,
                             "latest_artifact_age_seconds": latest_artifact_age_seconds,
                             "stale": stale,
                             "worker_phase": worker_phase,

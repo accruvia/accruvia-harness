@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Callable
 
 from .control_breadcrumbs import BreadcrumbWriter
 from .control_classifier import FailureClassifier
@@ -18,15 +17,11 @@ class ControlRuntimeObserver:
         control_plane: ControlPlane,
         classifier: FailureClassifier,
         breadcrumb_writer: BreadcrumbWriter,
-        request_stack_restart: Callable[[dict[str, object]], None] | None = None,
-        structural_fix_promotion: Callable[[object, str], dict[str, object]] | None = None,
     ) -> None:
         self.store = store
         self.control_plane = control_plane
         self.classifier = classifier
         self.breadcrumb_writer = breadcrumb_writer
-        self.request_stack_restart = request_stack_restart
-        self.structural_fix_promotion = structural_fix_promotion
 
     def handle(self, event: dict[str, object]) -> None:
         event_type = str(event.get("type") or "")
@@ -67,27 +62,8 @@ class ControlRuntimeObserver:
             task_id = str(event.get("task_id") or "")
             completed_task = self.store.get_task(task_id) if task_id else None
             if str(event.get("status") or "") == "completed":
-                if completed_task is not None and completed_task.strategy == "sa_structural_fix":
-                    if self.structural_fix_promotion is not None and run_id:
-                        self.structural_fix_promotion(completed_task, run_id)
-                    # Structural repair tasks are the only permitted escape hatch
-                    # from a paused worker lane. Normal work resumes only after a
-                    # bounded architectural fix completes successfully. The
-                    # outer control loop must then restart the mutable app
-                    # processes so the newly-written code is what runs next.
-                    if self.request_stack_restart is not None:
-                        self.request_stack_restart(
-                            {
-                                "reason": "sa_structural_fix_completed",
-                                "task_id": completed_task.id,
-                                "objective_id": completed_task.objective_id,
-                            }
-                        )
-                    self.control_plane.resume_lane("worker", reason="sa_structural_fix_completed")
-                    self.control_plane.mark_healthy(reason="sa_structural_fix_completed")
-                else:
-                    self.control_plane.mark_healthy(reason="task_completed")
-                    self._enforce_no_progress(completed_task)
+                self.control_plane.mark_healthy(reason="task_completed")
+                self._enforce_no_progress(completed_task)
             return
         if event_type == "failure_diagnostic":
             self._record_failure(event)
@@ -104,6 +80,8 @@ class ControlRuntimeObserver:
             str(event.get("failure_category") or ""),
             str(event.get("failure_message") or ""),
             str(event.get("analysis_summary") or ""),
+            str(event.get("decision_rationale") or ""),
+            str(event.get("worker_outcome") or ""),
         ]
         classification = self.classifier.classify("\n".join(item for item in evidence_lines if item))
         bundle_dir = self.breadcrumb_writer.write_bundle(
@@ -176,6 +154,9 @@ class ControlRuntimeObserver:
     def _apply_classification_policy(self, classification: str, cooldown_seconds: int) -> None:
         if classification in {"provider_rate_limit", "provider_outage"} and cooldown_seconds > 0:
             self.control_plane.enter_cooldown("worker", reason=classification, seconds=cooldown_seconds)
+            return
+        if classification == "artifact_contract_failure":
+            self._set_worker_lane(ControlLaneStateValue.RUNNING, classification)
             return
         if classification == "credit_exhaustion":
             self.control_plane.pause_lane("worker", reason=classification)

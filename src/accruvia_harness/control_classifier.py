@@ -47,8 +47,18 @@ class FailureClassifier:
             "missing required artifact" in haystack
             or "missing required artifacts" in haystack
             or "validation_evidence_missing" in haystack
-            or "retry budget exhausted" in haystack
+            or "artifacts were insufficient" in haystack
+            or "required artifact" in haystack
+            or "objective_review_packet" in haystack
         ):
+            return FailureClassification(
+                classification="artifact_contract_failure",
+                confidence=0.9,
+                retry_recommended=True,
+                cooldown_seconds=0,
+                evidence=evidence_list,
+            )
+        if "retry budget exhausted" in haystack:
             return FailureClassification(
                 classification="system_failure",
                 confidence=0.8,

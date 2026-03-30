@@ -142,11 +142,11 @@ class FailureClassifierTests(unittest.TestCase):
         self.assertEqual("timeout", result.classification)
         self.assertTrue(result.retry_recommended)
 
-    def test_classifies_missing_required_artifacts_as_system_failure(self) -> None:
+    def test_classifies_missing_required_artifacts_as_artifact_contract_failure(self) -> None:
         result = FailureClassifier().classify("Run is missing required artifacts. Retry budget exhausted.")
 
-        self.assertEqual("system_failure", result.classification)
-        self.assertFalse(result.retry_recommended)
+        self.assertEqual("artifact_contract_failure", result.classification)
+        self.assertTrue(result.retry_recommended)
 
 
 class BreadcrumbWriterTests(unittest.TestCase):
@@ -524,12 +524,8 @@ class ControlRuntimeObserverTests(unittest.TestCase):
         self.assertTrue(hasattr(ctx.engine, "queue"))
         self.assertIsNotNone(ctx.sa_watch.structural_progress_callback)
         self.assertIsNotNone(ctx.sa_watch.restart_stack)
-        try:
-            import fastapi  # noqa: F401
-        except ModuleNotFoundError:
-            self.assertIsNone(ctx.engine.queue.post_task_callback)
-        else:
-            self.assertIsNotNone(ctx.engine.queue.post_task_callback)
+        self.assertIsNotNone(ctx.engine.queue.post_task_callback)
+        self.assertIsNotNone(ctx.workflow_data_service)
 
     def test_task_started_marks_worker_lane_running(self) -> None:
         self.observer.handle({"type": "task_started", "task_id": "task_123"})
@@ -562,6 +558,34 @@ class ControlRuntimeObserverTests(unittest.TestCase):
         self.assertEqual("cooldown", lane.state.value if lane else None)
         self.assertEqual("degraded", status["global_state"])
         self.assertEqual("worker", status["cooldowns"][0]["lane"])
+
+    def test_artifact_contract_failure_keeps_worker_lane_running(self) -> None:
+        self.observer.handle({"type": "run_created", "task_id": "task_123", "run_id": "run_123", "attempt": 1})
+        self.observer.handle(
+            {
+                "type": "failure_diagnostic",
+                "task_id": "task_123",
+                "run_id": "run_123",
+                "attempt": 1,
+                "run_status": "failed",
+                "task_status": "pending",
+                "failure_category": "validation_failure",
+                "failure_message": "Expected objective_review_packet artifact was not persisted.",
+                "analysis_summary": "Run is missing required artifacts.",
+                "decision_rationale": "Artifacts were insufficient; retry within bounded task budget.",
+                "worker_outcome": "failed",
+            }
+        )
+
+        worker_run = self.store.get_control_worker_run("run_123")
+        lane = self.store.get_control_lane_state("worker")
+        status = self.control_plane.status()
+        escalations = self.store.list_control_events(event_type="human_escalation_required")
+
+        self.assertEqual("artifact_contract_failure", worker_run.classification if worker_run else None)
+        self.assertEqual("running", lane.state.value if lane else None)
+        self.assertEqual("healthy", status["global_state"])
+        self.assertFalse(escalations)
 
     def test_no_progress_pauses_worker_lane_and_records_escalation(self) -> None:
         tasks = TaskService(self.store)
@@ -1319,6 +1343,99 @@ class SAWatchServiceTests(unittest.TestCase):
         self.assertIsNone(created)
         actions = self.store.list_control_recovery_actions()
         self.assertEqual("escalate", actions[0].action_type)
+
+    def test_sa_watch_ignores_repeated_artifact_contract_failures(self) -> None:
+        project = Project(id=new_id("project"), name="watch-project", description="watch")
+        self.store.create_project(project)
+        objective = Objective(
+            id=new_id("objective"),
+            project_id=project.id,
+            title="Evidence objective",
+            summary="needs evidence artifact",
+            status=ObjectiveStatus.PAUSED,
+        )
+        self.store.create_objective(objective)
+        task = TaskService(self.store).create_task_with_policy(
+            project_id=project.id,
+            objective_id=objective.id,
+            title="Retrying evidence task",
+            objective="Keep producing the required packet artifact.",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="default",
+            max_attempts=4,
+        )
+        self.store.upsert_control_worker_run(
+            ControlWorkerRun(id="run_1", task_id=task.id, status="failed", classification="artifact_contract_failure")
+        )
+        self.store.upsert_control_worker_run(
+            ControlWorkerRun(id="run_2", task_id=task.id, status="failed", classification="artifact_contract_failure")
+        )
+        service = SAWatchService(
+            self.store,
+            self.control_plane,
+            LLMRouter(
+                "codex",
+                {
+                    "codex": FakeExecutor(
+                        '{"action":"record_escalation","reason":"No intervention needed.","confidence":0.8,"target_lane":"worker","escalate":false}'
+                    )
+                },
+            ),
+            self.workspace_root,
+            interval_seconds=0,
+        )
+
+        packet = service._build_packet()  # type: ignore[attr-defined]
+        repeated = [signal for signal in packet["continuity_signals"] if signal.get("kind") == "repeated_failure"]
+
+        self.assertEqual([], repeated)
+
+    def test_sa_watch_packet_uses_local_time_context(self) -> None:
+        project = Project(id=new_id("project"), name="watch-project", description="watch")
+        self.store.create_project(project)
+        task = TaskService(self.store).create_task_with_policy(
+            project_id=project.id,
+            objective_id=None,
+            title="Time task",
+            objective="time",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="default",
+        )
+        self.store.upsert_control_worker_run(
+            ControlWorkerRun(id="run_time", task_id=task.id, status="started", classification=None)
+        )
+        self.store.create_control_event(
+            ControlEvent(
+                id=new_id("control_event"),
+                event_type="harness_up",
+                entity_type="lane",
+                entity_id="harness",
+                producer="test",
+                payload={"supervisor_count": 1},
+                idempotency_key=new_id("event_key"),
+            )
+        )
+        service = SAWatchService(
+            self.store,
+            self.control_plane,
+            LLMRouter("codex", {"codex": FakeExecutor('{"action":"none","reason":"noop","confidence":0.5,"target_lane":null,"target_task_id":null,"task_title":null,"task_objective":null,"escalate":false}')}),
+            self.workspace_root,
+            interval_seconds=0,
+        )
+
+        packet = service._build_packet()  # type: ignore[attr-defined]
+
+        self.assertEqual("All timestamps in this packet are local time.", packet["time_context"]["note"])
+        self.assertIn(" ", packet["time_context"]["now_local"])
+        self.assertNotIn("+00:00", packet["recent_events"][0]["created_at"])
 
     def test_sa_watch_keeps_lane_paused_when_model_response_is_unusable(self) -> None:
         project = Project(id=new_id("project"), name="watch-project", description="watch")
@@ -2652,12 +2769,14 @@ class SuperviseProgressTextTests(unittest.TestCase):
             {
                 "strategy": "sa_structural_fix",
                 "latest_artifact": "plan.txt",
+                "latest_artifact_kind": "plan",
+                "latest_artifact_path": "/tmp/run/plan.txt",
                 "latest_artifact_age_seconds": 359,
                 "stale": False,
             }
         )
         self.assertEqual(
-            "recovery run active; no new durable artifacts for 05:59 (latest plan.txt)",
+            "recovery run active; no new durable artifacts for 05:59 (latest plan plan.txt @ /tmp/run/plan.txt)",
             text,
         )
 
@@ -2666,12 +2785,14 @@ class SuperviseProgressTextTests(unittest.TestCase):
             {
                 "strategy": "sa_structural_fix",
                 "latest_artifact": "plan.txt",
+                "latest_artifact_kind": "plan",
+                "latest_artifact_path": "/tmp/run/plan.txt",
                 "latest_artifact_age_seconds": 1200,
                 "stale": True,
             }
         )
         self.assertEqual(
-            "recovery run likely stuck; no new durable artifacts for 20:00 (latest plan.txt)",
+            "recovery run likely stuck; no new durable artifacts for 20:00 (latest plan plan.txt @ /tmp/run/plan.txt)",
             text,
         )
 

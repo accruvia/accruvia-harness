@@ -81,37 +81,59 @@ class RepositoryPromotionService:
                 failed_stage = stage
                 raise RuntimeError(command)
 
-        try:
-            _run_step("setup_venv", "setup", "python -m venv .venv")
-            _run_step("setup_upgrade_pip", "setup", ". .venv/bin/activate && python -m pip install --upgrade pip")
-            _run_step("setup_install_editable", "setup", ". .venv/bin/activate && pip install -e .")
-            _run_step("fast_verify_import_safety", "fast", ". .venv/bin/activate && make verify-test-import-safety")
-            _run_step("fast_tests", "fast", ". .venv/bin/activate && make test-fast")
-            _run_step("temporal_install", "setup", ". .venv/bin/activate && pip install -e '.[temporal]'")
-            _run_step("temporal_docker_logout", "temporal", "docker logout || true")
-            _run_step("temporal_docker_logout_docker_io", "temporal", "docker logout docker.io || true")
-            _run_step("temporal_up", "temporal", "docker compose -f docker-compose.temporal.yml up -d")
-            _run_step(
+        steps = (
+            ("fast_setup_venv", "setup", "rm -rf .venv && python -m venv .venv"),
+            (
+                "fast_setup_upgrade_pip",
+                "setup",
+                ". .venv/bin/activate && python -m pip install --upgrade pip",
+            ),
+            ("fast_install_editable", "setup", ". .venv/bin/activate && pip install -e ."),
+            (
+                "fast_verify_import_safety",
+                "fast",
+                ". .venv/bin/activate && make verify-test-import-safety",
+            ),
+            ("fast_tests", "fast", ". .venv/bin/activate && make test-fast"),
+            ("temporal_setup_venv", "setup", "rm -rf .venv && python -m venv .venv"),
+            (
+                "temporal_setup_upgrade_pip",
+                "setup",
+                ". .venv/bin/activate && python -m pip install --upgrade pip",
+            ),
+            ("temporal_install", "setup", ". .venv/bin/activate && pip install -e '.[temporal]'"),
+            ("temporal_docker_logout", "temporal", "docker logout || true"),
+            ("temporal_docker_logout_docker_io", "temporal", "docker logout docker.io || true"),
+            ("temporal_up", "temporal", "docker compose -f docker-compose.temporal.yml up -d"),
+            (
                 "temporal_wait",
                 "temporal",
                 "for i in $(seq 1 30); do "
-                "if python -c \"import socket, sys; "
-                "conn = None; "
+                "if python -c \""
+                "import socket\n"
                 "try:\n"
-                "    conn = socket.create_connection(('127.0.0.1', 7233), timeout=1)\n"
+                "    with socket.create_connection(('127.0.0.1', 7233), timeout=1):\n"
+                "        raise SystemExit(0)\n"
                 "except OSError:\n"
-                "    sys.exit(1)\n"
-                "else:\n"
-                "    conn.close()\n"
-                "    sys.exit(0)\"; "
+                "    raise SystemExit(1)\n"
+                "\"; "
                 "then exit 0; fi; "
                 "sleep 1; "
                 "done; "
                 "echo 'Temporal did not become ready in time' >&2; "
                 "exit 1",
-            )
-            _run_step("temporal_verify_import_safety", "temporal", ". .venv/bin/activate && make verify-test-import-safety")
-            _run_step("temporal_tests", "temporal", ". .venv/bin/activate && make test-temporal")
+            ),
+            (
+                "temporal_verify_import_safety",
+                "temporal",
+                ". .venv/bin/activate && make verify-test-import-safety",
+            ),
+            ("temporal_tests", "temporal", ". .venv/bin/activate && make test-temporal"),
+        )
+
+        try:
+            for name, stage, command in steps:
+                _run_step(name, stage, command)
             finished_at = datetime.now(UTC)
             return LocalCIResult(
                 passed=True,

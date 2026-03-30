@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime
 import os
 from pathlib import Path
 import signal
@@ -26,7 +27,6 @@ from ..interrogation import HarnessQueryService, InterrogationService
 from ..llm import build_llm_router
 from ..onboarding import detect_llm_command_candidates, probe_llm_command, prompt_text
 from ..runtime import WorkflowRuntime, build_runtime
-from ..services.structural_fix_promotion_service import StructuralFixPromotionService
 from ..store import SQLiteHarnessStore
 from ..telemetry import TelemetrySink
 
@@ -95,6 +95,10 @@ def emit(payload: Any) -> None:
     print("\n".join(_render_text(payload)))
 
 
+def _recovery_status_line(text: str) -> str:
+    return f"{datetime.now().astimezone().strftime('%H:%M:%S')} recovery {text}"
+
+
 @dataclass(slots=True)
 class CLIContext:
     config: HarnessConfig
@@ -112,6 +116,7 @@ class CLIContext:
     control_watch: ControlWatchService
     control_runtime: ControlRuntimeObserver
     sa_watch: SAWatchService
+    workflow_data_service: Any | None = None
 
 
 def _control_plane_runtime_dir(config: HarnessConfig) -> Path:
@@ -591,11 +596,6 @@ def build_context(config: HarnessConfig) -> CLIContext:
     failure_classifier = FailureClassifier()
     breadcrumb_writer = BreadcrumbWriter(store, config.workspace_root)
     engine = build_engine_from_config(config, store=store, telemetry=telemetry)
-    structural_fix_promotions = StructuralFixPromotionService(
-        store=store,
-        breadcrumb_writer=breadcrumb_writer,
-        repository_promotions=engine.repository_promotions,
-    )
     query_service = HarnessQueryService(store, telemetry=telemetry)
     ctx = CLIContext(
         config=config,
@@ -636,10 +636,6 @@ def build_context(config: HarnessConfig) -> CLIContext:
             control_plane,
             failure_classifier,
             breadcrumb_writer,
-            request_stack_restart=lambda payload: record_stack_restart_request(config, payload),
-            structural_fix_promotion=lambda task, run_id: structural_fix_promotions.promote_completed_structural_fix(
-                task, run_id
-            ),
         ),
         sa_watch=SAWatchService(
             store,
@@ -663,6 +659,7 @@ def build_context(config: HarnessConfig) -> CLIContext:
 
         if HarnessUIDataService is not None:
             data_service = HarnessUIDataService(ctx)
+            ctx.workflow_data_service = data_service
             ctx.engine.queue.post_task_callback = data_service.reconcile_task_workflow
             ctx.sa_watch.post_repair_callback = data_service.reconcile_task_workflow
         ctx.sa_watch.structural_progress_callback = ctx.control_runtime.handle
