@@ -39,6 +39,8 @@ _SUPERVISOR_DESIRED_STATE_FILENAME = "desired_supervisor.json"
 _STACK_RESTART_REQUEST_FILENAME = "restart_stack_request.json"
 _SA_WATCH_RUNTIME_STATE_FILENAME = "sa_watch_runtime_state.json"
 _SA_WATCH_DESIRED_STATE_FILENAME = "desired_sa_watch.json"
+_SA_WATCH_LAUNCH_STATE_FILENAME = "sa_watch_launch_state.json"
+_SA_WATCH_LAUNCH_STALE_SECONDS = 30.0
 
 
 def set_output_mode(*, json_enabled: bool) -> None:
@@ -183,6 +185,10 @@ def desired_sa_watch_state_path(config: HarnessConfig) -> Path:
     return _control_plane_runtime_dir(config) / _SA_WATCH_DESIRED_STATE_FILENAME
 
 
+def sa_watch_launch_state_path(config: HarnessConfig) -> Path:
+    return _control_plane_runtime_dir(config) / _SA_WATCH_LAUNCH_STATE_FILENAME
+
+
 def record_desired_ui_state(
     config: HarnessConfig,
     *,
@@ -268,6 +274,14 @@ def clear_sa_watch_runtime_state(config: HarnessConfig) -> None:
         return
 
 
+def clear_sa_watch_launch_state(config: HarnessConfig) -> None:
+    path = sa_watch_launch_state_path(config)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+
+
 def record_desired_sa_watch_state(config: HarnessConfig, *, interval_seconds: float) -> None:
     _write_json_file(
         desired_sa_watch_state_path(config),
@@ -292,6 +306,48 @@ def clear_desired_sa_watch_state(config: HarnessConfig) -> None:
 
 def read_sa_watch_runtime_state(config: HarnessConfig) -> dict[str, Any] | None:
     return _read_json_file(sa_watch_runtime_state_path(config))
+
+
+def read_sa_watch_launch_state(config: HarnessConfig) -> dict[str, Any] | None:
+    return _read_json_file(sa_watch_launch_state_path(config))
+
+
+def _sa_watch_launch_is_active(payload: dict[str, Any] | None, *, stale_after_seconds: float) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    created_at = float(payload.get("created_at") or 0.0)
+    age_seconds = max(time.time() - created_at, 0.0) if created_at > 0 else stale_after_seconds + 1.0
+    child_pid = int(payload.get("pid") or 0)
+    launcher_pid = int(payload.get("launcher_pid") or 0)
+    if child_pid > 0 and _pid_is_alive(child_pid):
+        return True
+    if launcher_pid > 0 and _pid_is_alive(launcher_pid) and age_seconds <= stale_after_seconds:
+        return True
+    return False
+
+
+def _acquire_sa_watch_launch_state(config: HarnessConfig, *, interval_seconds: float) -> dict[str, Any] | None:
+    path = sa_watch_launch_state_path(config)
+    payload = {
+        "launcher_pid": os.getpid(),
+        "pid": 0,
+        "interval_seconds": interval_seconds,
+        "created_at": time.time(),
+    }
+    for _ in range(2):
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            existing = read_sa_watch_launch_state(config)
+            if _sa_watch_launch_is_active(existing, stale_after_seconds=_SA_WATCH_LAUNCH_STALE_SECONDS):
+                return None
+            clear_sa_watch_launch_state(config)
+            continue
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, indent=2, sort_keys=True))
+        return payload
+    return None
 
 
 def record_desired_supervisor_state(
@@ -505,11 +561,19 @@ def restart_control_loop_process(config: HarnessConfig, args) -> dict[str, Any]:
     return {"pid": process.pid, "command": command, "log_path": str(log_path)}
 
 
-def build_sa_watch_restart_command(*, interval_seconds: float) -> list[str]:
+def build_sa_watch_restart_command(config: HarnessConfig, *, interval_seconds: float) -> list[str]:
     return [
         sys.executable,
         "-m",
         "accruvia_harness.cli",
+        "--db",
+        str(config.db_path),
+        "--workspace",
+        str(config.workspace_root),
+        "--log-path",
+        str(config.log_path),
+        "--config-file",
+        str(default_config_path(config.db_path.parent)),
         "sa-watch-loop",
         "--interval-seconds",
         str(interval_seconds),
@@ -534,17 +598,38 @@ def start_sa_watch_process(
             "stream_output": stream_output,
             "log_path": str(log_path),
         }
+    launch_state = read_sa_watch_launch_state(config)
+    if _sa_watch_launch_is_active(launch_state, stale_after_seconds=_SA_WATCH_LAUNCH_STALE_SECONDS) and not force:
+        return {
+            "pid": int((launch_state or {}).get("pid") or 0),
+            "existing_launch": True,
+            "interval_seconds": float((launch_state or {}).get("interval_seconds") or interval_seconds),
+            "stream_output": stream_output,
+            "log_path": str(log_path),
+        }
     if pid > 0:
         _terminate_pid(pid)
+    if force:
+        clear_sa_watch_launch_state(config)
+    launch_payload = _acquire_sa_watch_launch_state(config, interval_seconds=interval_seconds)
+    if launch_payload is None and not force:
+        refreshed = read_sa_watch_launch_state(config) or {}
+        return {
+            "pid": int(refreshed.get("pid") or 0),
+            "existing_launch": True,
+            "interval_seconds": float(refreshed.get("interval_seconds") or interval_seconds),
+            "stream_output": stream_output,
+            "log_path": str(log_path),
+        }
     record_desired_sa_watch_state(config, interval_seconds=interval_seconds)
-    command = build_sa_watch_restart_command(interval_seconds=interval_seconds)
+    command = build_sa_watch_restart_command(config, interval_seconds=interval_seconds)
     if stream_output:
-        process = subprocess.Popen(
-            command,
-            cwd=str(Path.cwd()),
-            env=os.environ.copy(),
-            start_new_session=True,
-        )
+            process = subprocess.Popen(
+                command,
+                cwd=str(Path.cwd()),
+                env=os.environ.copy(),
+                start_new_session=True,
+            )
     else:
         with log_path.open("ab") as handle:
             process = subprocess.Popen(
@@ -555,6 +640,15 @@ def start_sa_watch_process(
                 stderr=handle,
                 start_new_session=True,
             )
+    _write_json_file(
+        sa_watch_launch_state_path(config),
+        {
+            "launcher_pid": int((launch_payload or {}).get("launcher_pid") or os.getpid()),
+            "pid": process.pid,
+            "interval_seconds": interval_seconds,
+            "created_at": float((launch_payload or {}).get("created_at") or time.time()),
+        },
+    )
     return {
         "pid": process.pid,
         "command": command,
@@ -567,11 +661,17 @@ def start_sa_watch_process(
 def stop_sa_watch_process(config: HarnessConfig) -> dict[str, Any]:
     runtime_state = read_sa_watch_runtime_state(config) or {}
     pid = int(runtime_state.get("pid") or 0)
+    launch_state = read_sa_watch_launch_state(config) or {}
+    launch_pid = int(launch_state.get("pid") or 0)
     if pid > 0:
         _terminate_pid(pid)
+    elif launch_pid > 0:
+        _terminate_pid(launch_pid)
     clear_sa_watch_runtime_state(config)
+    clear_sa_watch_launch_state(config)
     clear_desired_sa_watch_state(config)
-    return {"stopped": pid > 0, "pid": pid if pid > 0 else None}
+    effective_pid = pid if pid > 0 else launch_pid
+    return {"stopped": effective_pid > 0, "pid": effective_pid if effective_pid > 0 else None}
 
 
 def list_desired_supervisors(config: HarnessConfig) -> list[dict[str, Any]]:

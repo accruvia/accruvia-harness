@@ -83,6 +83,11 @@ If a merge conflict is detected, the harness records it and creates a bounded re
 aggressively or trying to force the merge.
 When that remediation task succeeds, the harness updates the existing review branch in place rather than opening a second PR.
 
+`sa-watch` is intentionally independent from the main `supervise` loop. It runs as a separate sidecar so it can still
+intervene when the primary supervisor is wedged and kill or repair stuck pipeline work. That independence is deliberate,
+but the runtime still enforces single-instance ownership so repeated supervisor restarts do not accumulate orphaned
+`sa-watch` loops.
+
 ## Quick Start
 
 Fastest local path:

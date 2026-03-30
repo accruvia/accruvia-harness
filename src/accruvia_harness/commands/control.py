@@ -8,6 +8,7 @@ from ..domain import ControlRecoveryAction, new_id
 from .common import (
     CLIContext,
     clear_sa_watch_runtime_state,
+    clear_sa_watch_launch_state,
     clear_stack_restart_request,
     desired_api_url,
     record_desired_sa_watch_state,
@@ -147,6 +148,13 @@ def handle_control_command(args, ctx: CLIContext) -> bool:
         signal.signal(signal.SIGTERM, _request_stop)
         if read_desired_sa_watch_state(ctx.config) is None:
             record_desired_sa_watch_state(ctx.config, interval_seconds=args.interval_seconds)
+        update_sa_watch_runtime_state(
+            ctx.config,
+            interval_seconds=args.interval_seconds,
+            mode="starting",
+            last_reason="booting",
+        )
+        clear_sa_watch_launch_state(ctx.config)
         print(_sa_watch_line(f"started; interval={args.interval_seconds:.1f}s"), flush=True)
         latest: dict[str, object] = {"mode": "starting"}
         iteration = 0

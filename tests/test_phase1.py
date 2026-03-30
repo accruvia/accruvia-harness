@@ -5,12 +5,20 @@ import io
 import multiprocessing
 import os
 import tempfile
+import time
 import unittest
 from unittest import mock
 from pathlib import Path
 
 from accruvia_harness.config import HarnessConfig
 from accruvia_harness.commands.core import _build_supervise_restart_command, _emit_supervise_progress, _redact_command
+from accruvia_harness.commands.common import (
+    build_sa_watch_restart_command,
+    read_sa_watch_launch_state,
+    sa_watch_launch_state_path,
+    start_sa_watch_process,
+    stop_sa_watch_process,
+)
 from accruvia_harness.cli_parser import build_parser
 from accruvia_harness.dev_import_safety import verify_repo_import_path
 from accruvia_harness.logging_utils import HarnessLogger, classify_error
@@ -214,6 +222,94 @@ class Phase1Tests(unittest.TestCase):
         command = _build_supervise_restart_command({"watch": False})
 
         self.assertIn("--one-shot", command)
+
+    def test_start_sa_watch_process_records_launch_state_before_child_boots(self) -> None:
+        config = HarnessConfig.from_env(
+            db_path=self.base / "harness.db",
+            workspace_root=self.base / "workspace",
+            log_path=self.base / "logs" / "harness.jsonl",
+        )
+        fake_process = mock.Mock(pid=43210)
+        with mock.patch("accruvia_harness.commands.common.subprocess.Popen", return_value=fake_process):
+            result = start_sa_watch_process(config, interval_seconds=123.0)
+
+        launch = read_sa_watch_launch_state(config)
+
+        self.assertEqual(43210, result["pid"])
+        self.assertEqual(43210, int((launch or {}).get("pid") or 0))
+        self.assertEqual(123.0, float((launch or {}).get("interval_seconds") or 0.0))
+
+    def test_build_sa_watch_restart_command_preserves_harness_paths(self) -> None:
+        config = HarnessConfig.from_env(
+            db_path=self.base / "custom.db",
+            workspace_root=self.base / "workspace",
+            log_path=self.base / "logs" / "harness.jsonl",
+        )
+
+        command = build_sa_watch_restart_command(config, interval_seconds=45.0)
+
+        self.assertIn("--db", command)
+        self.assertIn(str(config.db_path), command)
+        self.assertIn("--workspace", command)
+        self.assertIn(str(config.workspace_root), command)
+        self.assertIn("--log-path", command)
+        self.assertIn(str(config.log_path), command)
+        self.assertIn("--config-file", command)
+
+    def test_start_sa_watch_process_reuses_active_launch_reservation(self) -> None:
+        config = HarnessConfig.from_env(
+            db_path=self.base / "harness.db",
+            workspace_root=self.base / "workspace",
+            log_path=self.base / "logs" / "harness.jsonl",
+        )
+        sa_watch_launch_state_path(config).parent.mkdir(parents=True, exist_ok=True)
+        sa_watch_launch_state_path(config).write_text(
+            json.dumps(
+                {
+                    "launcher_pid": os.getpid(),
+                    "pid": 0,
+                    "interval_seconds": 600.0,
+                    "created_at": time.time(),
+                },
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+
+        with mock.patch("accruvia_harness.commands.common.subprocess.Popen") as popen:
+            result = start_sa_watch_process(config, interval_seconds=600.0)
+
+        self.assertTrue(result["existing_launch"])
+        popen.assert_not_called()
+
+    def test_stop_sa_watch_process_clears_launch_state_without_runtime_pid(self) -> None:
+        config = HarnessConfig.from_env(
+            db_path=self.base / "harness.db",
+            workspace_root=self.base / "workspace",
+            log_path=self.base / "logs" / "harness.jsonl",
+        )
+        sa_watch_launch_state_path(config).parent.mkdir(parents=True, exist_ok=True)
+        sa_watch_launch_state_path(config).write_text(
+            json.dumps(
+                {
+                    "launcher_pid": os.getpid(),
+                    "pid": 54321,
+                    "interval_seconds": 600.0,
+                    "created_at": time.time(),
+                },
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        with mock.patch("accruvia_harness.commands.common._terminate_pid") as terminate:
+            result = stop_sa_watch_process(config)
+
+        self.assertTrue(result["stopped"])
+        self.assertEqual(54321, result["pid"])
+        self.assertFalse(sa_watch_launch_state_path(config).exists())
+        terminate.assert_called_once_with(54321)
 
     def test_supervise_progress_prints_atomicity_follow_on_and_retry_reset(self) -> None:
         with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:

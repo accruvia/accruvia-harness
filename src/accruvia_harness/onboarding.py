@@ -233,7 +233,7 @@ def doctor_report(config: HarnessConfig, *, config_path: str | Path | None = Non
         "next_steps": [
             "Run `./bin/accruvia-harness init-db` if the database is missing.",
             "Run `./bin/accruvia-harness smoke-test` before enabling autonomous heartbeats.",
-            "Use `./bin/accruvia-harness supervise --one-shot` before long-running watch mode.",
+            "Use `./bin/accruvia-harness supervise --one-shot` before long-running watch mode. In watch mode the harness also starts an independent sa-watch sidecar so stuck pipelines can still be killed or repaired if the main supervisor wedges.",
         ],
     }
 
