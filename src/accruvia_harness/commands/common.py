@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from dataclasses import dataclass
 from datetime import datetime
 import os
@@ -423,6 +424,70 @@ def _pid_is_alive(pid: int) -> bool:
         return False
 
 
+def _process_cwd(pid: int) -> Path | None:
+    try:
+        return Path(os.readlink(f"/proc/{pid}/cwd")).resolve()
+    except OSError:
+        return None
+
+
+def _matching_sa_watch_pids(config: HarnessConfig) -> list[int]:
+    try:
+        output = subprocess.check_output(["ps", "-eo", "pid=,args="], text=True)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    repo_cwd = Path.cwd().resolve()
+    target_db = config.db_path.resolve()
+    target_workspace = config.workspace_root.resolve()
+    matches: list[int] = []
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        pid_text, _, args = line.partition(" ")
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            continue
+        if pid <= 0 or pid == os.getpid() or not _pid_is_alive(pid):
+            continue
+        try:
+            argv = shlex.split(args)
+        except ValueError:
+            continue
+        if "sa-watch-loop" not in argv:
+            continue
+        matched = False
+        if "--db" in argv:
+            try:
+                db_path = Path(argv[argv.index("--db") + 1]).resolve()
+            except (IndexError, OSError):
+                db_path = None
+            matched = db_path == target_db
+        elif "--workspace" in argv:
+            try:
+                workspace_path = Path(argv[argv.index("--workspace") + 1]).resolve()
+            except (IndexError, OSError):
+                workspace_path = None
+            matched = workspace_path == target_workspace
+        else:
+            matched = _process_cwd(pid) == repo_cwd
+        if matched:
+            matches.append(pid)
+    return sorted(dict.fromkeys(matches))
+
+
+def _reconcile_matching_sa_watch_processes(config: HarnessConfig) -> tuple[int | None, list[int]]:
+    matches = _matching_sa_watch_pids(config)
+    if not matches:
+        return None, []
+    survivor = max(matches)
+    extras = [pid for pid in matches if pid != survivor]
+    for pid in extras:
+        _terminate_pid(pid)
+    return survivor, extras
+
+
 def restart_api_process(config: HarnessConfig, *, force: bool = False) -> dict[str, Any] | None:
     desired = _read_json_file(desired_ui_state_path(config))
     if desired is None:
@@ -587,6 +652,30 @@ def start_sa_watch_process(
     force: bool = False,
     stream_output: bool = False,
 ) -> dict[str, Any]:
+    if force:
+        survivor_pid = None
+        extra_pids = _matching_sa_watch_pids(config)
+        for orphan_pid in extra_pids:
+            _terminate_pid(orphan_pid)
+    else:
+        survivor_pid, extra_pids = _reconcile_matching_sa_watch_processes(config)
+        if survivor_pid is not None:
+            update_sa_watch_runtime_state(
+                config,
+                interval_seconds=interval_seconds,
+                mode="adopted",
+                last_reason="reconciled_existing_process",
+            )
+            clear_sa_watch_launch_state(config)
+            return {
+                "pid": survivor_pid,
+                "existing": True,
+                "adopted_existing": True,
+                "reconciled_orphan_pids": extra_pids,
+                "interval_seconds": interval_seconds,
+                "stream_output": stream_output,
+                "log_path": str(_control_plane_runtime_dir(config) / "sa_watch.log"),
+            }
     runtime_state = read_sa_watch_runtime_state(config) or {}
     pid = int(runtime_state.get("pid") or 0)
     log_path = _control_plane_runtime_dir(config) / "sa_watch.log"
@@ -663,15 +752,23 @@ def stop_sa_watch_process(config: HarnessConfig) -> dict[str, Any]:
     pid = int(runtime_state.get("pid") or 0)
     launch_state = read_sa_watch_launch_state(config) or {}
     launch_pid = int(launch_state.get("pid") or 0)
+    matched_pids = _matching_sa_watch_pids(config)
     if pid > 0:
         _terminate_pid(pid)
     elif launch_pid > 0:
         _terminate_pid(launch_pid)
+    for orphan_pid in matched_pids:
+        if orphan_pid not in {pid, launch_pid}:
+            _terminate_pid(orphan_pid)
     clear_sa_watch_runtime_state(config)
     clear_sa_watch_launch_state(config)
     clear_desired_sa_watch_state(config)
     effective_pid = pid if pid > 0 else launch_pid
-    return {"stopped": effective_pid > 0, "pid": effective_pid if effective_pid > 0 else None}
+    return {
+        "stopped": effective_pid > 0 or bool(matched_pids),
+        "pid": effective_pid if effective_pid > 0 else None,
+        "reconciled_orphan_pids": [orphan_pid for orphan_pid in matched_pids if orphan_pid not in {pid, launch_pid}],
+    }
 
 
 def list_desired_supervisors(config: HarnessConfig) -> list[dict[str, Any]]:

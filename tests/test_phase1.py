@@ -230,7 +230,10 @@ class Phase1Tests(unittest.TestCase):
             log_path=self.base / "logs" / "harness.jsonl",
         )
         fake_process = mock.Mock(pid=43210)
-        with mock.patch("accruvia_harness.commands.common.subprocess.Popen", return_value=fake_process):
+        with (
+            mock.patch("accruvia_harness.commands.common.subprocess.check_output", return_value=""),
+            mock.patch("accruvia_harness.commands.common.subprocess.Popen", return_value=fake_process),
+        ):
             result = start_sa_watch_process(config, interval_seconds=123.0)
 
         launch = read_sa_watch_launch_state(config)
@@ -277,10 +280,58 @@ class Phase1Tests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        with mock.patch("accruvia_harness.commands.common.subprocess.Popen") as popen:
+        with (
+            mock.patch("accruvia_harness.commands.common.subprocess.check_output", return_value=""),
+            mock.patch("accruvia_harness.commands.common.subprocess.Popen") as popen,
+        ):
             result = start_sa_watch_process(config, interval_seconds=600.0)
 
         self.assertTrue(result["existing_launch"])
+        popen.assert_not_called()
+
+    def test_start_sa_watch_process_adopts_matching_orphan_process(self) -> None:
+        config = HarnessConfig.from_env(
+            db_path=self.base / "harness.db",
+            workspace_root=self.base / "workspace",
+            log_path=self.base / "logs" / "harness.jsonl",
+        )
+        orphan_pid = 65432
+        command = " ".join(build_sa_watch_restart_command(config, interval_seconds=600.0))
+        with (
+            mock.patch("accruvia_harness.commands.common.subprocess.check_output", return_value=f"{orphan_pid} {command}\n"),
+            mock.patch("accruvia_harness.commands.common._pid_is_alive", return_value=True),
+            mock.patch("accruvia_harness.commands.common.subprocess.Popen") as popen,
+        ):
+            result = start_sa_watch_process(config, interval_seconds=600.0)
+
+        self.assertTrue(result["existing"])
+        self.assertTrue(result["adopted_existing"])
+        self.assertEqual(orphan_pid, result["pid"])
+        popen.assert_not_called()
+
+    def test_start_sa_watch_process_kills_duplicate_orphans_and_adopts_one(self) -> None:
+        config = HarnessConfig.from_env(
+            db_path=self.base / "harness.db",
+            workspace_root=self.base / "workspace",
+            log_path=self.base / "logs" / "harness.jsonl",
+        )
+        older_pid = 60001
+        newer_pid = 60002
+        command = " ".join(build_sa_watch_restart_command(config, interval_seconds=600.0))
+        with (
+            mock.patch(
+                "accruvia_harness.commands.common.subprocess.check_output",
+                return_value=f"{older_pid} {command}\n{newer_pid} {command}\n",
+            ),
+            mock.patch("accruvia_harness.commands.common._pid_is_alive", return_value=True),
+            mock.patch("accruvia_harness.commands.common._terminate_pid") as terminate,
+            mock.patch("accruvia_harness.commands.common.subprocess.Popen") as popen,
+        ):
+            result = start_sa_watch_process(config, interval_seconds=600.0)
+
+        self.assertEqual(newer_pid, result["pid"])
+        self.assertEqual([older_pid], result["reconciled_orphan_pids"])
+        terminate.assert_called_once_with(older_pid)
         popen.assert_not_called()
 
     def test_stop_sa_watch_process_clears_launch_state_without_runtime_pid(self) -> None:
@@ -310,6 +361,25 @@ class Phase1Tests(unittest.TestCase):
         self.assertEqual(54321, result["pid"])
         self.assertFalse(sa_watch_launch_state_path(config).exists())
         terminate.assert_called_once_with(54321)
+
+    def test_stop_sa_watch_process_kills_matching_orphans_without_state(self) -> None:
+        config = HarnessConfig.from_env(
+            db_path=self.base / "harness.db",
+            workspace_root=self.base / "workspace",
+            log_path=self.base / "logs" / "harness.jsonl",
+        )
+        orphan_pid = 70001
+        command = " ".join(build_sa_watch_restart_command(config, interval_seconds=600.0))
+        with (
+            mock.patch("accruvia_harness.commands.common.subprocess.check_output", return_value=f"{orphan_pid} {command}\n"),
+            mock.patch("accruvia_harness.commands.common._pid_is_alive", return_value=True),
+            mock.patch("accruvia_harness.commands.common._terminate_pid") as terminate,
+        ):
+            result = stop_sa_watch_process(config)
+
+        self.assertTrue(result["stopped"])
+        self.assertEqual([orphan_pid], result["reconciled_orphan_pids"])
+        terminate.assert_called_once_with(orphan_pid)
 
     def test_supervise_progress_prints_atomicity_follow_on_and_retry_reset(self) -> None:
         with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
