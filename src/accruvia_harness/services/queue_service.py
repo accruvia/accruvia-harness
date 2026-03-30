@@ -48,7 +48,21 @@ class QueueService:
             )
             if task is None:
                 return None
-            if task.objective_id:
+            if self._worker_lane_blocks(task):
+                progress(
+                    {
+                        "type": "worker_lane_blocked",
+                        "task_id": task.id,
+                        "task_title": task.title,
+                        "project_id": task.project_id,
+                        "strategy": task.strategy,
+                        "message": "Worker lane is paused; only structural repair tasks may run.",
+                    }
+                )
+                local_exclusions.add(task.id)
+                self.store.release_task_lease(task.id, worker_id)
+                continue
+            if task.objective_id and not self._bypasses_objective_gate(task):
                 gate = objective_execution_gate(self.store, task.objective_id)
                 if not gate.ready:
                     blocking = next((item for item in gate.gate_checks if not item["ok"]), None)
@@ -105,6 +119,9 @@ class QueueService:
             finally:
                 self.store.release_task_lease(task.id, worker_id)
 
+    def _bypasses_objective_gate(self, task) -> bool:
+        return str(task.strategy or "") == "sa_structural_fix"
+
     def process_queue(
         self,
         limit: int,
@@ -126,3 +143,16 @@ class QueueService:
             processed.append(result)
             seen_task_ids.add(result["task"].id)
         return processed
+
+    def _worker_lane_blocks(self, task) -> bool:
+        lane = self.store.get_control_lane_state("worker")
+        if lane is None:
+            return False
+        if lane.state.value == "cooldown":
+            return True
+        if lane.state.value != "paused":
+            return False
+        # Structural repair tasks are the only work allowed while the worker
+        # lane is paused. They are the architectural self-healing path that can
+        # prove recurrence prevention before normal work resumes.
+        return str(task.strategy or "") != "sa_structural_fix"

@@ -97,6 +97,12 @@ class WorkflowService:
             return {"state": "failed", "reason": "Task failed.", "detail": ""}
         if not task.objective_id:
             return {"state": "runnable", "reason": "Task is pending and not objective-gated.", "detail": ""}
+        if str(task.strategy or "") == "sa_structural_fix":
+            return {
+                "state": "runnable",
+                "reason": "Structural recovery task may run while the objective is still blocked.",
+                "detail": "",
+            }
         gate = objective_execution_gate(self.store, task.objective_id)
         if not gate.ready:
             blocking = next((check for check in gate.gate_checks if not check["ok"] and not str(check.get("key") or "").endswith("_placeholder")), None)
@@ -135,9 +141,21 @@ class WorkflowService:
             objective = self.store.get_objective(objective_id) or objective
         planning = self.planning_readiness(objective_id)
         review = self.review_readiness(objective_id, linked_tasks)
-        if planning.ready and not linked_tasks and start_atomic is not None and not atomic_running:
+        has_runnable_linked_work = any(task.status in {TaskStatus.PENDING, TaskStatus.ACTIVE} for task in linked_tasks)
+        only_terminal_linked_work = bool(linked_tasks) and not has_runnable_linked_work
+        should_restart_atomic = (
+            planning.ready
+            and only_terminal_linked_work
+            and objective.status in {ObjectiveStatus.PAUSED, ObjectiveStatus.PLANNING}
+            and not review.ready
+        )
+        # Atomic generation should restart when an objective is left with only
+        # terminal failed/completed work. Without this, a paused objective with
+        # failed remediation tasks deadlocks forever because historical linked
+        # tasks suppress a fresh decomposition pass.
+        if planning.ready and start_atomic is not None and not atomic_running and (not linked_tasks or should_restart_atomic):
             start_atomic(objective_id)
-            actions.append("start_atomic_generation")
+            actions.append("restart_atomic_generation" if should_restart_atomic else "start_atomic_generation")
         objective = self.store.get_objective(objective_id) or objective
         if review.ready and objective.status == ObjectiveStatus.RESOLVED and start_review is not None and not review_running and review_start_allowed:
             start_review(objective_id)

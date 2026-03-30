@@ -60,7 +60,7 @@ class RunService:
         task = self.store.get_task(task_id)
         if task is None:
             raise ValueError(f"Unknown task: {task_id}")
-        if task.objective_id:
+        if task.objective_id and not self._bypasses_objective_gate(task):
             gate = objective_execution_gate(self.store, task.objective_id)
             if not gate.ready:
                 blocking = next((item for item in gate.gate_checks if not item["ok"]), None)
@@ -81,6 +81,9 @@ class RunService:
             ):
                 return self._run_once(task, project, progress_callback=progress_callback)
         return self._run_once(task, project, progress_callback=progress_callback)
+
+    def _bypasses_objective_gate(self, task) -> bool:
+        return str(task.strategy or "") == "sa_structural_fix"
 
     def cleanup_stale_run_workspaces(self) -> dict[str, int]:
         runs_root = self.workspace_root / "runs"
@@ -199,6 +202,17 @@ class RunService:
             return run
         progress({"type": "ready_for_next", "task_id": task.id})
         return self._validation_phase(task, run, work, prepared_project_root, progress)
+
+    def _apply_task_status_for_run(self, task_id: str, status: TaskStatus) -> TaskStatus:
+        current = self.store.get_task(task_id)
+        if current is None:
+            raise ValueError(f"Unknown task: {task_id}")
+        # Older runs can finish after a newer run has already completed the task.
+        # In that case we must not reopen the task and roll it backward to pending.
+        if current.status == TaskStatus.COMPLETED and status != TaskStatus.COMPLETED:
+            return current.status
+        self.store.update_task_status(task_id, status)
+        return status
 
     def _work_phase(self, task, project, progress):
         """Everything up to and including worker.work(). Returns (WorkResult, Run, project_root)."""
@@ -405,7 +419,7 @@ class RunService:
         # Credits exhausted: don't burn an attempt — requeue the task and signal the supervisor to freeze.
         if work.diagnostics and work.diagnostics.get("backends_unavailable"):
             run = self.store.mark_run(run, RunStatus.BLOCKED, "All LLM backends unavailable.")
-            self.store.update_task_status(task.id, TaskStatus.PENDING)
+            self._apply_task_status_for_run(task.id, TaskStatus.PENDING)
             progress({
                 "type": "backends_unavailable",
                 "task_id": task.id,
@@ -591,18 +605,19 @@ class RunService:
         if decision_result.action == DecisionAction.BRANCH:
             task_status = TaskStatus.ACTIVE
         run = self.store.mark_run(run, final_status, decision_result.rationale)
-        self.store.update_task_status(task.id, task_status)
-        self.store.create_event(
-            Event(
-                id=new_id("event"),
-                entity_type="task",
-                entity_id=task.id,
-                event_type="task_status_changed",
-                payload={"status": task_status.value, "run_id": run.id},
+        applied_task_status = self._apply_task_status_for_run(task.id, task_status)
+        if applied_task_status == task_status:
+            self.store.create_event(
+                Event(
+                    id=new_id("event"),
+                    entity_type="task",
+                    entity_id=task.id,
+                    event_type="task_status_changed",
+                    payload={"status": task_status.value, "run_id": run.id},
+                )
             )
-        )
         # Emit structured failure diagnostic on any non-success outcome.
-        if task_status != TaskStatus.COMPLETED:
+        if applied_task_status != TaskStatus.COMPLETED:
             diagnostics = work.diagnostics or {}
             failure_report = {
                 "task_id": task.id,
@@ -610,7 +625,7 @@ class RunService:
                 "run_id": run.id,
                 "attempt": attempt,
                 "max_attempts": task.max_attempts,
-                "task_status": task_status.value,
+                "task_status": applied_task_status.value,
                 "run_status": final_status.value,
                 "decision": decision_result.action.value,
                 "decision_rationale": decision_result.rationale,
@@ -810,16 +825,40 @@ class RunService:
                 )
             )
 
-    def run_until_stable(self, task_id: str) -> list[Run]:
+    def run_until_stable(self, task_id: str, progress_callback=None, post_task_callback=None) -> list[Run]:
         completed_runs: list[Run] = []
+        progress = progress_callback or (lambda _event: None)
         while True:
             task = self.store.get_task(task_id)
             if task is None:
                 raise ValueError(f"Unknown task: {task_id}")
             if task.status in {TaskStatus.COMPLETED, TaskStatus.FAILED}:
                 break
-            run = self.run_once(task_id)
+            progress(
+                {
+                    "type": "task_started",
+                    "task_id": task.id,
+                    "task_title": task.title,
+                    "project_id": task.project_id,
+                }
+            )
+            run = self.run_once(task_id, progress_callback=progress)
             completed_runs.append(run)
+            updated_task = self.store.get_task(task.id)
+            progress(
+                {
+                    "type": "task_finished",
+                    "task_id": task.id,
+                    "task_title": task.title,
+                    "project_id": task.project_id,
+                    "status": updated_task.status.value if updated_task is not None else "unknown",
+                    "run_id": run.id,
+                    "run_status": run.status.value,
+                    "summary": run.summary,
+                }
+            )
+            if post_task_callback is not None and updated_task is not None:
+                post_task_callback(updated_task)
             decisions = self.store.list_decisions(run.id)
             latest_decision = decisions[-1] if decisions else None
             if latest_decision is not None and latest_decision.action == DecisionAction.BRANCH:

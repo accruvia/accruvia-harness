@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from dataclasses import dataclass
+import os
+from pathlib import Path
+import signal
+import subprocess
 import sys
+import time
 from typing import Any
 
 from ..bootstrap import build_engine_from_config, build_store, build_telemetry
@@ -13,7 +17,8 @@ from ..config import HarnessConfig, default_config_path, write_persisted_config
 from ..control_plane import ControlPlane
 from ..control_runtime import ControlRuntimeObserver
 from ..control_watch import ControlWatchService
-from ..domain import serialize_dataclass
+from ..sa_watch import SAWatchService
+from ..domain import ControlRecoveryAction, new_id, serialize_dataclass
 from ..engine import HarnessEngine
 from ..github import GitHubCLI
 from ..gitlab import GitLabCLI
@@ -27,6 +32,12 @@ from ..telemetry import TelemetrySink
 
 _OUTPUT_JSON = False
 _AUTO_CONFIGURE_PROBE_TIMEOUT_SECONDS = 5
+_UI_RUNTIME_STATE_FILENAME = "ui_runtime_state.json"
+_UI_DESIRED_STATE_FILENAME = "desired_ui.json"
+_SUPERVISOR_DESIRED_STATE_FILENAME = "desired_supervisor.json"
+_STACK_RESTART_REQUEST_FILENAME = "restart_stack_request.json"
+_SA_WATCH_RUNTIME_STATE_FILENAME = "sa_watch_runtime_state.json"
+_SA_WATCH_DESIRED_STATE_FILENAME = "desired_sa_watch.json"
 
 
 def set_output_mode(*, json_enabled: bool) -> None:
@@ -99,6 +110,477 @@ class CLIContext:
     breadcrumb_writer: BreadcrumbWriter
     control_watch: ControlWatchService
     control_runtime: ControlRuntimeObserver
+    sa_watch: SAWatchService
+
+
+def _control_plane_runtime_dir(config: HarnessConfig) -> Path:
+    path = config.db_path.parent / "control"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _read_json_file(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def stack_restart_request_path(config: HarnessConfig) -> Path:
+    return _control_plane_runtime_dir(config) / _STACK_RESTART_REQUEST_FILENAME
+
+
+def record_stack_restart_request(config: HarnessConfig, payload: dict[str, Any]) -> Path:
+    request = dict(payload)
+    request.setdefault("requested_at", time.time())
+    path = stack_restart_request_path(config)
+    _write_json_file(path, request)
+    return path
+
+
+def read_stack_restart_request(config: HarnessConfig) -> dict[str, Any] | None:
+    return _read_json_file(stack_restart_request_path(config))
+
+
+def clear_stack_restart_request(config: HarnessConfig) -> None:
+    try:
+        stack_restart_request_path(config).unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _write_json_file(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def ui_runtime_state_path(config: HarnessConfig) -> Path:
+    return _control_plane_runtime_dir(config) / _UI_RUNTIME_STATE_FILENAME
+
+
+def desired_ui_state_path(config: HarnessConfig) -> Path:
+    return _control_plane_runtime_dir(config) / _UI_DESIRED_STATE_FILENAME
+
+
+def desired_supervisor_state_path(config: HarnessConfig) -> Path:
+    return _control_plane_runtime_dir(config) / _SUPERVISOR_DESIRED_STATE_FILENAME
+
+
+def sa_watch_runtime_state_path(config: HarnessConfig) -> Path:
+    return _control_plane_runtime_dir(config) / _SA_WATCH_RUNTIME_STATE_FILENAME
+
+
+def desired_sa_watch_state_path(config: HarnessConfig) -> Path:
+    return _control_plane_runtime_dir(config) / _SA_WATCH_DESIRED_STATE_FILENAME
+
+
+def record_desired_ui_state(
+    config: HarnessConfig,
+    *,
+    host: str,
+    port: int,
+    open_browser: bool,
+    project_ref: str | None,
+) -> None:
+    _write_json_file(
+        desired_ui_state_path(config),
+        {
+            "host": host,
+            "port": port,
+            "open_browser": open_browser,
+            "project_ref": project_ref,
+        },
+    )
+
+
+def update_ui_runtime_state(
+    config: HarnessConfig,
+    *,
+    host: str,
+    preferred_port: int,
+    resolved_port: int,
+    project_ref: str | None,
+) -> None:
+    _write_json_file(
+        ui_runtime_state_path(config),
+        {
+            "pid": os.getpid(),
+            "host": host,
+            "preferred_port": preferred_port,
+            "resolved_port": resolved_port,
+            "project_ref": project_ref,
+        },
+    )
+
+
+def clear_ui_runtime_state(config: HarnessConfig) -> None:
+    path = ui_runtime_state_path(config)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+
+
+def stop_ui_process(config: HarnessConfig) -> dict[str, Any]:
+    runtime_state = _read_json_file(ui_runtime_state_path(config)) or {}
+    pid = int(runtime_state.get("pid") or 0)
+    if pid > 0:
+        _terminate_pid(pid)
+    clear_ui_runtime_state(config)
+    return {"stopped": pid > 0, "pid": pid if pid > 0 else None}
+
+
+def update_sa_watch_runtime_state(
+    config: HarnessConfig,
+    *,
+    interval_seconds: float,
+    mode: str,
+    last_decision: str | None = None,
+    last_reason: str | None = None,
+) -> None:
+    _write_json_file(
+        sa_watch_runtime_state_path(config),
+        {
+            "pid": os.getpid(),
+            "interval_seconds": interval_seconds,
+            "mode": mode,
+            "last_decision": last_decision,
+            "last_reason": last_reason,
+            "heartbeat_at": time.time(),
+        },
+    )
+
+
+def clear_sa_watch_runtime_state(config: HarnessConfig) -> None:
+    path = sa_watch_runtime_state_path(config)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+
+
+def record_desired_sa_watch_state(config: HarnessConfig, *, interval_seconds: float) -> None:
+    _write_json_file(
+        desired_sa_watch_state_path(config),
+        {
+            "interval_seconds": interval_seconds,
+            "updated_at": time.time(),
+        },
+    )
+
+
+def read_desired_sa_watch_state(config: HarnessConfig) -> dict[str, Any] | None:
+    return _read_json_file(desired_sa_watch_state_path(config))
+
+
+def clear_desired_sa_watch_state(config: HarnessConfig) -> None:
+    path = desired_sa_watch_state_path(config)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+
+
+def read_sa_watch_runtime_state(config: HarnessConfig) -> dict[str, Any] | None:
+    return _read_json_file(sa_watch_runtime_state_path(config))
+
+
+def record_desired_supervisor_state(
+    config: HarnessConfig,
+    *,
+    project_id: str | None,
+    worker_id: str,
+    watch: bool,
+    lease_seconds: int,
+    idle_sleep_seconds: float,
+    max_idle_cycles: int | None,
+    max_iterations: int | None,
+    heartbeat_project_ids: list[str],
+    heartbeat_interval_seconds: float | None,
+    heartbeat_all_projects: bool,
+    review_check_enabled: bool,
+    review_check_interval_seconds: int | None,
+) -> None:
+    _write_json_file(
+        desired_supervisor_state_path(config),
+        {
+            "project_id": project_id,
+            "worker_id": worker_id,
+            "watch": watch,
+            "lease_seconds": lease_seconds,
+            "idle_sleep_seconds": idle_sleep_seconds,
+            "max_idle_cycles": max_idle_cycles,
+            "max_iterations": max_iterations,
+            "heartbeat_project_ids": heartbeat_project_ids,
+            "heartbeat_interval_seconds": heartbeat_interval_seconds,
+            "heartbeat_all_projects": heartbeat_all_projects,
+            "review_check_enabled": review_check_enabled,
+            "review_check_interval_seconds": review_check_interval_seconds,
+        },
+    )
+
+
+def desired_api_url(config: HarnessConfig) -> str:
+    runtime_state = _read_json_file(ui_runtime_state_path(config)) or {}
+    desired_state = _read_json_file(desired_ui_state_path(config)) or {}
+    host = str(runtime_state.get("host") or desired_state.get("host") or "127.0.0.1")
+    port = int(runtime_state.get("resolved_port") or desired_state.get("port") or 9100)
+    return f"http://{host}:{port}/api/version"
+
+
+def _terminate_pid(pid: int, *, timeout_seconds: float = 5.0) -> None:
+    if pid <= 0:
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return
+        time.sleep(0.1)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        return
+
+
+def _pid_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def restart_api_process(config: HarnessConfig, *, force: bool = False) -> dict[str, Any] | None:
+    desired = _read_json_file(desired_ui_state_path(config))
+    if desired is None:
+        return None
+    runtime_state = _read_json_file(ui_runtime_state_path(config)) or {}
+    pid = int(runtime_state.get("pid") or 0)
+    if _pid_is_alive(pid) and not force:
+        # If the recorded UI process is already alive, let the watch loop wait
+        # for that process to finish binding the expected endpoint before we
+        # spawn a second server that can drift onto an alternate port.
+        return {"pid": pid, "existing": True}
+    if pid > 0:
+        _terminate_pid(pid)
+    host = str(desired.get("host") or "127.0.0.1")
+    port = int(runtime_state.get("resolved_port") or desired.get("port") or 9100)
+    command = [sys.executable, "-m", "accruvia_harness", "ui", "--host", host, "--port", str(port), "--no-open-browser"]
+    project_ref = desired.get("project_ref")
+    if project_ref:
+        command.extend(["--project-id", str(project_ref)])
+    log_path = _control_plane_runtime_dir(config) / "restart_ui.log"
+    with log_path.open("ab") as handle:
+        process = subprocess.Popen(
+            command,
+            cwd=str(Path.cwd()),
+            env=os.environ.copy(),
+            stdout=handle,
+            stderr=handle,
+            start_new_session=True,
+        )
+    return {"pid": process.pid, "command": command, "log_path": str(log_path)}
+
+
+def build_supervise_restart_command(record: dict[str, Any]) -> list[str]:
+    command = [sys.executable, "-m", "accruvia_harness", "supervise"]
+    project_id = record.get("project_id")
+    if project_id:
+        command.extend(["--project-id", str(project_id)])
+    worker_id = record.get("worker_id")
+    if worker_id:
+        command.extend(["--worker-id", str(worker_id)])
+    lease_seconds = record.get("lease_seconds")
+    if lease_seconds is not None:
+        command.extend(["--lease-seconds", str(lease_seconds)])
+    if not bool(record.get("watch", True)):
+        command.append("--one-shot")
+    idle_sleep_seconds = record.get("idle_sleep_seconds")
+    if idle_sleep_seconds is not None:
+        command.extend(["--idle-sleep-seconds", str(idle_sleep_seconds)])
+    max_idle_cycles = record.get("max_idle_cycles")
+    if max_idle_cycles is not None:
+        command.extend(["--max-idle-cycles", str(max_idle_cycles)])
+    max_iterations = record.get("max_iterations")
+    if max_iterations is not None:
+        command.extend(["--max-iterations", str(max_iterations)])
+    for heartbeat_project_id in list(record.get("heartbeat_project_ids") or []):
+        command.extend(["--heartbeat-project-id", str(heartbeat_project_id)])
+    heartbeat_interval_seconds = record.get("heartbeat_interval_seconds")
+    if heartbeat_interval_seconds is not None:
+        command.extend(["--heartbeat-interval-seconds", str(heartbeat_interval_seconds)])
+    if bool(record.get("heartbeat_all_projects", False)):
+        command.append("--heartbeat-all-projects")
+    if bool(record.get("review_check_enabled", False)):
+        command.append("--review-check-enabled")
+    review_check_interval_seconds = record.get("review_check_interval_seconds")
+    if review_check_interval_seconds is not None:
+        command.extend(["--review-check-interval-seconds", str(review_check_interval_seconds)])
+    return command
+
+
+def restart_harness_process(config: HarnessConfig, *, force: bool = False) -> dict[str, Any] | None:
+    desired = _read_json_file(desired_supervisor_state_path(config))
+    if desired is None:
+        return None
+    if force:
+        control_dir = config.db_path.parent / "supervisors"
+        for record in list_desired_supervisors(config):
+            pid = int(record.get("pid") or 0)
+            if pid > 0:
+                _terminate_pid(pid)
+    command = build_supervise_restart_command(desired)
+    control_dir = config.db_path.parent / "supervisors"
+    control_dir.mkdir(parents=True, exist_ok=True)
+    stop_request_path = control_dir / "stop.request"
+    # A killed supervisor leaves stop.request behind via its signal handler.
+    # Clear it before relaunching or the replacement supervisor exits immediately.
+    try:
+        stop_request_path.unlink()
+    except FileNotFoundError:
+        pass
+    worker_id = str(desired.get("worker_id") or "supervisor")
+    project_id = str(desired.get("project_id") or "all-projects")
+    restart_log_path = control_dir / f"restart_{project_id}_{worker_id}.log"
+    with restart_log_path.open("ab") as handle:
+        process = subprocess.Popen(
+            command,
+            cwd=str(Path.cwd()),
+            env=os.environ.copy(),
+            stdout=handle,
+            stderr=handle,
+            start_new_session=True,
+        )
+    return {
+        "pid": process.pid,
+        "project_id": desired.get("project_id"),
+        "worker_id": desired.get("worker_id"),
+        "command": command,
+        "restart_log_path": str(restart_log_path),
+    }
+
+
+def build_control_loop_restart_command(args) -> list[str]:
+    command = [sys.executable, "-m", "accruvia_harness.cli", "control-loop", "--interval-seconds", str(args.interval_seconds)]
+    if getattr(args, "api_url", None):
+        command.extend(["--api-url", str(args.api_url)])
+    if getattr(args, "stalled_objective_hours", None) is not None:
+        command.extend(["--stalled-objective-hours", str(args.stalled_objective_hours)])
+    if bool(getattr(args, "no_freeze_on_stall", False)):
+        command.append("--no-freeze-on-stall")
+    if getattr(args, "max_iterations", None) is not None:
+        command.extend(["--max-iterations", str(args.max_iterations)])
+    return command
+
+
+def restart_control_loop_process(config: HarnessConfig, args) -> dict[str, Any]:
+    command = build_control_loop_restart_command(args)
+    log_path = _control_plane_runtime_dir(config) / "restart_control_loop.log"
+    with log_path.open("ab") as handle:
+        process = subprocess.Popen(
+            command,
+            cwd=str(Path.cwd()),
+            env=os.environ.copy(),
+            stdout=handle,
+            stderr=handle,
+            start_new_session=True,
+        )
+    return {"pid": process.pid, "command": command, "log_path": str(log_path)}
+
+
+def build_sa_watch_restart_command(*, interval_seconds: float) -> list[str]:
+    return [
+        sys.executable,
+        "-m",
+        "accruvia_harness.cli",
+        "sa-watch-loop",
+        "--interval-seconds",
+        str(interval_seconds),
+    ]
+
+
+def start_sa_watch_process(
+    config: HarnessConfig,
+    *,
+    interval_seconds: float,
+    force: bool = False,
+    stream_output: bool = False,
+) -> dict[str, Any]:
+    runtime_state = read_sa_watch_runtime_state(config) or {}
+    pid = int(runtime_state.get("pid") or 0)
+    log_path = _control_plane_runtime_dir(config) / "sa_watch.log"
+    if _pid_is_alive(pid) and not force:
+        return {
+            "pid": pid,
+            "existing": True,
+            "interval_seconds": float(runtime_state.get("interval_seconds") or interval_seconds),
+            "stream_output": stream_output,
+            "log_path": str(log_path),
+        }
+    if pid > 0:
+        _terminate_pid(pid)
+    record_desired_sa_watch_state(config, interval_seconds=interval_seconds)
+    command = build_sa_watch_restart_command(interval_seconds=interval_seconds)
+    if stream_output:
+        process = subprocess.Popen(
+            command,
+            cwd=str(Path.cwd()),
+            env=os.environ.copy(),
+            start_new_session=True,
+        )
+    else:
+        with log_path.open("ab") as handle:
+            process = subprocess.Popen(
+                command,
+                cwd=str(Path.cwd()),
+                env=os.environ.copy(),
+                stdout=handle,
+                stderr=handle,
+                start_new_session=True,
+            )
+    return {
+        "pid": process.pid,
+        "command": command,
+        "log_path": str(log_path),
+        "interval_seconds": interval_seconds,
+        "stream_output": stream_output,
+    }
+
+
+def stop_sa_watch_process(config: HarnessConfig) -> dict[str, Any]:
+    runtime_state = read_sa_watch_runtime_state(config) or {}
+    pid = int(runtime_state.get("pid") or 0)
+    if pid > 0:
+        _terminate_pid(pid)
+    clear_sa_watch_runtime_state(config)
+    clear_desired_sa_watch_state(config)
+    return {"stopped": pid > 0, "pid": pid if pid > 0 else None}
+
+
+def list_desired_supervisors(config: HarnessConfig) -> list[dict[str, Any]]:
+    control_dir = config.db_path.parent / "supervisors"
+    if not control_dir.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    for path in sorted(control_dir.glob("*.json")):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if record.get("pid") is not None:
+            records.append(record)
+    return records
 
 
 def build_context(config: HarnessConfig) -> CLIContext:
@@ -109,7 +591,7 @@ def build_context(config: HarnessConfig) -> CLIContext:
     breadcrumb_writer = BreadcrumbWriter(store, config.workspace_root)
     engine = build_engine_from_config(config, store=store, telemetry=telemetry)
     query_service = HarnessQueryService(store, telemetry=telemetry)
-    return CLIContext(
+    ctx = CLIContext(
         config=config,
         store=store,
         engine=engine,
@@ -140,14 +622,37 @@ def build_context(config: HarnessConfig) -> CLIContext:
             failure_classifier,
             breadcrumb_writer,
             supervisor_control_dir=config.db_path.parent / "supervisors",
+            restart_api=lambda: restart_api_process(config),
+            restart_harness=lambda: restart_harness_process(config),
         ),
         control_runtime=ControlRuntimeObserver(
             store,
             control_plane,
             failure_classifier,
             breadcrumb_writer,
+            request_stack_restart=lambda payload: record_stack_restart_request(config, payload),
+        ),
+        sa_watch=SAWatchService(
+            store,
+            control_plane,
+            engine.llm_router,
+            config.workspace_root,
+            engine=engine,
         ),
     )
+    if hasattr(ctx.engine, "queue"):
+        # The harness must reconcile objective workflow after every task finish
+        # regardless of whether work is driven by the UI or the supervisor CLI.
+        # If only the UI wires this callback, successful structural repairs can
+        # complete and still leave the objective paused with no new runnable work.
+        from ..ui import HarnessUIDataService
+
+        data_service = HarnessUIDataService(ctx)
+        ctx.engine.queue.post_task_callback = data_service.reconcile_task_workflow
+        ctx.sa_watch.post_repair_callback = data_service.reconcile_task_workflow
+        ctx.sa_watch.structural_progress_callback = ctx.control_runtime.handle
+        ctx.sa_watch.restart_stack = lambda payload: _restart_stack_from_sa_watch(ctx, payload)
+    return ctx
 
 
 def _resolved_config_file(args, config: HarnessConfig) -> Path:
@@ -209,6 +714,7 @@ def ensure_llm_ready(args, ctx: CLIContext, *, reason: str) -> HarnessConfig:
         ctx.config = resolved
         ctx.engine.set_llm_router(build_llm_router(resolved, telemetry=ctx.telemetry))
         ctx.interrogation_service.llm_router = ctx.engine.llm_router
+        ctx.sa_watch.llm_router = ctx.engine.llm_router
         config = resolved
     if any(
         (
@@ -262,4 +768,25 @@ def ensure_llm_ready(args, ctx: CLIContext, *, reason: str) -> HarnessConfig:
     ctx.config = resolved
     ctx.engine.set_llm_router(build_llm_router(resolved, telemetry=ctx.telemetry))
     ctx.interrogation_service.llm_router = ctx.engine.llm_router
+    ctx.sa_watch.llm_router = ctx.engine.llm_router
     return resolved
+
+
+def _restart_stack_from_sa_watch(ctx: CLIContext, payload: dict[str, object]) -> dict[str, object]:
+    # sa-watch owns the architectural repair decision, but the reboot itself
+    # must still happen from the outer control layer so the mutated services are
+    # restarted onto the newly-written code. This helper keeps that restart in
+    # process while preserving deterministic control-plane verification.
+    ctx.store.create_control_recovery_action(
+        ControlRecoveryAction(
+            id=new_id("recovery"),
+            action_type="restart",
+            target_type="system",
+            target_id="system",
+            reason=str(payload.get("reason") or "sa_watch_requested"),
+            result="applied",
+        )
+    )
+    restart_api_process(ctx.config, force=True)
+    restart_harness_process(ctx.config, force=True)
+    return ctx.control_watch.run_once(api_url=desired_api_url(ctx.config))

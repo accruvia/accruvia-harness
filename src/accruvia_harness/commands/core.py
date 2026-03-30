@@ -14,7 +14,18 @@ import time
 from ..config import HarnessConfig, default_config_path, write_persisted_config
 from ..domain import Event, PromotionMode, RepoProvider, WorkspacePolicy, new_id, serialize_dataclass
 from ..onboarding import detect_llm_command_candidates, doctor_report, probe_llm_command, prompt_text
-from .common import CLIContext, emit, ensure_llm_ready
+from .common import (
+    CLIContext,
+    build_supervise_restart_command,
+    desired_api_url,
+    emit,
+    ensure_llm_ready,
+    record_desired_supervisor_state,
+    record_desired_ui_state,
+    start_sa_watch_process,
+    stop_sa_watch_process,
+    stop_ui_process,
+)
 
 
 def _redact_command(value: str | None) -> str | None:
@@ -537,43 +548,6 @@ def _reset_local_state(args, config: HarnessConfig) -> dict[str, object]:
     }
 
 
-def _build_supervise_restart_command(record: dict[str, object]) -> list[str]:
-    command = [sys.executable, "-m", "accruvia_harness", "supervise"]
-    project_id = record.get("project_id")
-    if project_id:
-        command.extend(["--project-id", str(project_id)])
-    worker_id = record.get("worker_id")
-    if worker_id:
-        command.extend(["--worker-id", str(worker_id)])
-    lease_seconds = record.get("lease_seconds")
-    if lease_seconds is not None:
-        command.extend(["--lease-seconds", str(lease_seconds)])
-    if not bool(record.get("watch", True)):
-        command.append("--one-shot")
-    idle_sleep_seconds = record.get("idle_sleep_seconds")
-    if idle_sleep_seconds is not None:
-        command.extend(["--idle-sleep-seconds", str(idle_sleep_seconds)])
-    max_idle_cycles = record.get("max_idle_cycles")
-    if max_idle_cycles is not None:
-        command.extend(["--max-idle-cycles", str(max_idle_cycles)])
-    max_iterations = record.get("max_iterations")
-    if max_iterations is not None:
-        command.extend(["--max-iterations", str(max_iterations)])
-    for heartbeat_project_id in list(record.get("heartbeat_project_ids") or []):
-        command.extend(["--heartbeat-project-id", str(heartbeat_project_id)])
-    heartbeat_interval_seconds = record.get("heartbeat_interval_seconds")
-    if heartbeat_interval_seconds is not None:
-        command.extend(["--heartbeat-interval-seconds", str(heartbeat_interval_seconds)])
-    if bool(record.get("heartbeat_all_projects", False)):
-        command.append("--heartbeat-all-projects")
-    if bool(record.get("review_check_enabled", False)):
-        command.append("--review-check-enabled")
-    review_check_interval_seconds = record.get("review_check_interval_seconds")
-    if review_check_interval_seconds is not None:
-        command.extend(["--review-check-interval-seconds", str(review_check_interval_seconds)])
-    return command
-
-
 def _restart_supervisor_process(config, record: dict[str, object]) -> dict[str, object]:
     control_dir = config.db_path.parent / "supervisors"
     control_dir.mkdir(parents=True, exist_ok=True)
@@ -711,6 +685,13 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
     if args.command == "ui":
         from ..ui import start_ui_server
 
+        record_desired_ui_state(
+            config,
+            host=args.host,
+            port=args.port,
+            open_browser=not args.no_open_browser,
+            project_ref=args.project_id,
+        )
         start_ui_server(
             ctx,
             host=args.host,
@@ -871,6 +852,7 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
         emit({"killed_supervisors": killed, "count": len(killed)})
         return True
     if args.command == "supervise":
+        ctx.control_plane.turn_on()
         max_idle_cycles = args.max_idle_cycles
         if max_idle_cycles is None:
             max_idle_cycles = None if args.watch else 1
@@ -879,9 +861,24 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
         if args.project_id and not args.heartbeat_all_projects and not heartbeat_project_ids:
             heartbeat_project_ids = [args.project_id]
         if heartbeat_project_ids and heartbeat_interval_seconds is None:
-            heartbeat_interval_seconds = 1800.0
+            heartbeat_interval_seconds = 60.0
         if heartbeat_project_ids or args.heartbeat_all_projects:
             config = ensure_llm_ready(args, ctx, reason="Supervisor heartbeats")
+        record_desired_supervisor_state(
+            config,
+            project_id=args.project_id,
+            worker_id=args.worker_id,
+            watch=args.watch,
+            lease_seconds=args.lease_seconds,
+            idle_sleep_seconds=args.idle_sleep_seconds,
+            max_idle_cycles=max_idle_cycles,
+            max_iterations=args.max_iterations,
+            heartbeat_project_ids=heartbeat_project_ids,
+            heartbeat_interval_seconds=heartbeat_interval_seconds,
+            heartbeat_all_projects=args.heartbeat_all_projects,
+            review_check_enabled=args.review_check_enabled or config.pr_check_enabled,
+            review_check_interval_seconds=args.review_check_interval_seconds or config.pr_check_interval_seconds,
+        )
         control_dir = config.db_path.parent / "supervisors"
         control_dir.mkdir(parents=True, exist_ok=True)
         stop_request_path = control_dir / "stop.request"
@@ -892,6 +889,10 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
         def _request_stop(_signum, _frame):
             stop_requested["signal_count"] += 1
             stop_requested["value"] = True
+            if not args.json:
+                print(f"\n{_timestamped('Shutting down...')}", flush=True)
+            stop_ui_process(config)
+            stop_sa_watch_process(config)
             stop_request_path.write_text("graceful-stop-requested\n", encoding="utf-8")
             if stop_requested["signal_count"] >= 2:
                 raise KeyboardInterrupt
@@ -937,12 +938,33 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
                 ),
                 flush=True,
             )
+        sa_watch_process = None
+        if not args.no_sa_watch_autostart:
+            sa_watch_process = start_sa_watch_process(
+                config,
+                interval_seconds=args.sa_watch_interval_seconds,
+                stream_output=not args.json,
+            )
+            if not args.json and sa_watch_process is not None:
+                print(
+                    "\n".join(
+                        [
+                            _timestamped("sa-watch started"),
+                            _timestamped(f"- PID: {sa_watch_process['pid']}"),
+                            _timestamped(f"- Interval: {args.sa_watch_interval_seconds:.1f}s"),
+                            _timestamped(f"- Output: live console + {sa_watch_process['log_path']}"),
+                        ]
+                    ),
+                    flush=True,
+                )
         def _control_aware_progress(event: dict[str, object]) -> None:
             ctx.control_runtime.handle(event)
+            ctx.control_watch.observe(event, api_url=desired_api_url(config))
             if not args.json:
                 _emit_supervise_progress(event)
 
         ctx.control_plane.resume_lane("harness", reason="supervise_start")
+        interrupted = False
         try:
             result = engine.supervise(
                 project_id=args.project_id,
@@ -961,8 +983,20 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
                 progress_callback=_control_aware_progress,
             )
             ctx.control_plane.mark_healthy(reason="supervise_completed")
+        except KeyboardInterrupt:
+            interrupted = True
+            raise
         finally:
+            shutting_down = interrupted or stop_requested["value"] or stop_request_path.exists()
             ctx.control_plane.pause_lane("harness", reason="supervise_exit")
+            if shutting_down:
+                if not args.json:
+                    print(_timestamped("Shutdown requested; stopping ui + sa-watch + control-plane"), flush=True)
+                stop_ui_process(config)
+                stop_sa_watch_process(config)
+                ctx.control_plane.turn_off()
+                if not args.json:
+                    print(_timestamped("System stopped"), flush=True)
             signal.signal(signal.SIGINT, previous_int)
             signal.signal(signal.SIGTERM, previous_term)
             if pid_path.exists():
@@ -970,7 +1004,10 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
             if stop_request_path.exists() and not _prune_supervisor_records(config):
                 stop_request_path.unlink()
         if args.json:
-            emit(serialize_dataclass(result))
+            payload = serialize_dataclass(result)
+            if sa_watch_process is not None:
+                payload["sa_watch"] = sa_watch_process
+            emit(payload)
         else:
             print(_supervise_summary_text(result))
         return True
