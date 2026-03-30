@@ -30,6 +30,8 @@ from accruvia_harness.workers import (
     LocalArtifactWorker,
     LLMTaskWorker,
     ShellCommandWorker,
+    STRUCTURAL_FIX_MAX_RUN_SECONDS,
+    STRUCTURAL_FIX_STALE_PROGRESS_SECONDS,
     _default_agent_worker_command,
     build_worker,
     build_worker_from_config,
@@ -188,6 +190,76 @@ class WorkerTests(unittest.TestCase):
         stderr_path = self.base / "runs" / self.run.id / "worker.stderr.txt"
         self.assertEqual("blocked", result.outcome)
         self.assertEqual("partial stderr", stderr_path.read_text(encoding="utf-8"))
+
+    def test_structural_fix_uses_tighter_run_timeout(self) -> None:
+        self.task.strategy = "sa_structural_fix"
+        telemetry = TelemetrySink(self.base / "telemetry")
+        timeout_policy = ExecutionTimeoutPolicy(
+            telemetry,
+            min_seconds=1800,
+            max_seconds=1800,
+            multiplier=1.0,
+        )
+        monotonic_values = iter([0.0, float(STRUCTURAL_FIX_MAX_RUN_SECONDS) + 1.0])
+
+        class _FakeProcess:
+            pid = 12345
+            returncode = -9
+
+            def poll(self):
+                return None
+
+            def kill(self):
+                return None
+
+            def communicate(self):
+                return ("partial stdout", "partial stderr")
+
+        worker = ShellCommandWorker(
+            "sleep 2000",
+            timeout_policy=timeout_policy,
+            monotonic=lambda: next(monotonic_values),
+            sleep_fn=lambda _seconds: None,
+        )
+
+        with patch("accruvia_harness.workers.subprocess.Popen", return_value=_FakeProcess()):
+            result = worker.work(self.task, self.run, self.base)
+
+        self.assertEqual("blocked", result.outcome)
+        self.assertEqual(STRUCTURAL_FIX_MAX_RUN_SECONDS, result.diagnostics["timeout_seconds"])
+
+    def test_structural_fix_uses_tighter_stale_progress_timeout(self) -> None:
+        self.task.strategy = "sa_structural_fix"
+        monotonic_values = iter([0.0, 61.0])
+
+        class _FakeProcess:
+            pid = 12345
+            returncode = -9
+
+            def poll(self):
+                return None
+
+            def kill(self):
+                return None
+
+            def communicate(self):
+                return ("partial stdout", "partial stderr")
+
+        worker = ShellCommandWorker(
+            "sleep 2000",
+            timeout_policy=None,
+            stale_after_seconds=7200,
+            monotonic=lambda: next(monotonic_values),
+            sleep_fn=lambda _seconds: None,
+        )
+        worker._latest_artifact_details = lambda _run_dir: ("plan.txt", float(STRUCTURAL_FIX_STALE_PROGRESS_SECONDS) + 1.0)  # type: ignore[method-assign]
+
+        with patch("accruvia_harness.workers.subprocess.Popen", return_value=_FakeProcess()):
+            result = worker.work(self.task, self.run, self.base)
+
+        self.assertEqual("blocked", result.outcome)
+        self.assertEqual("stale_progress_timeout", result.diagnostics["failure_category"])
+        self.assertEqual(float(STRUCTURAL_FIX_STALE_PROGRESS_SECONDS), result.diagnostics["stale_after_seconds"])
 
     def test_agent_worker_captures_failure_without_raising(self) -> None:
         worker = AgentCommandWorker("printf 'boom' >&2; exit 7")
@@ -535,20 +607,20 @@ class WorkerTests(unittest.TestCase):
 
     def test_focused_test_command_uses_lightweight_suite_for_repair_mode(self) -> None:
         self.assertEqual(
-            ["python3", "-m", "unittest", "-v", "tests.test_workers"],
+            [sys.executable, "-m", "unittest", "-v", "tests.test_workers"],
             _focused_test_command("lightweight_repair"),
         )
 
     def test_focused_test_command_uses_lightweight_suite_for_operator_mode(self) -> None:
         self.assertEqual(
-            ["python3", "-m", "unittest", "-v", "tests.test_phase1"],
+            [sys.executable, "-m", "unittest", "-v", "tests.test_phase1"],
             _focused_test_command("lightweight_operator"),
         )
 
     def test_focused_test_command_keeps_default_suite_for_default_mode(self) -> None:
         self.assertEqual(
             [
-                "python3",
+                sys.executable,
                 "-m",
                 "unittest",
                 "-v",
@@ -689,9 +761,51 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(0, result)
         self.assertEqual("success", report["worker_outcome"])
         self.assertEqual(
-            ["python3", "-m", "unittest", "-v", "tests.test_store"],
+            [sys.executable, "-m", "unittest", "-v", "tests.test_store"],
             report["test_check"]["command"],
         )
+
+    def test_run_validation_records_validation_failure_when_tests_error(self) -> None:
+        workspace = self.base / "workspace-validation-failure"
+        src_dir = workspace / "src" / "accruvia_harness"
+        tests_dir = workspace / "tests"
+        src_dir.mkdir(parents=True)
+        tests_dir.mkdir(parents=True)
+        (src_dir / "__init__.py").write_text("", encoding="utf-8")
+        (src_dir / "ui.py").write_text("VALUE = 1\n", encoding="utf-8")
+        (tests_dir / "test_ui.py").write_text(
+            "raise ModuleNotFoundError('fastapi')\n",
+            encoding="utf-8",
+        )
+        run_dir = self.base / "run-validation-failure"
+        run_dir.mkdir(parents=True)
+        report_path = run_dir / "report.json"
+        report_path.write_text(
+            json.dumps(
+                {
+                    "worker_outcome": "candidate",
+                    "changed_files": ["src/accruvia_harness/ui.py", "tests/test_ui.py"],
+                    "test_files": ["tests/test_ui.py"],
+                    "effective_validation_mode": "lightweight_operator",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        env = {
+            "ACCRUVIA_RUN_DIR": str(run_dir),
+            "ACCRUVIA_PROJECT_WORKSPACE": str(workspace),
+            "ACCRUVIA_TASK_ID": self.task.id,
+            "ACCRUVIA_RUN_ID": self.run.id,
+            "ACCRUVIA_TASK_VALIDATION_MODE": "lightweight_operator",
+        }
+
+        result = run_validation(env)
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(1, result)
+        self.assertEqual("validation_failure", report["failure_category"])
+        self.assertIn("ERROR", report["failure_message"])
 
     def test_run_validation_adds_workspace_src_to_pythonpath(self) -> None:
         workspace = self.base / "workspace-pythonpath"

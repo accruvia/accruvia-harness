@@ -5,7 +5,7 @@ PIP ?= .venv/bin/pip
 # TODO(remove after packaged release): drop this once local installs/imports are deterministic.
 PYTHONPATH_VALUE := src
 
-.PHONY: help venv init install bootstrap install-temporal install-observability run ui-restart frontend-dev verify-test-import-safety test test-fast test-e2e test-observer test-temporal test-pytest temporal-up temporal-down
+.PHONY: help venv init install bootstrap install-temporal install-observability run ui-restart frontend-dev verify-test-import-safety test test-fast test-e2e test-observer test-temporal test-pytest temporal-up temporal-down ci-local
 
 help:
 	@echo "Targets:"
@@ -24,6 +24,7 @@ help:
 	@echo "  make test-pytest ARGS=...  Run pytest with repo-local import safety"
 	@echo "  make test-e2e              Run end-to-end tests"
 	@echo "  make test-temporal         Run the Temporal runtime gate"
+	@echo "  make ci-local              Run the local GitHub CI parity gate"
 	@echo "  make test-observer         Run observer tests"
 	@echo "  make temporal-up           Start Temporal dev stack"
 	@echo "  make temporal-down         Stop Temporal dev stack"
@@ -100,3 +101,6 @@ temporal-up:
 
 temporal-down:
 	docker compose -f docker-compose.temporal.yml down
+
+ci-local:
+	PYTHONPATH=$(PYTHONPATH_VALUE) $(PYTHON) -m accruvia_harness ci-local

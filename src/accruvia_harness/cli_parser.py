@@ -235,6 +235,7 @@ def build_parser() -> argparse.ArgumentParser:
     smoke.add_argument("--project-name", default="smoke-project")
     smoke.add_argument("--task-title", default="Smoke task")
     smoke.add_argument("--objective", default="Verify the local durable loop")
+    subparsers.add_parser("ci-local", help="Run the local GitHub CI parity gate.")
 
     subparsers.add_parser("status", help="Show projects, tasks, runs, and promotions.")
     summary = subparsers.add_parser("summary", help="Show high-level harness summary.")

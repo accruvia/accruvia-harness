@@ -156,6 +156,11 @@ class DefaultAnalyzer:
 
 class DefaultDecider:
     def decide(self, analysis: AnalyzeResult, run: Run, task: Task) -> DecideResult:
+        if task.strategy == "sa_structural_fix" and analysis.verdict != EvaluationVerdict.ACCEPTABLE:
+            return DecideResult(
+                action=DecisionAction.FAIL,
+                rationale="Structural recovery run failed inside the bounded recovery budget; stop immediate retry and return control to sa-watch.",
+            )
         if bool(analysis.details.get("infrastructure_failure")):
             if run.attempt < task.max_attempts:
                 return DecideResult(

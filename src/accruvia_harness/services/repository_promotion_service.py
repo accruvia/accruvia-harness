@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from ..domain import PromotionMode, Project, RepoProvider, Task
@@ -23,6 +24,17 @@ class PromotionApplyResult:
     rollback_commit_sha: str | None = None
 
 
+@dataclass(slots=True)
+class LocalCIResult:
+    passed: bool
+    failed_stage: str
+    command_summary: tuple[str, ...]
+    logs: dict[str, str]
+    started_at: datetime
+    finished_at: datetime
+    summary: str
+
+
 class RepositoryPromotionService:
     def __init__(
         self,
@@ -39,6 +51,100 @@ class RepositoryPromotionService:
             ("make", "test-fast"),
         )
         self.post_push_commands = post_push_commands if post_push_commands is not None else self.pre_push_commands
+
+    def run_local_ci(self, workspace_root: Path) -> LocalCIResult:
+        workspace_root = workspace_root.resolve()
+        started_at = datetime.now(UTC)
+        run_dir = workspace_root / ".accruvia-harness" / "ci-local" / started_at.strftime("%Y%m%dT%H%M%S")
+        run_dir.mkdir(parents=True, exist_ok=True)
+        logs: dict[str, str] = {}
+        commands: list[str] = []
+        failed_stage = "unknown"
+        temporal_job_started = False
+
+        def _run_step(name: str, stage: str, command: str) -> None:
+            nonlocal failed_stage, temporal_job_started
+            commands.append(command)
+            if stage == "temporal":
+                temporal_job_started = True
+            completed = subprocess.run(
+                ["bash", "-lc", command],
+                cwd=workspace_root,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            log_path = run_dir / f"{name}.log"
+            log_path.write_text((completed.stdout or "") + (completed.stderr or ""), encoding="utf-8")
+            logs[name] = str(log_path)
+            if completed.returncode != 0:
+                failed_stage = stage
+                raise RuntimeError(command)
+
+        try:
+            _run_step("setup_venv", "setup", "python -m venv .venv")
+            _run_step("setup_upgrade_pip", "setup", ". .venv/bin/activate && python -m pip install --upgrade pip")
+            _run_step("setup_install_editable", "setup", ". .venv/bin/activate && pip install -e .")
+            _run_step("fast_verify_import_safety", "fast", ". .venv/bin/activate && make verify-test-import-safety")
+            _run_step("fast_tests", "fast", ". .venv/bin/activate && make test-fast")
+            _run_step("temporal_install", "setup", ". .venv/bin/activate && pip install -e '.[temporal]'")
+            _run_step("temporal_docker_logout", "temporal", "docker logout || true")
+            _run_step("temporal_docker_logout_docker_io", "temporal", "docker logout docker.io || true")
+            _run_step("temporal_up", "temporal", "docker compose -f docker-compose.temporal.yml up -d")
+            _run_step(
+                "temporal_wait",
+                "temporal",
+                "for i in $(seq 1 30); do "
+                "if python -c \"import socket, sys; "
+                "conn = None; "
+                "try:\n"
+                "    conn = socket.create_connection(('127.0.0.1', 7233), timeout=1)\n"
+                "except OSError:\n"
+                "    sys.exit(1)\n"
+                "else:\n"
+                "    conn.close()\n"
+                "    sys.exit(0)\"; "
+                "then exit 0; fi; "
+                "sleep 1; "
+                "done; "
+                "echo 'Temporal did not become ready in time' >&2; "
+                "exit 1",
+            )
+            _run_step("temporal_verify_import_safety", "temporal", ". .venv/bin/activate && make verify-test-import-safety")
+            _run_step("temporal_tests", "temporal", ". .venv/bin/activate && make test-temporal")
+            finished_at = datetime.now(UTC)
+            return LocalCIResult(
+                passed=True,
+                failed_stage="unknown",
+                command_summary=tuple(commands),
+                logs=logs,
+                started_at=started_at,
+                finished_at=finished_at,
+                summary="Local CI parity passed.",
+            )
+        except Exception:
+            finished_at = datetime.now(UTC)
+            return LocalCIResult(
+                passed=False,
+                failed_stage=failed_stage,
+                command_summary=tuple(commands),
+                logs=logs,
+                started_at=started_at,
+                finished_at=finished_at,
+                summary=f"Local CI parity failed during the {failed_stage} stage.",
+            )
+        finally:
+            if temporal_job_started:
+                completed = subprocess.run(
+                    ["bash", "-lc", "docker compose -f docker-compose.temporal.yml down"],
+                    cwd=workspace_root,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                log_path = run_dir / "temporal_down.log"
+                log_path.write_text((completed.stdout or "") + (completed.stderr or ""), encoding="utf-8")
+                logs["temporal_down"] = str(log_path)
 
     def apply(
         self,

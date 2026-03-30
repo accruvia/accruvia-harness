@@ -12,6 +12,7 @@ from accruvia_harness.domain import (
     ControlEvent,
     ControlLaneStateValue,
     ControlRecoveryAction,
+    ControlWorkerRun,
     GlobalSystemState,
     ContextRecord,
     Event,
@@ -165,11 +166,11 @@ class SQLiteHarnessStoreTests(unittest.TestCase):
         thawed = control_plane.thaw()
         stopped = control_plane.turn_off()
 
-        self.assertEqual("starting", started["global_state"])
+        self.assertEqual("healthy", started["global_state"])
         self.assertTrue(started["master_switch"])
         self.assertEqual("frozen", frozen["global_state"])
         self.assertEqual("smoke", frozen["frozen_reason"])
-        self.assertEqual("starting", thawed["global_state"])
+        self.assertEqual("healthy", thawed["global_state"])
         self.assertEqual("off", stopped["global_state"])
         self.assertFalse(stopped["master_switch"])
 
@@ -377,6 +378,7 @@ class SQLiteHarnessStoreTests(unittest.TestCase):
             summary="working",
         )
         self.store.create_run(run)
+        self.store.upsert_control_worker_run(ControlWorkerRun(id=run.id, task_id=task.id, status="started"))
         with self.store.connect() as connection:
             connection.execute(
                 "INSERT INTO task_leases (task_id, worker_id, lease_expires_at, created_at) VALUES (?, ?, ?, ?)",
@@ -386,12 +388,15 @@ class SQLiteHarnessStoreTests(unittest.TestCase):
         recovered = self.store.recover_stale_state()
         task_after = self.store.get_task(task.id)
         run_after = self.store.get_run(run.id)
+        control_run_after = self.store.get_control_worker_run(run.id)
 
         self.assertEqual(1, recovered["runs"])
         self.assertEqual(1, recovered["tasks"])
         self.assertEqual(1, recovered["leases"])
         self.assertEqual(TaskStatus.PENDING, task_after.status if task_after else None)
         self.assertEqual(RunStatus.FAILED, run_after.status if run_after else None)
+        self.assertEqual("failed", control_run_after.status if control_run_after else None)
+        self.assertEqual("system_failure", control_run_after.classification if control_run_after else None)
 
     def test_recover_stale_state_preserves_in_progress_run_with_active_lease(self) -> None:
         project = Project(id=new_id("project"), name="recover-live", description="Recover live")

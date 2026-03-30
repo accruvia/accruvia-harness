@@ -135,6 +135,23 @@ def _smoke_test_text(payload: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
+def _ci_local_text(payload: dict[str, object]) -> str:
+    lines = [
+        "Local CI parity",
+        f"- Passed: {'yes' if payload.get('passed') else 'no'}",
+        f"- Failed stage: {payload.get('failed_stage') or 'unknown'}",
+        f"- Started: {payload.get('started_at')}",
+        f"- Finished: {payload.get('finished_at')}",
+        f"- Summary: {payload.get('summary')}",
+    ]
+    logs = payload.get("logs") or {}
+    if isinstance(logs, dict) and logs:
+        lines.append("- Logs:")
+        for name, path in logs.items():
+            lines.append(f"  - {name}: {path}")
+    return "\n".join(lines)
+
+
 def _backlog_delta_text(before: dict[str, object] | None, after: dict[str, object] | None) -> str | None:
     if not before or not after:
         return None
@@ -198,6 +215,10 @@ def _timestamped(text: str) -> str:
     return f"{datetime.now().astimezone().strftime('%H:%M:%S')} {text}"
 
 
+def _build_supervise_restart_command(record: dict[str, object]) -> list[str]:
+    return build_supervise_restart_command(record)
+
+
 def _format_duration(seconds: object) -> str:
     if not isinstance(seconds, (int, float)):
         return "unknown"
@@ -207,6 +228,29 @@ def _format_duration(seconds: object) -> str:
     if hours:
         return f"{hours:02d}:{minutes:02d}:{secs:02d}"
     return f"{minutes:02d}:{secs:02d}"
+
+
+def _worker_status_operator_text(event: dict[str, object]) -> str:
+    latest_artifact = event.get("latest_artifact")
+    latest_age = event.get("latest_artifact_age_seconds")
+    strategy = str(event.get("strategy") or "")
+    stale = bool(event.get("stale"))
+    age_text = _format_duration(latest_age)
+    if strategy == "sa_structural_fix":
+        if latest_artifact:
+            if stale:
+                return f"recovery run likely stuck; no new durable artifacts for {age_text} (latest {latest_artifact})"
+            return f"recovery run active; no new durable artifacts for {age_text} (latest {latest_artifact})"
+        if stale:
+            return "recovery run likely stuck; no durable artifacts yet"
+        return "recovery run active; no durable artifacts yet"
+    if latest_artifact:
+        if stale:
+            return f"likely stuck; no new durable artifacts for {age_text} (latest {latest_artifact})"
+        return f"last artifact {latest_artifact} {age_text} ago"
+    if stale:
+        return "likely stuck; no durable artifacts yet"
+    return "no durable artifacts yet"
 
 
 def _emit_supervise_progress(event: dict[str, object]) -> None:
@@ -239,13 +283,7 @@ def _emit_supervise_progress(event: dict[str, object]) -> None:
         )
         return
     if event_type == "worker_status":
-        latest_artifact = event.get("latest_artifact")
-        latest_age = event.get("latest_artifact_age_seconds")
-        artifact_text = (
-            f"last artifact {latest_artifact} {_format_duration(latest_age)} ago"
-            if latest_artifact
-            else "no durable artifacts yet"
-        )
+        artifact_text = _worker_status_operator_text(event)
         stale_text = " [stale]" if event.get("stale") else ""
         print(
             _timestamped(
@@ -681,6 +719,22 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
             emit(payload)
         else:
             print(_doctor_text(payload))
+        return True
+    if args.command == "ci-local":
+        result = engine.repository_promotions.run_local_ci(Path.cwd())
+        payload = {
+            "passed": result.passed,
+            "failed_stage": result.failed_stage,
+            "command_summary": list(result.command_summary),
+            "logs": result.logs,
+            "started_at": result.started_at.isoformat(),
+            "finished_at": result.finished_at.isoformat(),
+            "summary": result.summary,
+        }
+        if args.json:
+            emit(payload)
+        else:
+            print(_ci_local_text(payload))
         return True
     if args.command == "ui":
         from ..ui import start_ui_server

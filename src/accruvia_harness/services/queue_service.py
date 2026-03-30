@@ -145,6 +145,9 @@ class QueueService:
         return processed
 
     def _worker_lane_blocks(self, task) -> bool:
+        system = self.store.get_control_system_state()
+        if not system.master_switch:
+            return False
         lane = self.store.get_control_lane_state("worker")
         if lane is None:
             return False

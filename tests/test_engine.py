@@ -6,6 +6,8 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from accruvia_harness.config import HarnessConfig
 from accruvia_harness.domain import (
@@ -315,6 +317,35 @@ class BranchOnceDecider:
         )
 
 
+class BlockedAnalyzer:
+    def blocked(self, task, run, diagnostics):
+        return SimpleNamespace(
+            verdict=EvaluationVerdict.BLOCKED,
+            confidence=0.95,
+            summary="Older run timed out after a newer run already completed the task.",
+            details={},
+        )
+
+    def failed(self, task, run, diagnostics):
+        return self.blocked(task, run, diagnostics)
+
+    def analyze(self, task, run, artifacts):
+        return self.blocked(task, run, {})
+
+
+class StaleRetryDecider:
+    def __init__(self, store: SQLiteHarnessStore, task_id: str) -> None:
+        self.store = store
+        self.task_id = task_id
+
+    def decide(self, analysis, run, task):
+        self.store.update_task_status(self.task_id, TaskStatus.COMPLETED)
+        return DecideResult(
+            action=DecisionAction.RETRY,
+            rationale="Ignore stale blocked run because the task is already completed.",
+        )
+
+
 class HarnessEngineTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -386,6 +417,62 @@ class HarnessEngineTests(unittest.TestCase):
             subprocess.run(["git", "init", "--bare", str(remote_root)], cwd=repo_root.parent, check=True, capture_output=True, text=True)
             subprocess.run(["git", "remote", "add", "origin", str(remote_root)], cwd=repo_root, check=True, capture_output=True, text=True)
         return remote_root
+
+    def test_repository_promotion_run_local_ci_reports_success(self) -> None:
+        repo_root = Path(self.temp_dir.name) / "ci-local-success"
+        repo_root.mkdir()
+        commands: list[str] = []
+
+        def _fake_run(command, cwd=None, check=False, capture_output=False, text=False):  # type: ignore[override]
+            del cwd, check, capture_output, text
+            commands.append(command[2])
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with patch("accruvia_harness.services.repository_promotion_service.subprocess.run", side_effect=_fake_run):
+            result = RepositoryPromotionService().run_local_ci(repo_root)
+
+        self.assertTrue(result.passed)
+        self.assertEqual("unknown", result.failed_stage)
+        self.assertIn("docker compose -f docker-compose.temporal.yml down", commands[-1])
+        self.assertIn("temporal_down", result.logs)
+
+    def test_repository_promotion_run_local_ci_fails_fast_before_temporal(self) -> None:
+        repo_root = Path(self.temp_dir.name) / "ci-local-fast-fail"
+        repo_root.mkdir()
+        commands: list[str] = []
+
+        def _fake_run(command, cwd=None, check=False, capture_output=False, text=False):  # type: ignore[override]
+            del cwd, check, capture_output, text
+            script = command[2]
+            commands.append(script)
+            returncode = 1 if "make test-fast" in script else 0
+            return SimpleNamespace(returncode=returncode, stdout="", stderr="")
+
+        with patch("accruvia_harness.services.repository_promotion_service.subprocess.run", side_effect=_fake_run):
+            result = RepositoryPromotionService().run_local_ci(repo_root)
+
+        self.assertFalse(result.passed)
+        self.assertEqual("fast", result.failed_stage)
+        self.assertFalse(any("docker compose -f docker-compose.temporal.yml down" in item for item in commands))
+
+    def test_repository_promotion_run_local_ci_always_tears_down_temporal_after_failure(self) -> None:
+        repo_root = Path(self.temp_dir.name) / "ci-local-temporal-fail"
+        repo_root.mkdir()
+        commands: list[str] = []
+
+        def _fake_run(command, cwd=None, check=False, capture_output=False, text=False):  # type: ignore[override]
+            del cwd, check, capture_output, text
+            script = command[2]
+            commands.append(script)
+            returncode = 1 if "Temporal did not become ready in time" in script else 0
+            return SimpleNamespace(returncode=returncode, stdout="", stderr="")
+
+        with patch("accruvia_harness.services.repository_promotion_service.subprocess.run", side_effect=_fake_run):
+            result = RepositoryPromotionService().run_local_ci(repo_root)
+
+        self.assertFalse(result.passed)
+        self.assertEqual("temporal", result.failed_stage)
+        self.assertIn("docker compose -f docker-compose.temporal.yml down", commands[-1])
 
     def test_run_once_completes_when_required_artifacts_exist(self) -> None:
         task = self.engine.create_task_with_policy(
@@ -2108,6 +2195,66 @@ class HarnessEngineTests(unittest.TestCase):
         self.assertEqual(1, summary["removed_orphaned"])
         self.assertFalse(orphan_workspace.exists())
 
+    def test_stale_blocked_run_does_not_reopen_completed_task(self) -> None:
+        task = self.engine.create_task_with_policy(
+            project_id=self.project_id,
+            title="stale retry",
+            objective="Ensure stale blocked runs do not reopen completed tasks",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=2,
+            required_artifacts=["plan", "report"],
+        )
+        self.store.update_task_status(task.id, TaskStatus.ACTIVE)
+        run = Run(
+            id=new_id("run"),
+            task_id=task.id,
+            status=RunStatus.WORKING,
+            attempt=1,
+            summary="stale blocked run",
+        )
+        self.store.create_run(run)
+        service = RunService(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-stale-retry",
+            planner=object(),
+            worker=LocalArtifactWorker(),
+            analyzer=BlockedAnalyzer(),
+            decider=StaleRetryDecider(self.store, task.id),
+            project_adapter_registry=ProjectAdapterRegistry(),
+        )
+
+        result = service._validation_phase(
+            task,
+            run,
+            WorkResult(
+                summary="Timed out after a newer run already finished the task.",
+                artifacts=[],
+                outcome="blocked",
+                diagnostics={"failure_category": "task_run_timeout", "timed_out": True},
+            ),
+            Path(self.temp_dir.name),
+            lambda _event: None,
+        )
+
+        refreshed_task = self.store.get_task(task.id)
+        self.assertIsNotNone(refreshed_task)
+        assert refreshed_task is not None
+        self.assertEqual(TaskStatus.COMPLETED, refreshed_task.status)
+        self.assertEqual(RunStatus.BLOCKED, result.status)
+        task_events = [
+            event for event in self.store.list_events()
+            if event.entity_type == "task" and event.entity_id == task.id and event.event_type == "task_status_changed"
+        ]
+        self.assertFalse(
+            any(event.payload.get("status") == TaskStatus.PENDING.value for event in task_events),
+            "A stale blocked run must not reopen a completed task.",
+        )
+
     def test_review_promotion_rejects_and_creates_follow_on(self) -> None:
         engine = HarnessEngine(
             store=self.store,
@@ -2290,6 +2437,35 @@ class HarnessEngineTests(unittest.TestCase):
         self.assertEqual("failed", run.status.value)
         self.assertEqual("failed", evaluation.verdict)
         self.assertEqual("fail", decision.action.value)
+
+    def test_structural_fix_failed_run_does_not_immediately_retry(self) -> None:
+        engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-structural-fail",
+            worker=FailedDiagnosisWorker(),
+        )
+        task = engine.create_task_with_policy(
+            project_id=self.project_id,
+            title="Structural fix",
+            objective="Stop a stalled objective",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type="sa_watch",
+            external_ref_id="objective:test:stalled",
+            strategy="sa_structural_fix",
+            max_attempts=2,
+            required_artifacts=["plan", "report"],
+        )
+
+        runs = engine.run_until_stable(task.id)
+        task_after = self.store.get_task(task.id)
+        decisions = self.store.list_decisions(runs[0].id)
+
+        self.assertEqual(1, len(runs))
+        self.assertEqual("failed", runs[0].status.value)
+        self.assertEqual("fail", decisions[0].action.value)
+        self.assertEqual("failed", task_after.status.value if task_after is not None else None)
 
     def test_infrastructure_blocked_worker_creates_executor_repair_follow_on(self) -> None:
         engine = HarnessEngine(

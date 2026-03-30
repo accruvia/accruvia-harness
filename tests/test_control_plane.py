@@ -26,7 +26,7 @@ from accruvia_harness.commands.common import (
     update_ui_runtime_state,
 )
 from accruvia_harness.commands.control import handle_control_command
-from accruvia_harness.commands.core import handle_core_command
+from accruvia_harness.commands.core import _worker_status_operator_text, handle_core_command
 from accruvia_harness.config import HarnessConfig
 from accruvia_harness.control_breadcrumbs import BreadcrumbWriter
 from accruvia_harness.control_classifier import FailureClassifier
@@ -35,6 +35,8 @@ from accruvia_harness.control_runtime import ControlRuntimeObserver
 from accruvia_harness.control_watch import ControlWatchService
 from accruvia_harness.context_control import ObjectiveExecutionGate
 from accruvia_harness.services.queue_service import QueueService
+from accruvia_harness.services.repository_promotion_service import LocalCIResult
+from accruvia_harness.services.structural_fix_promotion_service import StructuralFixPromotionService
 from accruvia_harness.services.task_service import TaskService
 from accruvia_harness.services.workflow_service import WorkflowService
 from accruvia_harness.llm import LLMExecutionResult, LLMRouter
@@ -520,7 +522,14 @@ class ControlRuntimeObserverTests(unittest.TestCase):
         ctx = build_context(config)
 
         self.assertTrue(hasattr(ctx.engine, "queue"))
-        self.assertIsNotNone(ctx.engine.queue.post_task_callback)
+        self.assertIsNotNone(ctx.sa_watch.structural_progress_callback)
+        self.assertIsNotNone(ctx.sa_watch.restart_stack)
+        try:
+            import fastapi  # noqa: F401
+        except ModuleNotFoundError:
+            self.assertIsNone(ctx.engine.queue.post_task_callback)
+        else:
+            self.assertIsNotNone(ctx.engine.queue.post_task_callback)
 
     def test_task_started_marks_worker_lane_running(self) -> None:
         self.observer.handle({"type": "task_started", "task_id": "task_123"})
@@ -647,6 +656,234 @@ class ControlRuntimeObserverTests(unittest.TestCase):
         self.assertEqual(1, len(requested))
         self.assertEqual("sa_structural_fix_completed", requested[0]["reason"])
         self.assertEqual(structural_task.id, requested[0]["task_id"])
+
+    def test_structural_fix_completion_runs_promotion_before_restart(self) -> None:
+        order: list[str] = []
+        observer = ControlRuntimeObserver(
+            self.store,
+            self.control_plane,
+            FailureClassifier(),
+            BreadcrumbWriter(self.store, self.workspace_root),
+            request_stack_restart=lambda payload: order.append(f"restart:{payload['task_id']}"),
+            structural_fix_promotion=lambda task, run_id: order.append(f"promote:{task.id}:{run_id}") or {"status": "ok"},
+        )
+        tasks = TaskService(self.store)
+        project = tasks.create_project("restart-project", "restart")
+        objective = Objective(
+            id=new_id("objective"),
+            project_id=project.id,
+            title="Restart objective",
+            summary="needs restart after structural fix",
+            status=ObjectiveStatus.EXECUTING,
+        )
+        self.store.create_objective(objective)
+        structural_task = tasks.create_task_with_policy(
+            project_id=project.id,
+            objective_id=objective.id,
+            title="Structural fix",
+            objective="Fix it",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type="sa_watch",
+            external_ref_id=f"objective:{objective.id}:stale_atomic_generation",
+            strategy="sa_structural_fix",
+        )
+        self.store.update_task_status(structural_task.id, TaskStatus.COMPLETED)
+
+        observer.handle(
+            {
+                "type": "task_finished",
+                "task_id": structural_task.id,
+                "run_id": "run_structural",
+                "status": "completed",
+                "run_status": "completed",
+            }
+        )
+
+        self.assertEqual(
+            [f"promote:{structural_task.id}:run_structural", f"restart:{structural_task.id}"],
+            order,
+        )
+
+    def test_non_structural_fix_completion_does_not_run_promotion(self) -> None:
+        promotion_calls: list[str] = []
+        restart_calls: list[str] = []
+        observer = ControlRuntimeObserver(
+            self.store,
+            self.control_plane,
+            FailureClassifier(),
+            BreadcrumbWriter(self.store, self.workspace_root),
+            request_stack_restart=lambda payload: restart_calls.append(str(payload.get("task_id") or "")),
+            structural_fix_promotion=lambda task, run_id: promotion_calls.append(f"{task.id}:{run_id}") or {"status": "ok"},
+        )
+        tasks = TaskService(self.store)
+        project = tasks.create_project("normal-project", "normal")
+        task = tasks.create_task_with_policy(
+            project_id=project.id,
+            objective_id=None,
+            title="Normal task",
+            objective="Complete normal work",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+        )
+        self.store.update_task_status(task.id, TaskStatus.COMPLETED)
+
+        observer.handle(
+            {
+                "type": "task_finished",
+                "task_id": task.id,
+                "run_id": "run_normal",
+                "status": "completed",
+                "run_status": "completed",
+            }
+        )
+
+        self.assertEqual([], promotion_calls)
+        self.assertEqual([], restart_calls)
+
+
+class StructuralFixPromotionServiceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.root = Path(self.temp_dir.name)
+        self.store = SQLiteHarnessStore(self.root / "harness.db")
+        self.store.initialize()
+        self.workspace_root = self.root / "workspace"
+        self.breadcrumb_writer = BreadcrumbWriter(self.store, self.workspace_root)
+        self.project = Project(id=new_id("project"), name="repo-promotion", description="repo promotion")
+        self.store.create_project(self.project)
+        self.objective = Objective(
+            id=new_id("objective"),
+            project_id=self.project.id,
+            title="Objective",
+            summary="summary",
+            status=ObjectiveStatus.EXECUTING,
+        )
+        self.store.create_objective(self.objective)
+
+    def _create_structural_task(self) -> object:
+        task = TaskService(self.store).create_task_with_policy(
+            project_id=self.project.id,
+            objective_id=self.objective.id,
+            title="Structural fix",
+            objective="Fix it",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type="sa_watch",
+            external_ref_id=f"objective:{self.objective.id}:stale_atomic_generation",
+            strategy="sa_structural_fix",
+        )
+        self.store.update_task_status(task.id, TaskStatus.COMPLETED)
+        return task
+
+    def _record_workspace(self, run_id: str, repo_root: Path, *, workspace_mode: str = "shared_repo") -> None:
+        self.store.create_event(
+            ControlEvent(
+                id=new_id("event"),
+                entity_type="run",
+                entity_id=run_id,
+                event_type="project_workspace_prepared",
+                producer="test",
+                payload={
+                    "project_root": str(repo_root),
+                    "workspace_mode": workspace_mode,
+                    "source_repo_root": str(repo_root),
+                },
+                idempotency_key=new_id("event_key"),
+            )
+        )
+
+    def _write_report(self, run_id: str, changed_files: list[str]) -> None:
+        run_dir = self.root / "workspace" / "runs" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "report.json").write_text(json.dumps({"changed_files": changed_files}), encoding="utf-8")
+
+    def test_failed_ci_blocks_push_and_records_artifact(self) -> None:
+        task = self._create_structural_task()
+        repo_root = self.root / "repo"
+        repo_root.mkdir()
+        self._record_workspace("run_structural", repo_root)
+        self._write_report("run_structural", ["src/fix.py"])
+
+        class _RepoPromotions:
+            def run_local_ci(self, workspace_root: Path) -> LocalCIResult:
+                return LocalCIResult(
+                    passed=False,
+                    failed_stage="fast",
+                    command_summary=("make test-fast",),
+                    logs={"fast_tests": str(workspace_root / "fast.log")},
+                    started_at=datetime.now(UTC),
+                    finished_at=datetime.now(UTC),
+                    summary="Local CI parity failed during the fast stage.",
+                )
+
+        service = StructuralFixPromotionService(self.store, self.breadcrumb_writer, _RepoPromotions())  # type: ignore[arg-type]
+
+        result = service.promote_completed_structural_fix(task, "run_structural")
+
+        self.assertEqual("blocked", result["status"])
+        self.assertEqual("ci_failed", result["reason"])
+        updated = self.store.get_task(task.id)
+        self.assertFalse(bool(updated.external_ref_metadata["sa_watch_promotion"]["ci_passed"]))
+        actions = self.store.list_control_recovery_actions(target_type="task", target_id=task.id)
+        self.assertEqual("observe", actions[0].action_type)
+        breadcrumbs = self.store.list_control_breadcrumbs(entity_type="task", entity_id=task.id)
+        self.assertEqual("ci_failed", breadcrumbs[0].classification)
+
+    def test_passed_ci_commits_and_pushes_to_main(self) -> None:
+        task = self._create_structural_task()
+        repo_root = self.root / "repo"
+        repo_root.mkdir()
+        self._record_workspace("run_structural", repo_root)
+        self._write_report("run_structural", ["src/fix.py"])
+        git_calls: list[tuple[str, ...]] = []
+
+        class _RepoPromotions:
+            def run_local_ci(self, workspace_root: Path) -> LocalCIResult:
+                return LocalCIResult(
+                    passed=True,
+                    failed_stage="unknown",
+                    command_summary=("make test-fast", "make test-temporal"),
+                    logs={"fast_tests": str(workspace_root / "fast.log")},
+                    started_at=datetime.now(UTC),
+                    finished_at=datetime.now(UTC),
+                    summary="Local CI parity passed.",
+                )
+
+            def _git_output(self, workspace_root: Path, *args: str) -> str:
+                git_calls.append(("git_output", *args))
+                if args == ("status", "--porcelain"):
+                    return " M src/fix.py\n"
+                if args == ("diff", "--cached", "--name-only"):
+                    return "src/fix.py\n"
+                if args == ("rev-parse", "HEAD"):
+                    return "abc123\n"
+                return ""
+
+            def _git(self, workspace_root: Path, *args: str) -> None:
+                git_calls.append(("git", *args))
+
+            def _verify_remote_sha(self, workspace_root: Path, base_branch: str, expected_sha: str) -> str:
+                git_calls.append(("verify", base_branch, expected_sha))
+                return expected_sha
+
+        with patch("accruvia_harness.services.structural_fix_promotion_service.subprocess.run") as subprocess_run:
+            subprocess_run.return_value = SimpleNamespace(returncode=0, stdout="", stderr="")
+            service = StructuralFixPromotionService(self.store, self.breadcrumb_writer, _RepoPromotions())  # type: ignore[arg-type]
+            result = service.promote_completed_structural_fix(task, "run_structural")
+
+        self.assertEqual("pushed", result["status"])
+        self.assertEqual("abc123", result["commit_sha"])
+        updated = self.store.get_task(task.id)
+        self.assertEqual("pushed", updated.external_ref_metadata["sa_watch_promotion"]["push_status"])
+        self.assertIn(("git", "commit", "-m", f"sa-watch: unblock objective {self.objective.id}"), git_calls)
+        self.assertIn(("git", "push", "origin", "HEAD:main"), git_calls)
 
     def test_control_loop_consumes_restart_request_and_relaunches_stack(self) -> None:
         root = Path(self.temp_dir.name)
@@ -1159,6 +1396,57 @@ class SAWatchServiceTests(unittest.TestCase):
         self.assertEqual("none", result["decision"]["action"])
         self.assertEqual("structural_fix_in_progress", result["decision"]["reason"])
         self.assertEqual("observed", result["effects"][0]["kind"])
+
+    def test_sa_watch_loop_prints_active_recovery_observation(self) -> None:
+        root = Path(self.temp_dir.name)
+        config = HarnessConfig.from_env(
+            db_path=root / "sa-watch-active-recovery.db",
+            workspace_root=root / "sa-watch-active-recovery-workspace",
+            log_path=root / "sa-watch-active-recovery.log",
+            config_file=root / "sa-watch-active-recovery-config.json",
+        )
+        active_store = SQLiteHarnessStore(config.db_path)
+        active_store.initialize()
+        active_control_plane = ControlPlane(active_store)
+        active_control_plane.turn_on()
+        supervisor_dir = root / "supervisors"
+        supervisor_dir.mkdir(parents=True, exist_ok=True)
+        (supervisor_dir / "active_recovery_supervisor.json").write_text(
+            json.dumps({"pid": os.getpid(), "worker_id": "supervisor"}),
+            encoding="utf-8",
+        )
+        active_control_watch = ControlWatchService(
+            active_store,
+            active_control_plane,
+            FailureClassifier(),
+            BreadcrumbWriter(active_store, config.workspace_root),
+            supervisor_control_dir=supervisor_dir,
+        )
+        ctx = SimpleNamespace(
+            config=config,
+            store=active_store,
+            control_plane=active_control_plane,
+            control_watch=active_control_watch,
+            sa_watch=SimpleNamespace(
+                run_once=lambda: {
+                    "decision": {"action": "none", "reason": "structural_fix_in_progress"},
+                    "packet": {"continuity_signals": []},
+                    "effects": [{"kind": "observed", "reason": "structural_fix_in_progress"}],
+                }
+            ),
+        )
+        args = Namespace(command="sa-watch-loop", interval_seconds=0.0, max_iterations=1)
+
+        with (
+            patch("accruvia_harness.commands.control.emit"),
+            patch("accruvia_harness.commands.control.print") as print_mock,
+        ):
+            handled = handle_control_command(args, ctx)
+
+        self.assertTrue(handled)
+        printed = "\n".join(call.args[0] for call in print_mock.call_args_list if call.args)
+        self.assertIn("decision: observing active recovery; no additional action taken", printed)
+        self.assertIn("observing active recovery; no additional action taken", printed)
 
     def test_sa_watch_creates_structural_task_without_resuming_worker_lane(self) -> None:
         project = Project(id=new_id("project"), name="watch-project", description="watch")
@@ -2161,6 +2449,46 @@ class WorkflowServiceTests(unittest.TestCase):
 
         self.assertEqual("runnable", queue_state["state"])
         self.assertIn("Structural recovery task may run", queue_state["reason"])
+
+
+class SuperviseProgressTextTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        root = Path(self.temp_dir.name)
+        self.store = SQLiteHarnessStore(root / "harness.db")
+        self.store.initialize()
+        self.tasks = TaskService(self.store)
+        self.workflow = WorkflowService(self.store)
+        self.project = self.tasks.create_project("workflow-project", "workflow")
+
+    def test_worker_status_operator_text_for_active_structural_fix(self) -> None:
+        text = _worker_status_operator_text(
+            {
+                "strategy": "sa_structural_fix",
+                "latest_artifact": "plan.txt",
+                "latest_artifact_age_seconds": 359,
+                "stale": False,
+            }
+        )
+        self.assertEqual(
+            "recovery run active; no new durable artifacts for 05:59 (latest plan.txt)",
+            text,
+        )
+
+    def test_worker_status_operator_text_for_stale_structural_fix(self) -> None:
+        text = _worker_status_operator_text(
+            {
+                "strategy": "sa_structural_fix",
+                "latest_artifact": "plan.txt",
+                "latest_artifact_age_seconds": 1200,
+                "stale": True,
+            }
+        )
+        self.assertEqual(
+            "recovery run likely stuck; no new durable artifacts for 20:00 (latest plan.txt)",
+            text,
+        )
 
     def test_reconcile_restarts_atomic_generation_when_only_terminal_failed_work_remains(self) -> None:
         objective = Objective(

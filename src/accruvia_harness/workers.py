@@ -16,6 +16,9 @@ from .llm import LLMExecutionError, LLMInvocation, LLMRouter, build_llm_router
 from .policy import WorkResult
 from .subprocess_env import build_subprocess_env
 
+STRUCTURAL_FIX_MAX_RUN_SECONDS = 15 * 60
+STRUCTURAL_FIX_STALE_PROGRESS_SECONDS = 10 * 60
+
 
 class WorkerBackend(Protocol):
     def work(self, task: Task, run: Run, workspace_root: Path) -> WorkResult: ...
@@ -229,6 +232,18 @@ class CommandWorker:
         age_seconds = max(0.0, time.time() - latest_mtime)
         return latest_path.name, age_seconds
 
+    def _effective_timeout_seconds(self, task: Task, configured_timeout_seconds: int | None) -> int | None:
+        if str(task.strategy or "") != "sa_structural_fix":
+            return configured_timeout_seconds
+        if configured_timeout_seconds is None:
+            return STRUCTURAL_FIX_MAX_RUN_SECONDS
+        return min(configured_timeout_seconds, STRUCTURAL_FIX_MAX_RUN_SECONDS)
+
+    def _effective_stale_after_seconds(self, task: Task) -> float:
+        if str(task.strategy or "") != "sa_structural_fix":
+            return self.stale_after_seconds
+        return min(self.stale_after_seconds, float(STRUCTURAL_FIX_STALE_PROGRESS_SECONDS))
+
     def work(self, task: Task, run: Run, workspace_root: Path) -> WorkResult:
         run_dir = (workspace_root / "runs" / run.id).resolve()
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -253,8 +268,12 @@ class CommandWorker:
             timeout_seconds = self.timeout_policy.timeout_seconds(
                 task.validation_profile, self.backend_name
             )
+        effective_timeout_seconds = self._effective_timeout_seconds(task, timeout_seconds)
+        effective_stale_after_seconds = self._effective_stale_after_seconds(task)
         timeout_category = "task_run_timeout"
-        timeout_reason = f"Timed out in task_run_timeout after {timeout_seconds}s while executing the {self.backend_name} worker command."
+        timeout_reason = (
+            f"Timed out in task_run_timeout after {effective_timeout_seconds}s while executing the {self.backend_name} worker command."
+        )
         try:
             process = subprocess.Popen(
                 self.command,
@@ -274,11 +293,13 @@ class CommandWorker:
                 {
                     "type": "worker_launched",
                     "task_id": task.id,
+                    "task_title": task.title,
+                    "strategy": task.strategy,
                     "run_id": run.id,
                     "backend_name": self.backend_name,
                     "command_summary": command_summary,
                     "pid": process.pid,
-                    "timeout_seconds": timeout_seconds,
+                    "timeout_seconds": effective_timeout_seconds,
                 }
             )
             while True:
@@ -295,12 +316,12 @@ class CommandWorker:
                         output=stdout_text,
                         stderr=stderr_text,
                     )
-                if timeout_seconds is not None and now - started_at >= timeout_seconds:
+                if effective_timeout_seconds is not None and now - started_at >= effective_timeout_seconds:
                     process.kill()
                     stdout_text, stderr_text = process.communicate()
                     raise subprocess.TimeoutExpired(
                         self.command,
-                        timeout=timeout_seconds,
+                        timeout=effective_timeout_seconds,
                         output=stdout_text,
                         stderr=stderr_text,
                     )
@@ -308,7 +329,7 @@ class CommandWorker:
                     latest_artifact, latest_artifact_age_seconds = self._latest_artifact_details(run_dir)
                     stale = bool(
                         latest_artifact_age_seconds is not None
-                        and latest_artifact_age_seconds >= self.stale_after_seconds
+                        and latest_artifact_age_seconds >= effective_stale_after_seconds
                     )
                     phase_file = run_dir / "phase.txt"
                     worker_phase = phase_file.read_text(encoding="utf-8").strip() if phase_file.exists() else "working"
@@ -316,6 +337,8 @@ class CommandWorker:
                         {
                             "type": "worker_status",
                             "task_id": task.id,
+                            "task_title": task.title,
+                            "strategy": task.strategy,
                             "run_id": run.id,
                             "backend_name": self.backend_name,
                             "command_summary": command_summary,
@@ -332,11 +355,11 @@ class CommandWorker:
                         stdout_text, stderr_text = process.communicate()
                         timeout_category = "stale_progress_timeout"
                         timeout_reason = (
-                            f"Timed out in stale_progress_timeout after {self.stale_after_seconds:.0f}s without a new durable artifact."
+                            f"Timed out in stale_progress_timeout after {effective_stale_after_seconds:.0f}s without a new durable artifact."
                         )
                         raise subprocess.TimeoutExpired(
                             self.command,
-                            timeout=self.stale_after_seconds,
+                            timeout=effective_stale_after_seconds,
                             output=stdout_text,
                             stderr=stderr_text,
                         )
@@ -393,12 +416,12 @@ class CommandWorker:
                     "worker_backend": self.backend_name,
                     "command": self.command,
                     "timed_out": True,
-                    "blocked": True,
-                    "infrastructure_failure": True,
-                    "failure_category": timeout_category,
-                    "timeout_seconds": timeout_seconds,
-                    "stale_after_seconds": self.stale_after_seconds,
-                    "memory_limit_mb": getattr(self.resource_policy, "memory_limit_mb", None),
+                        "blocked": True,
+                        "infrastructure_failure": True,
+                        "failure_category": timeout_category,
+                        "timeout_seconds": effective_timeout_seconds,
+                        "stale_after_seconds": effective_stale_after_seconds,
+                        "memory_limit_mb": getattr(self.resource_policy, "memory_limit_mb", None),
                     "cpu_time_limit_seconds": getattr(self.resource_policy, "cpu_time_limit_seconds", None),
                     "project_workspace": str(project_workspace),
                 },
@@ -507,7 +530,8 @@ class CommandWorker:
                 "compile_check": payload.get("compile_check"),
                 "test_check": payload.get("test_check"),
                 "validation_elapsed_seconds": payload.get("validation_elapsed_seconds"),
-                "timeout_seconds": timeout_seconds,
+                "timeout_seconds": effective_timeout_seconds,
+                "stale_after_seconds": effective_stale_after_seconds,
                 "memory_limit_mb": getattr(self.resource_policy, "memory_limit_mb", None),
                 "cpu_time_limit_seconds": getattr(self.resource_policy, "cpu_time_limit_seconds", None),
                 "project_workspace": str(project_workspace),

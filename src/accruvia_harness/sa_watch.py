@@ -475,7 +475,7 @@ class SAWatchService:
             validation_mode=target_task.validation_mode if target_task is not None else "lightweight_operator",
             scope=dict(target_task.scope) if target_task is not None else {},
             strategy="sa_structural_fix",
-            max_attempts=2,
+            max_attempts=1,
             required_artifacts=["plan", "report"],
         )
         objective_record = self.store.get_objective(

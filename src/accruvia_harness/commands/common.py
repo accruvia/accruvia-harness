@@ -26,6 +26,7 @@ from ..interrogation import HarnessQueryService, InterrogationService
 from ..llm import build_llm_router
 from ..onboarding import detect_llm_command_candidates, probe_llm_command, prompt_text
 from ..runtime import WorkflowRuntime, build_runtime
+from ..services.structural_fix_promotion_service import StructuralFixPromotionService
 from ..store import SQLiteHarnessStore
 from ..telemetry import TelemetrySink
 
@@ -590,6 +591,11 @@ def build_context(config: HarnessConfig) -> CLIContext:
     failure_classifier = FailureClassifier()
     breadcrumb_writer = BreadcrumbWriter(store, config.workspace_root)
     engine = build_engine_from_config(config, store=store, telemetry=telemetry)
+    structural_fix_promotions = StructuralFixPromotionService(
+        store=store,
+        breadcrumb_writer=breadcrumb_writer,
+        repository_promotions=engine.repository_promotions,
+    )
     query_service = HarnessQueryService(store, telemetry=telemetry)
     ctx = CLIContext(
         config=config,
@@ -631,6 +637,9 @@ def build_context(config: HarnessConfig) -> CLIContext:
             failure_classifier,
             breadcrumb_writer,
             request_stack_restart=lambda payload: record_stack_restart_request(config, payload),
+            structural_fix_promotion=lambda task, run_id: structural_fix_promotions.promote_completed_structural_fix(
+                task, run_id
+            ),
         ),
         sa_watch=SAWatchService(
             store,
@@ -645,11 +654,17 @@ def build_context(config: HarnessConfig) -> CLIContext:
         # regardless of whether work is driven by the UI or the supervisor CLI.
         # If only the UI wires this callback, successful structural repairs can
         # complete and still leave the objective paused with no new runnable work.
-        from ..ui import HarnessUIDataService
+        try:
+            from ..ui import HarnessUIDataService
+        except ModuleNotFoundError as exc:
+            if exc.name != "fastapi":
+                raise
+            HarnessUIDataService = None
 
-        data_service = HarnessUIDataService(ctx)
-        ctx.engine.queue.post_task_callback = data_service.reconcile_task_workflow
-        ctx.sa_watch.post_repair_callback = data_service.reconcile_task_workflow
+        if HarnessUIDataService is not None:
+            data_service = HarnessUIDataService(ctx)
+            ctx.engine.queue.post_task_callback = data_service.reconcile_task_workflow
+            ctx.sa_watch.post_repair_callback = data_service.reconcile_task_workflow
         ctx.sa_watch.structural_progress_callback = ctx.control_runtime.handle
         ctx.sa_watch.restart_stack = lambda payload: _restart_stack_from_sa_watch(ctx, payload)
     return ctx
