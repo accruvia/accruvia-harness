@@ -5833,6 +5833,61 @@ class HarnessUIDataService:
             failed_at=failed.created_at if failed is not None else None,
             last_activity_at=max(related_times) if related_times else None,
         )
+        round_map: dict[int, dict[str, object]] = {}
+        for record in telemetry:
+            raw_round = record.metadata.get("round")
+            if raw_round in (None, ""):
+                continue
+            try:
+                round_number = int(raw_round)
+            except (TypeError, ValueError):
+                continue
+            event_type = str(record.metadata.get("event_type") or "")
+            current = round_map.setdefault(
+                round_number,
+                {
+                    "round_number": round_number,
+                    "started_at": record.created_at.isoformat(),
+                    "ended_at": record.created_at.isoformat(),
+                    "duration_ms": 0,
+                    "events": [],
+                    "critique_accepted": None,
+                    "coverage_accepted": None,
+                    "stalled": False,
+                    "unit_count": 0,
+                },
+            )
+            current["ended_at"] = max(str(current.get("ended_at") or ""), record.created_at.isoformat())
+            current_events = list(current.get("events") or [])
+            current_events.append(event_type)
+            current["events"] = current_events
+            if event_type == "round_complete":
+                current["duration_ms"] = max(
+                    int(current.get("duration_ms") or 0),
+                    int(float(record.metadata.get("total_round_seconds") or 0.0) * 1000),
+                )
+                current["critique_accepted"] = record.metadata.get("critique_accepted")
+                current["coverage_accepted"] = record.metadata.get("coverage_accepted")
+                current["unit_count"] = int(record.metadata.get("unit_count") or current.get("unit_count") or 0)
+            elif event_type == "critique":
+                current["critique_accepted"] = record.metadata.get("accepted")
+                current["unit_count"] = int(record.metadata.get("unit_count") or current.get("unit_count") or 0)
+            elif event_type == "coverage":
+                current["coverage_accepted"] = record.metadata.get("complete")
+                current["unit_count"] = int(record.metadata.get("unit_count") or current.get("unit_count") or 0)
+            elif event_type in {"generate", "refine"}:
+                current["unit_count"] = int(record.metadata.get("unit_count") or record.metadata.get("unit_count_after") or current.get("unit_count") or 0)
+            elif event_type in {"stall_detected", "stall_exit"}:
+                current["stalled"] = True
+        atomic_rounds = []
+        for round_number in sorted(round_map):
+            current = round_map[round_number]
+            if not int(current.get("duration_ms") or 0):
+                current["duration_ms"] = self.workflow_timing.duration_ms(
+                    str(current.get("started_at") or ""),
+                    last_activity_at=str(current.get("ended_at") or ""),
+                )
+            atomic_rounds.append(current)
         refinement_round = 0
         critique_accepted = None
         coverage_complete = None
@@ -5866,6 +5921,7 @@ class HarnessUIDataService:
                 last_activity_at=max(related_times) if related_times else None,
             ),
             "atomic_phases": atomic_phases,
+            "atomic_rounds": atomic_rounds,
             "error": failed.content if failed is not None else "",
             "refinement_round": refinement_round,
             "critique_accepted": critique_accepted,

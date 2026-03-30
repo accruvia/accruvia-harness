@@ -3047,6 +3047,94 @@ class HarnessUIDataServiceTests(unittest.TestCase):
             state["atomic_phases"],
         )
 
+    def test_atomic_generation_state_includes_atomic_rounds_with_absolute_timing(self) -> None:
+        objective = Objective(
+            id=new_id("objective"),
+            project_id=self.project.id,
+            title="Atomic rounds",
+            summary="Track atomic refinement rounds with absolute timing",
+        )
+        self.store.create_objective(objective)
+        self.store.create_mermaid_artifact(
+            MermaidArtifact(
+                id=new_id("diagram"),
+                objective_id=objective.id,
+                diagram_type="workflow_control",
+                version=1,
+                status=MermaidStatus.FINISHED,
+                summary="Accepted control flow",
+                content="flowchart TD\nA-->B",
+                required_for_execution=True,
+            )
+        )
+        started_at = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=6)
+        generation_id = "atomic_generation_rounds"
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="atomic_generation_started",
+                project_id=self.project.id,
+                objective_id=objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Started generating atomic units from Mermaid v1.",
+                metadata={"generation_id": generation_id, "diagram_version": 1},
+                created_at=started_at,
+            )
+        )
+        telemetry_rows = [
+            ("generate", {"round": 1, "unit_count": 3, "elapsed_seconds": 20.0}, started_at + dt.timedelta(seconds=20)),
+            ("round_complete", {"round": 1, "total_round_seconds": 20.0, "unit_count": 3, "critique_accepted": False, "coverage_accepted": False}, started_at + dt.timedelta(seconds=20)),
+            ("critique", {"round": 2, "accepted": True, "unit_count": 3, "elapsed_seconds": 8.0}, started_at + dt.timedelta(seconds=40)),
+            ("coverage", {"round": 2, "complete": False, "unit_count": 3, "elapsed_seconds": 6.0}, started_at + dt.timedelta(seconds=50)),
+            ("stall_detected", {"round": 2, "consecutive_stalls": 1}, started_at + dt.timedelta(seconds=55)),
+            ("round_complete", {"round": 2, "total_round_seconds": 35.0, "unit_count": 3, "critique_accepted": True, "coverage_accepted": False}, started_at + dt.timedelta(seconds=55)),
+        ]
+        for event_type, payload, created_at in telemetry_rows:
+            self.store.create_context_record(
+                ContextRecord(
+                    id=new_id("context"),
+                    record_type="atomic_decomposition_telemetry",
+                    project_id=self.project.id,
+                    objective_id=objective.id,
+                    visibility="operator_visible",
+                    author_type="system",
+                    content=f"Decomposition [{event_type}]",
+                    metadata={"generation_id": generation_id, "diagram_version": 1, "event_type": event_type, **payload},
+                    created_at=created_at,
+                )
+            )
+
+        state = self.service._atomic_generation_state(objective.id)
+
+        self.assertEqual(
+            [
+                {
+                    "round_number": 1,
+                    "started_at": (started_at + dt.timedelta(seconds=20)).isoformat(),
+                    "ended_at": (started_at + dt.timedelta(seconds=20)).isoformat(),
+                    "duration_ms": 20000,
+                    "events": ["generate", "round_complete"],
+                    "critique_accepted": False,
+                    "coverage_accepted": False,
+                    "stalled": False,
+                    "unit_count": 3,
+                },
+                {
+                    "round_number": 2,
+                    "started_at": (started_at + dt.timedelta(seconds=40)).isoformat(),
+                    "ended_at": (started_at + dt.timedelta(seconds=55)).isoformat(),
+                    "duration_ms": 35000,
+                    "events": ["critique", "coverage", "stall_detected", "round_complete"],
+                    "critique_accepted": True,
+                    "coverage_accepted": False,
+                    "stalled": True,
+                    "unit_count": 3,
+                },
+            ],
+            state["atomic_rounds"],
+        )
+
     def test_reconcile_objective_restarts_stale_atomic_generation_when_only_terminal_tasks_remain(self) -> None:
         objective = Objective(
             id=new_id("objective"),
