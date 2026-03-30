@@ -16,6 +16,7 @@ Usage in engine bootstrap::
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -36,9 +37,16 @@ from .model_inventory import (
 
 logger = logging.getLogger(__name__)
 
-# Safe fallback when discovery fails entirely.
-_SAFE_DEFAULT_UNIVERSE = [
-    ModelCapability(
+_FALLBACK_MODELS_BY_BACKEND = {
+    "codex": ModelCapability(
+        backend="codex",
+        provider="openai",
+        model_id="gpt-5.4",
+        supports_streaming=True,
+        supports_tools=True,
+        available=True,
+    ),
+    "claude": ModelCapability(
         backend="claude",
         provider="anthropic",
         model_id="claude-sonnet-4-6",
@@ -46,7 +54,23 @@ _SAFE_DEFAULT_UNIVERSE = [
         supports_tools=True,
         available=True,
     ),
-]
+    "accruvia_client": ModelCapability(
+        backend="accruvia_client",
+        provider="anthropic",
+        model_id="accruvia-client-default",
+        supports_streaming=True,
+        supports_tools=True,
+        available=True,
+    ),
+    "command": ModelCapability(
+        backend="command",
+        provider="unknown",
+        model_id="command-default",
+        supports_streaming=False,
+        supports_tools=False,
+        available=True,
+    ),
+}
 
 
 class RoutingHook:
@@ -87,8 +111,8 @@ class RoutingHook:
                 logger.warning("All probes failed — using cached universe (%d models)", len(cached))
                 models = cached
             else:
-                logger.warning("All probes failed and no cache — using safe default universe")
-                models = list(_SAFE_DEFAULT_UNIVERSE)
+                logger.warning("All probes failed and no cache — using configured fallback universe")
+                models = _fallback_universe(configured_backends, config)
 
         universe = ModelUniverseSnapshot(models=models)
         save_universe_cache(models, cache_path)
@@ -183,3 +207,19 @@ def _configured_backends(config: HarnessConfig) -> list[str]:
     if config.llm_command:
         backends.append("command")
     return backends
+
+
+def _fallback_universe(configured_backends: list[str], config: HarnessConfig) -> list[ModelCapability]:
+    ordered = _preferred_backend_order(configured_backends, config)
+    return [_FALLBACK_MODELS_BY_BACKEND[backend] for backend in ordered if backend in _FALLBACK_MODELS_BY_BACKEND]
+
+
+def _preferred_backend_order(configured_backends: list[str], config: HarnessConfig) -> list[str]:
+    if config.llm_backend == "auto":
+        if os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
+            preference = ("accruvia_client", "command", "codex", "claude")
+        else:
+            preference = ("codex", "claude", "accruvia_client", "command")
+    else:
+        preference = (config.llm_backend, "codex", "claude", "accruvia_client", "command")
+    return [backend for backend in preference if backend in configured_backends]

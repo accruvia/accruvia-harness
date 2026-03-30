@@ -77,7 +77,14 @@ class TemporalEndToEndTests(unittest.TestCase):
     def test_temporal_runtime_completes_task_end_to_end(self) -> None:
         import json
 
-        project = json.loads(self.run_cli("create-project", "temporal-e2e", "Temporal E2E"))["project"]
+        project = json.loads(
+            self.run_cli(
+                "create-project",
+                "temporal-e2e",
+                "Temporal E2E",
+                "--no-bootstrap-heartbeat",
+            )
+        )["project"]
         task = json.loads(
             self.run_cli("create-task", project["id"], "Temporal task", "Run through Temporal")
         )["task"]

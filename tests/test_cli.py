@@ -467,7 +467,7 @@ class CLITests(unittest.TestCase):
         payload = json.loads(Path(artifact_report["path"]).read_text(encoding="utf-8"))
 
         self.assertEqual("lightweight_repair", payload["validation_mode"])
-        self.assertEqual(["python3", "-m", "unittest", "-v", "tests.test_workers"], payload["test_check"]["command"])
+        self.assertEqual([sys.executable, "-m", "unittest", "-v", "tests.test_workers"], payload["test_check"]["command"])
         self.assertEqual("lightweight_repair", payload["test_check"]["selection"])
 
     def test_create_project_runs_bootstrap_heartbeat_by_default(self) -> None:
