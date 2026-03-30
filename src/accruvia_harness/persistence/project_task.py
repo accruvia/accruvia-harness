@@ -8,6 +8,23 @@ from .common import project_from_row, task_from_row, task_lease_from_row
 from ..domain import ObjectiveStatus, Project, Task, TaskLease, TaskStatus, validate_task_transition
 
 
+def _workflow_state_disposition(metadata: dict[str, object]) -> dict[str, object] | None:
+    disposition = metadata.get("workflow_state_disposition") if isinstance(metadata, dict) else None
+    return disposition if isinstance(disposition, dict) else None
+
+
+def _task_ignored_for_objective_phase(status: TaskStatus, metadata: dict[str, object]) -> bool:
+    workflow_disposition = _workflow_state_disposition(metadata)
+    if workflow_disposition and str(workflow_disposition.get("kind") or "").strip() == "ignore_obsolete":
+        return True
+    disposition = metadata.get("failed_task_disposition") if isinstance(metadata, dict) else None
+    return bool(
+        status == TaskStatus.FAILED
+        and isinstance(disposition, dict)
+        and str(disposition.get("kind") or "").strip() == "waive_obsolete"
+    )
+
+
 class ProjectTaskStoreMixin:
     def create_project(self, project: Project) -> None:
         with self.connect() as connection:
@@ -346,16 +363,12 @@ class ProjectTaskStoreMixin:
             for row in rows:
                 status = TaskStatus(row["status"])
                 metadata = json.loads(row["external_ref_metadata_json"]) if row["external_ref_metadata_json"] else {}
-                disposition = metadata.get("failed_task_disposition") if isinstance(metadata, dict) else None
-                if (
-                    status == TaskStatus.FAILED
-                    and isinstance(disposition, dict)
-                    and str(disposition.get("kind") or "").strip() == "waive_obsolete"
-                ):
-                    effective_statuses.append(TaskStatus.COMPLETED)
-                else:
-                    effective_statuses.append(status)
-            if any(s == TaskStatus.ACTIVE for s in effective_statuses):
+                if _task_ignored_for_objective_phase(status, metadata):
+                    continue
+                effective_statuses.append(status)
+            if not effective_statuses:
+                phase = ObjectiveStatus.PLANNING
+            elif any(s == TaskStatus.ACTIVE for s in effective_statuses):
                 phase = ObjectiveStatus.EXECUTING
             elif all(s == TaskStatus.COMPLETED for s in effective_statuses):
                 phase = ObjectiveStatus.RESOLVED

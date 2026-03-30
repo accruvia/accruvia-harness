@@ -433,6 +433,15 @@ class HarnessEngineTests(unittest.TestCase):
 
         self.assertTrue(result.passed)
         self.assertEqual("unknown", result.failed_stage)
+        self.assertEqual(2, sum(1 for item in commands if item == "rm -rf .venv && python -m venv .venv"))
+        self.assertEqual(
+            2,
+            sum(
+                1
+                for item in commands
+                if item == ". .venv/bin/activate && python -m pip install --upgrade pip"
+            ),
+        )
         self.assertIn("docker compose -f docker-compose.temporal.yml down", commands[-1])
         self.assertIn("temporal_down", result.logs)
 
@@ -776,6 +785,35 @@ class HarnessEngineTests(unittest.TestCase):
         self.assertEqual(TaskStatus.PENDING, blocked_after.status)
         self.assertEqual(TaskStatus.COMPLETED, runnable_after.status)
         self.assertEqual([], self.store.list_task_leases())
+
+    def test_objective_review_remediation_bypasses_objective_gate_for_queue_and_run(self) -> None:
+        objective = Objective(
+            id=new_id("objective"),
+            project_id=self.project_id,
+            title="Blocked objective",
+            summary="Not ready for normal execution",
+        )
+        self.store.create_objective(objective)
+        remediation = self.engine.create_task_with_policy(
+            project_id=self.project_id,
+            objective_id=objective.id,
+            title="Objective review remediation",
+            objective="Fix the review finding and produce the required evidence artifact.",
+            priority=200,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type="objective_review",
+            external_ref_id=f"{objective.id}:review_1:unit_test_coverage",
+            strategy="objective_review_remediation",
+        )
+
+        result = self.engine.process_next_task(worker_id="worker-a", lease_seconds=120)
+
+        assert result is not None
+        self.assertEqual(remediation.id, result["task"].id)
+        refreshed = self.store.get_task(remediation.id)
+        assert refreshed is not None
+        self.assertEqual(TaskStatus.COMPLETED, refreshed.status)
 
     def test_project_adapter_can_supply_real_worker_override(self) -> None:
         registry = ProjectAdapterRegistry()
@@ -1700,6 +1738,43 @@ class HarnessEngineTests(unittest.TestCase):
         objective_after = self.store.get_objective(objective.id)
         self.assertEqual(ObjectiveStatus.RESOLVED, objective_after.status if objective_after else None)
 
+    def test_ignored_obsolete_workflow_tasks_do_not_keep_objective_resolved(self) -> None:
+        objective = Objective(
+            id=new_id("objective"),
+            project_id=self.project_id,
+            title="Workflow state repair",
+            summary="Ignored obsolete tasks should not lock the objective state",
+        )
+        self.store.create_objective(objective)
+        task = self.engine.create_task_with_policy(
+            project_id=self.project_id,
+            objective_id=objective.id,
+            title="Obsolete structural task",
+            objective="Old state",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type="sa_watch",
+            external_ref_id=f"objective:{objective.id}:workflow_gap",
+            strategy="sa_structural_fix",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+        self.store.update_task_external_metadata(
+            task.id,
+            {
+                "workflow_state_disposition": {
+                    "kind": "ignore_obsolete",
+                    "rationale": "Superseded workflow state.",
+                }
+            },
+        )
+
+        self.store.update_objective_phase(objective.id)
+
+        objective_after = self.store.get_objective(objective.id)
+        self.assertEqual(ObjectiveStatus.PLANNING, objective_after.status if objective_after else None)
+
     def test_promotion_service_decompose_review_findings_to_atomic_tasks_returns_created_ids(self) -> None:
         objective = Objective(
             id=new_id("objective"),
@@ -2462,9 +2537,9 @@ class HarnessEngineTests(unittest.TestCase):
         task_after = self.store.get_task(task.id)
         decisions = self.store.list_decisions(runs[0].id)
 
-        self.assertEqual(1, len(runs))
-        self.assertEqual("failed", runs[0].status.value)
-        self.assertEqual("fail", decisions[0].action.value)
+        self.assertEqual(2, len(runs))
+        self.assertEqual("failed", runs[-1].status.value)
+        self.assertEqual("retry", decisions[0].action.value)
         self.assertEqual("failed", task_after.status.value if task_after is not None else None)
 
     def test_infrastructure_blocked_worker_creates_executor_repair_follow_on(self) -> None:

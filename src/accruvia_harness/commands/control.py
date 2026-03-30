@@ -290,16 +290,6 @@ def _sa_watch_kpis(ctx: CLIContext) -> dict[str, int]:
         ),
         "tasks_pending": sum(1 for task in tasks if getattr(task.status, "value", "") == "pending"),
         "tasks_active": sum(1 for task in tasks if getattr(task.status, "value", "") == "active"),
-        "sa_structural_fix_pending": sum(
-            1
-            for task in tasks
-            if getattr(task.status, "value", "") == "pending" and str(getattr(task, "strategy", "") or "") == "sa_structural_fix"
-        ),
-        "sa_structural_fix_active": sum(
-            1
-            for task in tasks
-            if getattr(task.status, "value", "") == "active" and str(getattr(task, "strategy", "") or "") == "sa_structural_fix"
-        ),
         "stalled_objectives": sum(
             1
             for objective in objectives
@@ -323,16 +313,9 @@ def _sa_watch_forward_progress_increased(
 
 
 def _sa_watch_workflow_state_line(current_kpis: dict[str, int]) -> str:
-    structural_active = current_kpis.get("sa_structural_fix_active", 0)
-    structural_pending = current_kpis.get("sa_structural_fix_pending", 0)
     active = current_kpis.get("tasks_active", 0)
     pending = current_kpis.get("tasks_pending", 0)
     stalled = current_kpis.get("stalled_objectives", 0)
-    if structural_active > 0:
-        return _sa_watch_line(
-            f"workflow state: RECOVERY IN PROGRESS ({structural_active} active structural fix"
-            f"{'' if structural_active == 1 else 'es'})"
-        )
     if stalled > 0 and pending > 0 and active == 0:
         return _sa_watch_line(
             f"workflow state: UNPLUGGED ({stalled} stalled objective"
@@ -386,9 +369,8 @@ def _sa_watch_changed_anything(result: dict[str, object]) -> bool:
         "lane_resumed",
         "stack_restart_requested",
         "system_frozen",
-        "corrective_task_created",
-        "hot_patch_verified",
-        "hot_patch_failed",
+        "repair_validated",
+        "repair_failed",
     }
     return any(str(effect.get("kind") or "") in change_kinds for effect in effects)
 
@@ -412,7 +394,8 @@ def _sa_watch_action_label(action: str) -> str:
         "resume_worker": "resume worker",
         "restart_stack": "restart stack",
         "freeze_system": "freeze system",
-        "create_corrective_task": "create corrective task",
+        "repair_workflow_state": "repair workflow state directly",
+        "repair_harness": "repair harness directly",
         "skip": "skip",
     }
     return labels.get(action, action.replace("_", " "))
@@ -426,20 +409,22 @@ def _sa_watch_reason_text(reason: str) -> str:
 
 def _sa_watch_effect_line(effect: dict[str, object]) -> str:
     kind = str(effect.get("kind") or "effect")
-    if kind == "corrective_task_created":
-        return _sa_watch_line(
-            f"created corrective task {effect.get('task_id')} for objective {effect.get('objective_id')}: {effect.get('title')}"
-        )
     if kind == "stack_restart_requested":
         return _sa_watch_line(f"requested stack restart; reason={effect.get('reason')}")
     if kind == "lane_resumed":
         return _sa_watch_line(f"resumed lane {effect.get('lane')}; reason={effect.get('reason')}")
     if kind == "system_frozen":
         return _sa_watch_line(f"froze system; reason={effect.get('reason')}")
-    if kind == "hot_patch_verified":
-        return _sa_watch_line(f"verified hot patch task {effect.get('task_id')}")
-    if kind == "hot_patch_failed":
-        return _sa_watch_line(f"hot patch failed for task {effect.get('task_id')}; reason={effect.get('reason')}")
+    if kind == "repair_validated":
+        return _sa_watch_line(f"validated direct harness repair {effect.get('run_id')}")
+    if kind == "repair_failed":
+        return _sa_watch_line(f"direct harness repair failed; reason={effect.get('reason')}")
+    if kind == "workflow_state_repaired":
+        return _sa_watch_line(
+            f"repaired workflow state for objective {effect.get('objective_id')}; "
+            f"ignored={len(list(effect.get('ignored_task_ids') or []))}; "
+            f"waived={len(list(effect.get('waived_task_ids') or []))}"
+        )
     if kind == "noted_concern":
         return _sa_watch_line(
             f"noted concern; no code/workflow change made; reason={_sa_watch_reason_text(str(effect.get('reason') or ''))}"

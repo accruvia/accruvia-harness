@@ -8,9 +8,11 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+from .agent_worker import run_agent_worker, run_validation
 from .control_plane import ControlPlane
 from .domain import (
     ContextRecord,
+    ControlEvent,
     ControlLaneStateValue,
     ControlRecoveryAction,
     Event,
@@ -22,17 +24,16 @@ from .domain import (
     new_id,
 )
 from .llm import LLMExecutionError, LLMInvocation, LLMRouter
-from .store import SQLiteHarnessStore
 from .services.task_service import TaskService
+from .store import SQLiteHarnessStore
 
 if TYPE_CHECKING:
     from .engine import HarnessEngine
 
 
-# Run periodically as a continuity supervisor rather than a hot-path recovery
-# hook. The goal is to insist on continued forward motion without thrashing.
 SA_WATCH_INTERVAL_SECONDS = 1200
 _JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+_HARNESS_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 @dataclass(slots=True)
@@ -45,6 +46,18 @@ class SAWatchDecision:
     task_title: str | None = None
     task_objective: str | None = None
     target_task_id: str | None = None
+
+
+@dataclass(slots=True)
+class SAWatchRepairResult:
+    status: str
+    run_id: str
+    run_dir: Path
+    summary: str
+    changed_files: list[str]
+    validation: dict[str, object]
+    diagnostics: dict[str, object]
+    stdout_summary: str | None = None
 
 
 class SAWatchService:
@@ -62,6 +75,7 @@ class SAWatchService:
         structural_progress_callback: Callable[[dict[str, object]], None] | None = None,
         post_repair_callback: Callable[[Task], None] | None = None,
         restart_stack: Callable[[dict[str, object]], dict[str, object] | None] | None = None,
+        repair_runner: Callable[[Task, Run, Path], SAWatchRepairResult] | None = None,
     ) -> None:
         self.store = store
         self.control_plane = control_plane
@@ -69,11 +83,12 @@ class SAWatchService:
         self.workspace_root = workspace_root
         self.interval_seconds = interval_seconds
         self._last_invoked_at = 0.0
-        self.tasks = TaskService(store)
         self.engine = engine
+        self.tasks = TaskService(store)
         self.structural_progress_callback = structural_progress_callback
         self.post_repair_callback = post_repair_callback
         self.restart_stack = restart_stack
+        self.repair_runner = repair_runner or self._run_direct_repair
 
     def observe(self, event: dict[str, object]) -> dict[str, object] | None:
         if str(event.get("type") or "") != "sleeping":
@@ -85,9 +100,6 @@ class SAWatchService:
 
     def run_once(self) -> dict[str, object]:
         packet = self._build_packet()
-        in_progress = self._recovery_in_progress(packet)
-        if in_progress is not None:
-            return in_progress
         if self.llm_router is None or not getattr(self.llm_router, "executors", {}):
             return self._record_skip("llm_router_unavailable", packet)
         try:
@@ -95,10 +107,6 @@ class SAWatchService:
         except (LLMExecutionError, ValueError, json.JSONDecodeError) as exc:
             return self._record_skip(f"llm_execution_failed:{exc}", packet)
         return self._apply(decision, packet)
-
-    def _structural_signal(self) -> dict[str, object] | None:
-        signals = self._continuity_signals()
-        return signals[0] if signals else None
 
     def _build_packet(self) -> dict[str, object]:
         status = self.control_plane.status()
@@ -136,8 +144,6 @@ class SAWatchService:
             }
             for item in self.store.list_control_recovery_actions()[:5]
         ]
-        objective_summaries = self._objective_summaries()
-        task_summary = self._task_summary()
         return {
             "status": status,
             "continuity_goal": "Work should keep moving. Detect loops, stalls, and dead workflow states, then restore forward progress safely.",
@@ -147,8 +153,8 @@ class SAWatchService:
             "target_objective": self._target_objective_packet(structural_signal),
             "target_task_evidence": self._target_task_evidence(structural_signal),
             "target_objective_evidence": self._target_objective_evidence(structural_signal),
-            "objective_summaries": objective_summaries,
-            "task_summary": task_summary,
+            "objective_summaries": self._objective_summaries(),
+            "task_summary": self._task_summary(),
             "recent_events": recent_events,
             "recent_worker_runs": recent_runs,
             "recent_recovery_actions": recent_actions,
@@ -158,7 +164,8 @@ class SAWatchService:
                 "restart_stack",
                 "freeze_system",
                 "record_escalation",
-                "create_corrective_task",
+                "repair_workflow_state",
+                "repair_harness",
             ],
         }
 
@@ -173,19 +180,23 @@ class SAWatchService:
             "Rules:\n"
             "- Work should not stay stopped without a strong reason.\n"
             "- Prefer the cheapest safe action that restores forward progress.\n"
-            "- Prefer resume_worker or restart_stack before creating new work when existing work can likely continue.\n"
-            "- Use create_corrective_task when the current workflow is looping or structurally stuck and needs a real code or workflow fix.\n"
-            "- A corrective task must target the source of the stall or loop, not just ask for another report.\n"
+            "- Prefer resume_worker or restart_stack before editing code when existing work can likely continue.\n"
+            "- Use repair_workflow_state when durable workflow records themselves are wrong and can be safely reconciled without editing code.\n"
+            "- repair_workflow_state may waive obsolete sa-watch recovery tasks, reopen the objective planning loop, and restart the stack if that is enough to restore momentum.\n"
+            "- Use repair_harness only for architecture, workflow, or control-plane defects in the harness itself.\n"
+            "- repair_harness must fix the machine directly. It must not create a harness task or route recovery through the normal workflow.\n"
+            "- repair_harness must target the source of the stall or loop, not cosmetic cleanup and not product work.\n"
             "- Freeze only when continuing would be unsafe or clearly runaway.\n"
-            "- Escalate only when you cannot safely restore momentum from the available evidence.\n"
+            "- Escalate only when you cannot identify a clear architectural fix or cannot verify that the fix restored movement.\n"
             "- Output JSON only. No markdown, no prose outside the JSON object.\n\n"
             "Allowed actions:\n"
             '- "none"\n'
             '- "resume_worker"\n'
             '- "restart_stack"\n'
             '- "freeze_system"\n'
-            '- "record_escalation"\n\n'
-            '- "create_corrective_task"\n\n'
+            '- "record_escalation"\n'
+            '- "repair_workflow_state"\n'
+            '- "repair_harness"\n\n'
             "Return this exact schema:\n"
             '{\n'
             '  "action": "one allowed action",\n'
@@ -193,8 +204,8 @@ class SAWatchService:
             '  "confidence": 0.0,\n'
             '  "target_lane": "worker|harness|null",\n'
             '  "target_task_id": "task id or null",\n'
-            '  "task_title": "required when action=create_corrective_task",\n'
-            '  "task_objective": "required when action=create_corrective_task; must specify the structural fix and proof required",\n'
+            '  "task_title": "required when action=repair_harness",\n'
+            '  "task_objective": "required when action=repair_harness; must specify the architectural or workflow fix and proof required",\n'
             '  "escalate": true\n'
             '}\n\n'
             "Current packet:\n"
@@ -246,9 +257,6 @@ class SAWatchService:
         action = decision.action
         effects: list[dict[str, object]] = []
         if not self._usable_reason(decision.reason):
-            fallback = self._deterministic_unstall(packet)
-            if fallback is not None:
-                return fallback
             status = self.control_plane.status()
             self._record_action("model_response_unusable", "system", "system", decision.reason, "recorded")
             effects.append({"kind": "model_response_unusable", "reason": decision.reason})
@@ -278,9 +286,12 @@ class SAWatchService:
             status = self.control_plane.freeze(f"sa_watch:{decision.reason}")
             self._record_action("freeze", "system", "system", decision.reason, "applied")
             effects.append({"kind": "system_frozen", "reason": decision.reason})
-        elif action == "create_corrective_task":
-            status, created_effects = self._create_corrective_task(decision, packet)
-            effects.extend(created_effects)
+        elif action == "repair_harness":
+            status, repair_effects = self._repair_harness(decision, packet)
+            effects.extend(repair_effects)
+        elif action == "repair_workflow_state":
+            status, workflow_effects = self._repair_workflow_state(decision, packet)
+            effects.extend(workflow_effects)
         elif action in {"record_escalation", "none"}:
             status = self.control_plane.status()
             self._record_action(
@@ -322,67 +333,6 @@ class SAWatchService:
     def _usable_reason(self, reason: str) -> bool:
         return reason.strip().lower() not in {"", "sa-watch returned no reason"}
 
-    def _recovery_in_progress(self, packet: dict[str, object]) -> dict[str, object] | None:
-        task_summary = dict(packet.get("task_summary") or {})
-        if int(task_summary.get("sa_structural_fix_active", 0) or 0) <= 0:
-            return None
-        reason = "structural_fix_in_progress"
-        self._record_action("observe", "system", "system", reason, "recorded")
-        return {
-            "decision": {
-                "action": "none",
-                "reason": reason,
-                "confidence": 1.0,
-                "target_lane": None,
-                "target_task_id": None,
-                "task_title": None,
-                "escalate": False,
-            },
-            "status": self.control_plane.status(),
-            "packet": packet,
-            "effects": [
-                {
-                    "kind": "observed",
-                    "reason": reason,
-                }
-            ],
-        }
-
-    def _deterministic_unstall(self, packet: dict[str, object]) -> dict[str, object] | None:
-        task_summary = dict(packet.get("task_summary") or {})
-        signals = list(packet.get("continuity_signals") or [])
-        signal_kinds = {str(signal.get("kind") or "") for signal in signals}
-        if task_summary.get("sa_structural_fix_pending", 0) <= 0:
-            return None
-        if task_summary.get("active", 0) > 0:
-            return None
-        if not signal_kinds.intersection({"objective_stalled", "no_progress", "workflow_gap", "worker_paused"}):
-            return None
-        reason = "deterministic_unstall_pending_structural_fix"
-        status = self.control_plane.resume_lane("worker", reason=reason)
-        status = self.control_plane.mark_healthy(reason=reason)
-        self._record_action("resume", "lane", "worker", reason, "applied")
-        return {
-            "decision": {
-                "action": "resume_worker",
-                "reason": reason,
-                "confidence": 1.0,
-                "target_lane": "worker",
-                "target_task_id": None,
-                "task_title": None,
-                "escalate": False,
-            },
-            "status": status,
-            "packet": packet,
-            "effects": [
-                {
-                    "kind": "lane_resumed",
-                    "lane": "worker",
-                    "reason": reason,
-                }
-            ],
-        }
-
     def _record_action(self, action_type: str, target_type: str, target_id: str, reason: str, result: str) -> None:
         self.store.create_control_recovery_action(
             ControlRecoveryAction(
@@ -410,180 +360,343 @@ class SAWatchService:
         )
         return restart_status or self.control_plane.status()
 
-    def _create_corrective_task(self, decision: SAWatchDecision, packet: dict[str, object]) -> tuple[dict[str, object], list[dict[str, object]]]:
-        target_task = self.store.get_task(str(decision.target_task_id or ""))
-        if target_task is None:
-            signal = packet.get("structural_signal") or {}
-            target_task = self.store.get_task(str(signal.get("task_id") or ""))
-        target_objective = self._target_objective_for_signal(packet.get("structural_signal") or {})
-        if target_task is None and target_objective is None:
-            self._record_action("escalate", "system", "system", f"missing_target:{decision.reason}", "recorded")
+    def _repair_workflow_state(
+        self,
+        decision: SAWatchDecision,
+        packet: dict[str, object],
+    ) -> tuple[dict[str, object], list[dict[str, object]]]:
+        signal = packet.get("structural_signal") or {}
+        target_objective = self._target_objective_for_signal(signal)
+        if target_objective is None and decision.target_task_id:
+            task = self.store.get_task(decision.target_task_id)
+            if task is not None and task.objective_id:
+                target_objective = self.store.get_objective(task.objective_id)
+        if target_objective is None:
+            self._record_action("workflow_state_repair", "system", "system", f"missing_target:{decision.reason}", "ignored")
             return self.control_plane.status(), [{"kind": "noted_concern", "reason": f"missing_target:{decision.reason}"}]
-        project = self.store.get_project(
-            target_task.project_id if target_task is not None else str(target_objective.project_id)
-        )
-        if project is None:
-            self._record_action("escalate", "system", "system", f"missing_project:{decision.reason}", "recorded")
-            return self.control_plane.status(), [{"kind": "noted_concern", "reason": f"missing_project:{decision.reason}"}]
-        classification = (
-            self._latest_classification_for_task(target_task.id)
-            if target_task is not None
-            else str((packet.get("structural_signal") or {}).get("kind") or "structural_stall")
-        )
-        corrective_ref_id = (
-            self._next_corrective_ref_id(target_task.id, classification)
-            if target_task is not None
-            else self._next_objective_corrective_ref_id(target_objective.id, classification)
-        )
-        title = (
-            decision.task_title
-            or (
-                f"Prevent recurrence of {classification or 'structural'} failure in {target_task.title}"
-                if target_task is not None
-                else f"Unblock stalled objective workflow for {target_objective.title}"
+
+        linked_tasks = [
+            task
+            for task in self.store.list_tasks(target_objective.project_id)
+            if task.objective_id == target_objective.id
+        ]
+        legacy_tasks = [
+            task
+            for task in linked_tasks
+            if task.strategy == "sa_structural_fix" and str(task.external_ref_type or "") == "sa_watch"
+        ]
+        if not legacy_tasks:
+            self._record_action(
+                "workflow_state_repair",
+                "objective",
+                target_objective.id,
+                decision.reason,
+                "noop",
             )
+            return self.control_plane.status(), [{"kind": "observed", "reason": "workflow_state_already_clean"}]
+
+        ignored_task_ids: list[str] = []
+        waived_task_ids: list[str] = []
+        rationale = (
+            "Obsolete legacy sa-watch recovery task from the superseded structural-fix flow. "
+            f"Reconciled by sa-watch workflow-state repair: {decision.reason}"
         )
-        objective = (
-            decision.task_objective
-            or (
-                self._default_corrective_objective(target_task, classification)
-                if target_task is not None
-                else self._default_objective_corrective_objective(target_objective, classification)
+        for task in legacy_tasks:
+            metadata = dict(task.external_ref_metadata)
+            workflow_disposition = (
+                metadata.get("workflow_state_disposition")
+                if isinstance(metadata.get("workflow_state_disposition"), dict)
+                else None
             )
-        )
-        corrective_task = self.tasks.create_task_with_policy(
-            project_id=project.id,
-            objective_id=target_task.objective_id if target_task is not None else target_objective.id,
-            title=title,
-            objective=objective,
-            priority=max(150, int(target_task.priority if target_task is not None else target_objective.priority)),
-            parent_task_id=target_task.id if target_task is not None else None,
-            source_run_id=None,
-            external_ref_type="sa_watch",
-            external_ref_id=corrective_ref_id,
-            external_ref_metadata={
-                "sa_watch": {
-                    "source_task_id": target_task.id if target_task is not None else None,
-                    "source_objective_id": target_task.objective_id if target_task is not None else target_objective.id,
-                    "classification": classification,
-                    "corrective_ref_id": corrective_ref_id,
-                    "trigger": packet.get("structural_signal"),
-                    "reason": decision.reason,
+            if not workflow_disposition or str(workflow_disposition.get("kind") or "").strip() != "ignore_obsolete":
+                metadata["workflow_state_disposition"] = {
+                    "kind": "ignore_obsolete",
+                    "rationale": rationale,
+                    "source": "sa_watch",
                 }
-            },
-            validation_profile=target_task.validation_profile if target_task is not None else "generic",
-            validation_mode=target_task.validation_mode if target_task is not None else "lightweight_operator",
-            scope=dict(target_task.scope) if target_task is not None else {},
-            strategy="sa_structural_fix",
-            max_attempts=1,
-            required_artifacts=["plan", "report"],
-        )
-        objective_record = self.store.get_objective(
-            target_task.objective_id if target_task is not None else target_objective.id
-        )
-        if objective_record is not None and objective_record.status == ObjectiveStatus.PAUSED:
-            self.store.update_objective_status(objective_record.id, ObjectiveStatus.PLANNING)
+                self.store.update_task_external_metadata(task.id, metadata)
+                ignored_task_ids.append(task.id)
+            failed_disposition = (
+                metadata.get("failed_task_disposition")
+                if isinstance(metadata.get("failed_task_disposition"), dict)
+                else None
+            )
+            if task.status == TaskStatus.FAILED and (
+                not failed_disposition or str(failed_disposition.get("kind") or "").strip() != "waive_obsolete"
+            ):
+                self.tasks.apply_failed_task_disposition(
+                    task_id=task.id,
+                    disposition="waive_obsolete",
+                    rationale=rationale,
+                )
+                waived_task_ids.append(task.id)
+
+        phase = self.store.update_objective_phase(target_objective.id)
+        objective_after = self.store.get_objective(target_objective.id)
+        if objective_after is not None and objective_after.status == ObjectiveStatus.RESOLVED:
+            self.store.update_objective_status(target_objective.id, ObjectiveStatus.PLANNING)
+            objective_after = self.store.get_objective(target_objective.id)
+
+        payload = {
+            "objective_id": target_objective.id,
+            "ignored_task_ids": ignored_task_ids,
+            "waived_task_ids": waived_task_ids,
+            "reason": decision.reason,
+            "objective_status": objective_after.status.value if objective_after is not None else None,
+        }
         self.store.create_context_record(
             ContextRecord(
                 id=new_id("context"),
-                record_type="sa_watch_action",
-                project_id=project.id,
-                objective_id=target_task.objective_id if target_task is not None else target_objective.id,
-                task_id=corrective_task.id,
+                record_type="sa_watch_workflow_state_repair",
+                project_id=target_objective.project_id,
+                objective_id=target_objective.id,
                 visibility="operator_visible",
                 author_type="system",
                 author_id="sa-watch",
-                content=f"sa-watch created corrective task {corrective_task.title}",
-                metadata={
-                    "source_task_id": target_task.id if target_task is not None else None,
-                    "source_objective_id": target_task.objective_id if target_task is not None else target_objective.id,
-                    "classification": classification,
-                    "reason": decision.reason,
-                },
+                content=f"sa-watch reconciled obsolete workflow state for objective {target_objective.title}",
+                metadata=payload,
             )
         )
         self.store.create_event(
             Event(
                 id=new_id("event"),
-                entity_type="task",
-                entity_id=corrective_task.id,
-                event_type="sa_watch_corrective_task_created",
-                payload={
-                    "source_task_id": target_task.id if target_task is not None else None,
-                    "source_objective_id": target_task.objective_id if target_task is not None else target_objective.id,
-                    "classification": classification,
-                    "reason": decision.reason,
-                },
+                entity_type="objective",
+                entity_id=target_objective.id,
+                event_type="sa_watch_workflow_state_repaired",
+                payload=payload,
             )
         )
-        self._record_action("create_corrective_task", "task", corrective_task.id, decision.reason, "applied")
-        effects = [
+        restart_status = None
+        effects: list[dict[str, object]] = [
             {
-                "kind": "corrective_task_created",
-                "task_id": corrective_task.id,
-                "title": corrective_task.title,
-                "objective_id": corrective_task.objective_id,
-                "classification": classification,
+                "kind": "workflow_state_repaired",
+                "objective_id": target_objective.id,
+                "ignored_task_ids": ignored_task_ids,
+                "waived_task_ids": waived_task_ids,
             }
         ]
-        if self.engine is not None:
-            status, execution_effects = self._execute_structural_fix(corrective_task, packet, decision)
-            effects.extend(execution_effects)
-            return status, effects
-        return self.control_plane.status(), effects
+        if self.restart_stack is not None:
+            restart_status = self.restart_stack(
+                {
+                    "reason": "sa_watch_workflow_state_repaired",
+                    "objective_id": target_objective.id,
+                    "ignored_task_ids": ignored_task_ids,
+                    "waived_task_ids": waived_task_ids,
+                }
+            )
+            effects.append({"kind": "stack_restart_requested", "reason": "sa_watch_workflow_state_repaired"})
+        self._record_action("workflow_state_repair", "objective", target_objective.id, decision.reason, "verified")
+        return restart_status or self.control_plane.status(), effects
 
-    def _execute_structural_fix(
-        self,
-        corrective_task: Task,
-        packet: dict[str, object],
-        decision: SAWatchDecision,
-    ) -> tuple[dict[str, object], list[dict[str, object]]]:
+    def _repair_harness(self, decision: SAWatchDecision, packet: dict[str, object]) -> tuple[dict[str, object], list[dict[str, object]]]:
         signal = packet.get("structural_signal") or {}
         before_progress = self._progress_snapshot(signal)
+        target_task = self.store.get_task(str(decision.target_task_id or "")) if decision.target_task_id else None
+        if target_task is None:
+            target_task = self.store.get_task(str(signal.get("task_id") or ""))
+        target_objective = self._target_objective_for_signal(signal)
+        if target_task is None and target_objective is None:
+            self._record_action("escalate", "system", "system", f"missing_target:{decision.reason}", "recorded")
+            return self.control_plane.status(), [{"kind": "noted_concern", "reason": f"missing_target:{decision.reason}"}]
+        objective_id = target_task.objective_id if target_task is not None else target_objective.id
+        project_id = target_task.project_id if target_task is not None else target_objective.project_id
+        classification = (
+            self._latest_classification_for_task(target_task.id)
+            if target_task is not None
+            else str(signal.get("kind") or "structural_stall")
+        )
+        repair_task = Task(
+            id=new_id("sa_watch_repair"),
+            project_id=project_id,
+            objective_id=objective_id,
+            title=decision.task_title or self._default_repair_title(target_task, target_objective, classification),
+            objective=decision.task_objective or self._default_repair_objective(target_task, target_objective, classification),
+            priority=max(150, int(target_task.priority if target_task is not None else target_objective.priority)),
+            validation_profile=target_task.validation_profile if target_task is not None else "generic",
+            validation_mode=target_task.validation_mode if target_task is not None else "default_focused",
+            scope=dict(target_task.scope) if target_task is not None else {},
+            strategy="sa_watch_direct_repair",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+        repair_run = Run(
+            id=new_id("run"),
+            task_id=repair_task.id,
+            status=RunStatus.WORKING,
+            attempt=1,
+            summary=f"sa-watch direct repair for {classification}",
+        )
         effects: list[dict[str, object]] = []
+        self._persist_repair_start(repair_task, repair_run, decision=decision, signal=signal)
+        self.control_plane.pause_lane("worker", reason=f"sa_watch_repair:{decision.reason}")
         try:
-            self.engine.run_until_stable(
-                corrective_task.id,
-                progress_callback=self.structural_progress_callback,
-                post_task_callback=self.post_repair_callback,
-            )
+            repair_result = self.repair_runner(repair_task, repair_run, _HARNESS_REPO_ROOT)
         except Exception as exc:
-            self._record_action("hot_patch", "task", corrective_task.id, f"{decision.reason}:execute_failed:{exc}", "failed")
-            self.control_plane.mark_degraded("sa_watch_hot_patch_failed")
-            effects.append({"kind": "hot_patch_failed", "task_id": corrective_task.id, "reason": str(exc)})
+            self._record_action("repair", "system", "system", f"{decision.reason}:execute_failed:{exc}", "failed")
+            self.control_plane.mark_degraded("sa_watch_repair_failed")
+            failed_result = SAWatchRepairResult(
+                status="failed",
+                run_id=repair_run.id,
+                run_dir=self.workspace_root / "control" / "sa_watch_repairs" / repair_run.id,
+                summary=str(exc),
+                changed_files=[],
+                validation={},
+                diagnostics={"exception": str(exc)},
+            )
+            self._persist_repair_completion(repair_task, repair_run, failed_result, movement_restored=False)
+            self._record_repair_evidence(
+                repair_task=repair_task,
+                repair_run=repair_run,
+                decision=decision,
+                signal=signal,
+                repair_result=failed_result,
+                before_progress=before_progress,
+                after_progress=self._progress_snapshot(signal),
+                movement_restored=False,
+            )
+            effects.append({"kind": "repair_failed", "reason": str(exc)})
             return self.control_plane.status(), effects
-        refreshed = self.store.get_task(corrective_task.id)
-        if refreshed is None:
-            self._record_action("hot_patch", "task", corrective_task.id, f"{decision.reason}:missing_after_execution", "failed")
-            self.control_plane.mark_degraded("sa_watch_hot_patch_failed")
-            effects.append({"kind": "hot_patch_failed", "task_id": corrective_task.id, "reason": "missing_after_execution"})
+        if self.post_repair_callback is not None:
+            self.post_repair_callback(repair_task)
+        after_progress = self._progress_snapshot(signal)
+        movement_restored = self._forward_progress_resumed(signal, before_progress)
+        self._persist_repair_completion(repair_task, repair_run, repair_result, movement_restored=movement_restored)
+        self._record_repair_evidence(
+            repair_task=repair_task,
+            repair_run=repair_run,
+            decision=decision,
+            signal=signal,
+            repair_result=repair_result,
+            before_progress=before_progress,
+            after_progress=after_progress,
+            movement_restored=movement_restored,
+        )
+        if repair_result.status != "validated":
+            self._record_action("repair", "system", "system", decision.reason, repair_result.status)
+            self.control_plane.mark_degraded("sa_watch_repair_failed")
+            self.store.create_control_event(
+                ControlEvent(
+                    id=new_id("control_event"),
+                    event_type="human_escalation_required",
+                    entity_type="system",
+                    entity_id="system",
+                    producer="sa-watch",
+                    payload={
+                        "reason": "sa-watch could not complete a validated architectural repair.",
+                        "objective_id": objective_id,
+                        "repair_run_id": repair_run.id,
+                    },
+                    idempotency_key=new_id("event_key"),
+                )
+            )
+            effects.append({"kind": "repair_failed", "reason": repair_result.summary})
             return self.control_plane.status(), effects
-        if refreshed.status != TaskStatus.COMPLETED:
-            self._record_action("hot_patch", "task", refreshed.id, decision.reason, "failed")
-            self.control_plane.mark_degraded("sa_watch_hot_patch_failed")
-            effects.append({"kind": "hot_patch_failed", "task_id": refreshed.id, "reason": refreshed.status.value})
+        if not movement_restored:
+            self._record_action("escalate", "system", "system", decision.reason, "verification_failed")
+            self.control_plane.mark_degraded("sa_watch_no_forward_progress")
+            self.store.create_control_event(
+                ControlEvent(
+                    id=new_id("control_event"),
+                    event_type="human_escalation_required",
+                    entity_type="system",
+                    entity_id="system",
+                    producer="sa-watch",
+                    payload={
+                        "reason": "sa-watch repaired and validated the harness locally but could not verify restored pipeline movement.",
+                        "objective_id": objective_id,
+                        "repair_run_id": repair_run.id,
+                    },
+                    idempotency_key=new_id("event_key"),
+                )
+            )
+            effects.append({"kind": "noted_concern", "reason": "repair_validated_but_pipeline_still_stalled"})
             return self.control_plane.status(), effects
         restart_status = None
         if self.restart_stack is not None:
             restart_status = self.restart_stack(
                 {
-                    "reason": "sa_watch_hot_patch_completed",
-                    "task_id": refreshed.id,
-                    "objective_id": refreshed.objective_id,
+                    "reason": "sa_watch_repair_verified",
+                    "objective_id": objective_id,
+                    "target_task_id": target_task.id if target_task is not None else None,
+                    "repair_run_id": repair_run.id,
                 }
             )
-            effects.append({"kind": "stack_restart_requested", "task_id": refreshed.id, "reason": "sa_watch_hot_patch_completed"})
-        if not self._forward_progress_resumed(signal, before_progress):
-            self._record_action("hot_patch", "task", refreshed.id, decision.reason, "verification_failed")
-            self.control_plane.freeze(f"sa_watch_no_forward_progress:{decision.reason}")
-            effects.append({"kind": "system_frozen", "reason": f"sa_watch_no_forward_progress:{decision.reason}"})
-            return restart_status or self.control_plane.status(), effects
-        self._record_action("hot_patch", "task", refreshed.id, decision.reason, "verified")
-        self.control_plane.resume_lane("worker", reason="sa_watch_hot_patch_completed")
-        self.control_plane.mark_healthy(reason="sa_watch_hot_patch_completed")
-        effects.append({"kind": "hot_patch_verified", "task_id": refreshed.id})
-        effects.append({"kind": "lane_resumed", "lane": "worker", "reason": "sa_watch_hot_patch_completed"})
+            effects.append({"kind": "stack_restart_requested", "reason": "sa_watch_repair_verified"})
+        self._record_action("repair", "system", "system", decision.reason, "verified")
+        self.control_plane.resume_lane("worker", reason="sa_watch_repair_verified")
+        self.control_plane.mark_healthy(reason="sa_watch_repair_verified")
+        effects.append({"kind": "repair_validated", "run_id": repair_run.id})
+        effects.append({"kind": "lane_resumed", "lane": "worker", "reason": "sa_watch_repair_verified"})
         return restart_status or self.control_plane.status(), effects
+
+    def _persist_repair_start(
+        self,
+        repair_task: Task,
+        repair_run: Run,
+        *,
+        decision: SAWatchDecision,
+        signal: dict[str, object],
+    ) -> None:
+        self.store.create_task(repair_task)
+        self.store.create_run(repair_run)
+        self.store.create_event(
+            Event(
+                id=new_id("event"),
+                entity_type="task",
+                entity_id=repair_task.id,
+                event_type="sa_watch_direct_repair_started",
+                payload={
+                    "run_id": repair_run.id,
+                    "reason": decision.reason,
+                    "signal": signal,
+                },
+            )
+        )
+
+    def _persist_repair_completion(
+        self,
+        repair_task: Task,
+        repair_run: Run,
+        repair_result: SAWatchRepairResult,
+        *,
+        movement_restored: bool,
+    ) -> None:
+        if repair_result.status == "validated" and movement_restored:
+            final_run_status = RunStatus.COMPLETED
+            final_task_status = TaskStatus.COMPLETED
+        elif repair_result.status == "blocked":
+            final_run_status = RunStatus.BLOCKED
+            final_task_status = TaskStatus.FAILED
+        else:
+            final_run_status = RunStatus.FAILED
+            final_task_status = TaskStatus.FAILED
+        self.store.update_run(
+            Run(
+                id=repair_run.id,
+                task_id=repair_run.task_id,
+                status=final_run_status,
+                attempt=repair_run.attempt,
+                summary=repair_result.summary,
+                branch_id=repair_run.branch_id,
+                created_at=repair_run.created_at,
+                updated_at=datetime.now(UTC),
+            )
+        )
+        self.store.update_task_status(repair_task.id, final_task_status)
+        self.store.create_event(
+            Event(
+                id=new_id("event"),
+                entity_type="run",
+                entity_id=repair_run.id,
+                event_type="sa_watch_direct_repair_finished",
+                payload={
+                    "task_id": repair_task.id,
+                    "result": repair_result.status,
+                    "movement_restored": movement_restored,
+                    "summary": repair_result.summary,
+                },
+            )
+        )
 
     def _target_task_packet(self, structural_signal: dict[str, object] | None) -> dict[str, object] | None:
         if not structural_signal:
@@ -690,24 +803,16 @@ class SAWatchService:
 
     def _continuity_signals(self) -> list[dict[str, object]]:
         signals: list[dict[str, object]] = []
-        stale_atomic = self._stale_atomic_generation_signal()
-        if stale_atomic is not None:
-            signals.append(stale_atomic)
-        repeated_failure = self._repeated_failure_signal()
-        if repeated_failure is not None:
-            signals.append(repeated_failure)
-        no_progress = self._no_progress_signal()
-        if no_progress is not None:
-            signals.append(no_progress)
-        objective_stalled = self._objective_stalled_signal()
-        if objective_stalled is not None:
-            signals.append(objective_stalled)
-        worker_paused = self._worker_paused_signal()
-        if worker_paused is not None:
-            signals.append(worker_paused)
-        workflow_gap = self._workflow_gap_signal()
-        if workflow_gap is not None:
-            signals.append(workflow_gap)
+        for signal in (
+            self._stale_atomic_generation_signal(),
+            self._repeated_failure_signal(),
+            self._no_progress_signal(),
+            self._objective_stalled_signal(),
+            self._worker_paused_signal(),
+            self._workflow_gap_signal(),
+        ):
+            if signal is not None:
+                signals.append(signal)
         return signals
 
     def _repeated_failure_signal(self) -> dict[str, object] | None:
@@ -765,26 +870,16 @@ class SAWatchService:
         lane = self.store.get_control_lane_state("worker")
         if lane is None or lane.state != ControlLaneStateValue.PAUSED:
             return None
-        active_structural = [
-            task
-            for task in self.store.list_tasks()
-            if task.status in {TaskStatus.PENDING, TaskStatus.ACTIVE} and str(task.strategy or "") == "sa_structural_fix"
-        ]
         return {
             "kind": "worker_paused",
             "lane_reason": lane.reason,
-            "active_structural_fix_count": len(active_structural),
         }
 
     def _workflow_gap_signal(self) -> dict[str, object] | None:
         unresolved = [objective for objective in self.store.list_objectives() if objective.status != ObjectiveStatus.RESOLVED]
         if not unresolved:
             return None
-        pending_or_active = [
-            task
-            for task in self.store.list_tasks()
-            if task.status in {TaskStatus.PENDING, TaskStatus.ACTIVE}
-        ]
+        pending_or_active = [task for task in self.store.list_tasks() if task.status in {TaskStatus.PENDING, TaskStatus.ACTIVE}]
         if pending_or_active:
             return None
         oldest = sorted(unresolved, key=lambda item: item.updated_at)[0]
@@ -829,16 +924,6 @@ class SAWatchService:
             "active": sum(1 for task in tasks if task.status == TaskStatus.ACTIVE),
             "completed": sum(1 for task in tasks if task.status == TaskStatus.COMPLETED),
             "failed": sum(1 for task in tasks if task.status == TaskStatus.FAILED),
-            "sa_structural_fix_pending": sum(
-                1
-                for task in tasks
-                if task.status == TaskStatus.PENDING and str(task.strategy or "") == "sa_structural_fix"
-            ),
-            "sa_structural_fix_active": sum(
-                1
-                for task in tasks
-                if task.status == TaskStatus.ACTIVE and str(task.strategy or "") == "sa_structural_fix"
-            ),
         }
 
     def _latest_classification_for_task(self, task_id: str) -> str | None:
@@ -847,69 +932,25 @@ class SAWatchService:
                 return run.classification
         return None
 
-    def _default_corrective_objective(self, task: Task, classification: str | None) -> str:
+    def _default_repair_title(self, task: Task | None, objective, classification: str | None) -> str:
+        if task is not None:
+            return f"Repair harness workflow blocking {task.title}"
+        return f"Repair harness workflow blocking {objective.title}"
+
+    def _default_repair_objective(self, task: Task | None, objective, classification: str | None) -> str:
         classification_text = classification or "structural failure"
+        subject = f"task '{task.title}'" if task is not None else f"objective '{objective.title}'"
         return (
-            "This is an sa-watch structural corrective task.\n"
-            f"The task '{task.title}' is recurring because of {classification_text}.\n"
-            "Do not produce another report-only attempt.\n"
-            "Make a real architectural or workflow change in the repository that prevents this failure mode from recurring.\n"
+            "You are sa-watch repairing the Accruvia harness itself.\n"
+            f"The current pipeline is blocked around {subject} because of {classification_text}.\n"
+            "Inspect the harness codebase and make the architectural, workflow, or control-plane change directly.\n"
+            "Do not create product work. Do not stop at a band-aid restart. Fix the machine.\n"
             "Required proof:\n"
-            "- explain the root cause precisely\n"
-            "- implement the preventative change\n"
-            "- add or update tests that reproduce the prior failure mode and prove it no longer recurs\n"
-            "- leave durable evidence artifacts for the fix\n"
+            "- identify the root cause precisely in the repair evidence\n"
+            "- implement the durable harness change\n"
+            "- validate the repaired path locally\n"
+            "- leave durable evidence describing what changed and why tasks should move again\n"
         )
-
-    def _default_objective_corrective_objective(self, objective, classification: str | None) -> str:
-        classification_text = classification or "stalled objective workflow"
-        return (
-            "This is an sa-watch structural corrective task.\n"
-            f"The objective '{objective.title}' is not making forward progress because of {classification_text}.\n"
-            "Do not merely restart the stalled workflow.\n"
-            "Make a real architectural or workflow change that prevents this kind of objective stall from recurring.\n"
-            "Required proof:\n"
-            "- explain why the workflow stopped advancing\n"
-            "- implement the preventative change\n"
-            "- add or update tests that reproduce the stall and prove the objective advances afterward\n"
-            "- leave durable evidence artifacts for the fix\n"
-        )
-
-    def _matching_corrective_tasks(self, task_id: str, classification: str | None) -> list[Task]:
-        base_ref = f"{task_id}:{classification or 'structural'}"
-        matches: list[Task] = []
-        for task in self.store.list_tasks():
-            if task.external_ref_type != "sa_watch":
-                continue
-            ref_id = str(task.external_ref_id or "")
-            if ref_id == base_ref or ref_id.startswith(f"{base_ref}:retry:"):
-                matches.append(task)
-        return matches
-
-    def _next_corrective_ref_id(self, task_id: str, classification: str | None) -> str:
-        base_ref = f"{task_id}:{classification or 'structural'}"
-        matches = self._matching_corrective_tasks(task_id, classification)
-        if not matches:
-            return base_ref
-        return f"{base_ref}:retry:{len(matches) + 1}"
-
-    def _matching_objective_corrective_tasks(self, objective_id: str, classification: str | None) -> list[Task]:
-        base_ref = f"objective:{objective_id}:{classification or 'structural'}"
-        matches: list[Task] = []
-        for task in self.store.list_tasks():
-            if task.external_ref_type != "sa_watch":
-                continue
-            ref_id = str(task.external_ref_id or "")
-            if ref_id == base_ref or ref_id.startswith(f"{base_ref}:retry:"):
-                matches.append(task)
-        return matches
-
-    def _next_objective_corrective_ref_id(self, objective_id: str, classification: str | None) -> str:
-        base_ref = f"objective:{objective_id}:{classification or 'structural'}"
-        matches = self._matching_objective_corrective_tasks(objective_id, classification)
-        if not matches:
-            return base_ref
-        return f"{base_ref}:retry:{len(matches) + 1}"
 
     def _target_objective_for_signal(self, structural_signal: dict[str, object] | None) -> object | None:
         if not structural_signal:
@@ -989,9 +1030,7 @@ class SAWatchService:
         if failed is not None:
             related_times.append(failed.created_at)
         last_activity = max(related_times)
-        phase = ""
-        if progress:
-            phase = str(progress[-1].metadata.get("phase") or "")
+        phase = str(progress[-1].metadata.get("phase") or "") if progress else ""
         return {
             "generation_id": generation_id,
             "status": status,
@@ -999,3 +1038,133 @@ class SAWatchService:
             "last_activity_at": last_activity,
             "is_stale": status == "running" and (datetime.now(UTC) - last_activity) > timedelta(minutes=5),
         }
+
+    def _run_direct_repair(self, repair_task: Task, repair_run: Run, repo_root: Path) -> SAWatchRepairResult:
+        run_dir = self.workspace_root / "control" / "sa_watch_repairs" / repair_run.id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        if self.structural_progress_callback is not None:
+            self.structural_progress_callback(
+                {
+                    "type": "run_created",
+                    "task_id": repair_task.id,
+                    "run_id": repair_run.id,
+                    "attempt": repair_run.attempt,
+                }
+            )
+        env = {
+            "ACCRUVIA_RUN_DIR": str(run_dir),
+            "ACCRUVIA_PROJECT_WORKSPACE": str(repo_root),
+            "ACCRUVIA_TASK_ID": repair_task.id,
+            "ACCRUVIA_RUN_ID": repair_run.id,
+            "ACCRUVIA_RUN_ATTEMPT": str(repair_run.attempt),
+            "ACCRUVIA_TASK_TITLE": repair_task.title,
+            "ACCRUVIA_TASK_OBJECTIVE": repair_task.objective,
+            "ACCRUVIA_RUN_SUMMARY": repair_run.summary,
+            "ACCRUVIA_TASK_STRATEGY": repair_task.strategy,
+            "ACCRUVIA_TASK_VALIDATION_PROFILE": repair_task.validation_profile,
+            "ACCRUVIA_TASK_VALIDATION_MODE": repair_task.validation_mode,
+        }
+        agent_exit = run_agent_worker(env)
+        report_path = run_dir / "report.json"
+        report = self._read_json_dict(report_path)
+        if agent_exit == 0 and str(report.get("worker_outcome") or "") == "candidate":
+            run_validation(env)
+            report = self._read_json_dict(report_path)
+        compile_check = report.get("compile_check") if isinstance(report.get("compile_check"), dict) else {}
+        test_check = report.get("test_check") if isinstance(report.get("test_check"), dict) else {}
+        validated = (
+            str(report.get("worker_outcome") or "") == "success"
+            and bool(compile_check.get("ok"))
+            and bool(test_check.get("ok"))
+        )
+        stdout_summary = None
+        stdout_path = run_dir / "codex_worker.stdout.txt"
+        if stdout_path.exists():
+            stdout_summary = next((line.strip() for line in stdout_path.read_text(encoding="utf-8").splitlines() if line.strip()), None)
+        return SAWatchRepairResult(
+            status="validated" if validated else ("blocked" if report.get("blocked") else "failed"),
+            run_id=repair_run.id,
+            run_dir=run_dir,
+            summary=str(report.get("failure_message") or stdout_summary or repair_run.summary),
+            changed_files=[str(item) for item in report.get("changed_files", []) if str(item).strip()],
+            validation={
+                "compile_check": compile_check,
+                "test_check": test_check,
+                "validation_elapsed_seconds": report.get("validation_elapsed_seconds"),
+            },
+            diagnostics=report,
+            stdout_summary=stdout_summary,
+        )
+
+    def _record_repair_evidence(
+        self,
+        *,
+        repair_task: Task,
+        repair_run: Run,
+        decision: SAWatchDecision,
+        signal: dict[str, object],
+        repair_result: SAWatchRepairResult,
+        before_progress: dict[str, object],
+        after_progress: dict[str, object],
+        movement_restored: bool,
+    ) -> None:
+        evidence_path = repair_result.run_dir / "repair_evidence.json"
+        evidence_path.parent.mkdir(parents=True, exist_ok=True)
+        evidence = {
+            "repair_run_id": repair_run.id,
+            "root_cause": decision.reason,
+            "repair_title": repair_task.title,
+            "repair_objective": repair_task.objective,
+            "summary": repair_result.summary,
+            "changed_files": repair_result.changed_files,
+            "validation": repair_result.validation,
+            "diagnostics": repair_result.diagnostics,
+            "signal": signal,
+            "movement_validation": {
+                "before": before_progress,
+                "after": after_progress,
+                "movement_restored": movement_restored,
+            },
+            "why_pipeline_can_move_again": (
+                "Forward-progress indicators improved after the repair."
+                if movement_restored
+                else "Local validation did not provide enough evidence that the pipeline resumed."
+            ),
+        }
+        evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True), encoding="utf-8")
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="sa_watch_repair",
+                project_id=repair_task.project_id,
+                objective_id=repair_task.objective_id,
+                visibility="operator_visible",
+                author_type="system",
+                author_id="sa-watch",
+                content=f"sa-watch direct repair recorded at {evidence_path}",
+                metadata=evidence,
+            )
+        )
+        self.store.create_event(
+            Event(
+                id=new_id("event"),
+                entity_type="system",
+                entity_id="system",
+                event_type="sa_watch_repair_recorded",
+                payload={
+                    "repair_run_id": repair_run.id,
+                    "objective_id": repair_task.objective_id,
+                    "evidence_path": str(evidence_path),
+                    "movement_restored": movement_restored,
+                },
+            )
+        )
+
+    def _read_json_dict(self, path: Path) -> dict[str, object]:
+        if not path.exists():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}

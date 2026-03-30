@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from ..context_control import objective_execution_gate
+from ..context_control import objective_execution_gate, task_bypasses_objective_execution_gate
 from ..domain import ObjectiveStatus, Task, TaskStatus
 
 
@@ -97,10 +97,10 @@ class WorkflowService:
             return {"state": "failed", "reason": "Task failed.", "detail": ""}
         if not task.objective_id:
             return {"state": "runnable", "reason": "Task is pending and not objective-gated.", "detail": ""}
-        if str(task.strategy or "") == "sa_structural_fix":
+        if task_bypasses_objective_execution_gate(task):
             return {
                 "state": "runnable",
-                "reason": "Structural recovery task may run while the objective is still blocked.",
+                "reason": "Objective review remediation may run while the parent objective is otherwise gated.",
                 "detail": "",
             }
         gate = objective_execution_gate(self.store, task.objective_id)
@@ -177,6 +177,9 @@ class WorkflowService:
 
     def _is_waived_failed_task(self, task: Task) -> bool:
         metadata = task.external_ref_metadata if isinstance(task.external_ref_metadata, dict) else {}
+        workflow_disposition = metadata.get("workflow_state_disposition") if isinstance(metadata, dict) else None
+        if isinstance(workflow_disposition, dict) and str(workflow_disposition.get("kind") or "").strip() == "ignore_obsolete":
+            return True
         disposition = metadata.get("failed_task_disposition") if isinstance(metadata, dict) else None
         return bool(
             task.status == TaskStatus.FAILED

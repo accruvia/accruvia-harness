@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ..context_control import objective_execution_gate
+from ..context_control import objective_execution_gate, task_bypasses_objective_execution_gate
 from ..llm_availability import LLMAvailabilityGate
 from ..store import SQLiteHarnessStore
 from .run_service import RunService
@@ -48,7 +48,7 @@ class QueueService:
             )
             if task is None:
                 return None
-            if self._worker_lane_blocks(task):
+            if self._worker_lane_blocks():
                 progress(
                     {
                         "type": "worker_lane_blocked",
@@ -56,13 +56,13 @@ class QueueService:
                         "task_title": task.title,
                         "project_id": task.project_id,
                         "strategy": task.strategy,
-                        "message": "Worker lane is paused; only structural repair tasks may run.",
+                        "message": "Worker lane is paused.",
                     }
                 )
                 local_exclusions.add(task.id)
                 self.store.release_task_lease(task.id, worker_id)
                 continue
-            if task.objective_id and not self._bypasses_objective_gate(task):
+            if task.objective_id and not task_bypasses_objective_execution_gate(task):
                 gate = objective_execution_gate(self.store, task.objective_id)
                 if not gate.ready:
                     blocking = next((item for item in gate.gate_checks if not item["ok"]), None)
@@ -119,9 +119,6 @@ class QueueService:
             finally:
                 self.store.release_task_lease(task.id, worker_id)
 
-    def _bypasses_objective_gate(self, task) -> bool:
-        return str(task.strategy or "") == "sa_structural_fix"
-
     def process_queue(
         self,
         limit: int,
@@ -144,7 +141,7 @@ class QueueService:
             seen_task_ids.add(result["task"].id)
         return processed
 
-    def _worker_lane_blocks(self, task) -> bool:
+    def _worker_lane_blocks(self) -> bool:
         system = self.store.get_control_system_state()
         if not system.master_switch:
             return False
@@ -155,7 +152,4 @@ class QueueService:
             return True
         if lane.state.value != "paused":
             return False
-        # Structural repair tasks are the only work allowed while the worker
-        # lane is paused. They are the architectural self-healing path that can
-        # prove recurrence prevention before normal work resumes.
-        return str(task.strategy or "") != "sa_structural_fix"
+        return True

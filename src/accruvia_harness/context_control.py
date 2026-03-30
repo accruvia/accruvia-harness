@@ -12,6 +12,10 @@ class ObjectiveExecutionGate:
     gate_checks: list[dict[str, object]]
 
 
+def task_bypasses_objective_execution_gate(task) -> bool:
+    return str(getattr(task, "strategy", "") or "") == "objective_review_remediation"
+
+
 def objective_execution_gate(store, objective_id: str) -> ObjectiveExecutionGate:
     checks: list[dict[str, object]] = []
     objective = store.get_objective(objective_id)

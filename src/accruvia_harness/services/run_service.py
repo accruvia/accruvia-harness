@@ -6,7 +6,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from ..context_control import objective_execution_gate
+from ..context_control import objective_execution_gate, task_bypasses_objective_execution_gate
 from ..domain import (
     Artifact,
     Decision,
@@ -60,7 +60,7 @@ class RunService:
         task = self.store.get_task(task_id)
         if task is None:
             raise ValueError(f"Unknown task: {task_id}")
-        if task.objective_id and not self._bypasses_objective_gate(task):
+        if task.objective_id and not task_bypasses_objective_execution_gate(task):
             gate = objective_execution_gate(self.store, task.objective_id)
             if not gate.ready:
                 blocking = next((item for item in gate.gate_checks if not item["ok"]), None)
@@ -81,9 +81,6 @@ class RunService:
             ):
                 return self._run_once(task, project, progress_callback=progress_callback)
         return self._run_once(task, project, progress_callback=progress_callback)
-
-    def _bypasses_objective_gate(self, task) -> bool:
-        return str(task.strategy or "") == "sa_structural_fix"
 
     def cleanup_stale_run_workspaces(self) -> dict[str, int]:
         runs_root = self.workspace_root / "runs"
