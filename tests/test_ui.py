@@ -2989,6 +2989,32 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         self.store.create_context_record(
             ContextRecord(
                 id=new_id("context"),
+                record_type="atomic_generation_progress",
+                project_id=self.project.id,
+                objective_id=objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Reading accepted Mermaid.",
+                metadata={"generation_id": generation_id, "diagram_version": 1, "phase": "reading accepted flowchart"},
+                created_at=started_at + dt.timedelta(minutes=1),
+            )
+        )
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="atomic_generation_progress",
+                project_id=self.project.id,
+                objective_id=objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content="Deriving candidate units.",
+                metadata={"generation_id": generation_id, "diagram_version": 1, "phase": "deriving candidate units"},
+                created_at=started_at + dt.timedelta(minutes=2),
+            )
+        )
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
                 record_type="atomic_generation_completed",
                 project_id=self.project.id,
                 objective_id=objective.id,
@@ -3003,6 +3029,23 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         state = self.service._atomic_generation_state(objective.id)
 
         self.assertEqual(180000, state["duration_ms"])
+        self.assertEqual(
+            [
+                {
+                    "phase": "reading accepted flowchart",
+                    "started_at": started_at.isoformat(),
+                    "ended_at": (started_at + dt.timedelta(minutes=2)).isoformat(),
+                    "duration_ms": 120000,
+                },
+                {
+                    "phase": "deriving candidate units",
+                    "started_at": (started_at + dt.timedelta(minutes=2)).isoformat(),
+                    "ended_at": completed_at.isoformat(),
+                    "duration_ms": 60000,
+                },
+            ],
+            state["atomic_phases"],
+        )
 
     def test_reconcile_objective_restarts_stale_atomic_generation_when_only_terminal_tasks_remain(self) -> None:
         objective = Objective(

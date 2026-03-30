@@ -5826,6 +5826,13 @@ class HarnessUIDataService:
             for record in self.store.list_context_records(objective_id=objective_id, record_type="atomic_decomposition_telemetry")
             if str(record.metadata.get("generation_id") or "") == generation_id
         ]
+        atomic_phases = self.workflow_timing.sequential_phase_rows(
+            start.created_at,
+            [(str(record.metadata.get("phase") or ""), record.created_at) for record in progress],
+            completed_at=completed.created_at if completed is not None else None,
+            failed_at=failed.created_at if failed is not None else None,
+            last_activity_at=max(related_times) if related_times else None,
+        )
         refinement_round = 0
         critique_accepted = None
         coverage_complete = None
@@ -5858,6 +5865,7 @@ class HarnessUIDataService:
                 failed_at=failed.created_at if failed is not None else None,
                 last_activity_at=max(related_times) if related_times else None,
             ),
+            "atomic_phases": atomic_phases,
             "error": failed.content if failed is not None else "",
             "refinement_round": refinement_round,
             "critique_accepted": critique_accepted,
