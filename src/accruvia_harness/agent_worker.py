@@ -4,6 +4,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,11 +30,11 @@ class ValidationPolicy:
 
 def _focused_test_command(validation_mode: str) -> list[str]:
     if validation_mode == "lightweight_repair":
-        return ["python3", "-m", "unittest", "-v", "tests.test_workers"]
+        return [sys.executable, "-m", "unittest", "-v", "tests.test_workers"]
     if validation_mode == "lightweight_operator":
-        return ["python3", "-m", "unittest", "-v", "tests.test_phase1"]
+        return [sys.executable, "-m", "unittest", "-v", "tests.test_phase1"]
     return [
-        "python3",
+        sys.executable,
         "-m",
         "unittest",
         "-v",
@@ -61,7 +62,7 @@ def _task_specific_test_command(test_files: list[str], validation_mode: str) -> 
         if module and module not in modules:
             modules.append(module)
     if modules:
-        return ["python3", "-m", "unittest", "-v", *modules]
+        return [sys.executable, "-m", "unittest", "-v", *modules]
     return _focused_test_command(validation_mode)
 
 
@@ -272,6 +273,15 @@ def _validation_subprocess_env(workspace: Path, environ: Mapping[str, str]) -> d
         src_path if not existing_pythonpath else src_path + os.pathsep + existing_pythonpath
     )
     return validation_env
+
+
+def _first_validation_failure_line(stdout: str, stderr: str) -> str:
+    combined = (stdout or "") + "\n" + (stderr or "")
+    for line in combined.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped[:240]
+    return ""
 
 
 def select_worker_llm_command(environ: Mapping[str, str]) -> tuple[str, str]:
@@ -685,7 +695,7 @@ def run_validation(environ: Mapping[str, str] | None = None) -> int:
     if python_files:
         try:
             compile_completed = _run_bounded_process(
-                ["python3", "-m", "py_compile", *python_files.splitlines()],
+                [sys.executable, "-m", "py_compile", *python_files.splitlines()],
                 cwd=workspace,
                 timeout_seconds=compile_timeout_seconds,
                 env=validation_env,
@@ -783,6 +793,28 @@ def run_validation(environ: Mapping[str, str] | None = None) -> int:
             {
                 "failure_category": "compile_timeout",
                 "failure_message": compile_failure_message,
+            }
+        )
+    elif compile_rc != 0:
+        payload.update(
+            {
+                "failure_category": "compile_failure",
+                "failure_message": _first_validation_failure_line(
+                    compile_output_path.read_text(encoding="utf-8"),
+                    "",
+                )
+                or "Compile validation failed.",
+            }
+        )
+    elif test_completed.returncode != 0:
+        payload.update(
+            {
+                "failure_category": "validation_failure",
+                "failure_message": _first_validation_failure_line(
+                    test_completed.stdout or "",
+                    test_completed.stderr or "",
+                )
+                or "Focused unit-test validation failed.",
             }
         )
 

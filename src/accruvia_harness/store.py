@@ -81,6 +81,19 @@ class SQLiteHarnessStore(
                 RunStatus.DECIDING.value,
             ]
             placeholders = ",".join("?" for _ in in_progress_statuses)
+            stale_run_rows = connection.execute(
+                f"""
+                SELECT id
+                FROM runs
+                WHERE status IN ({placeholders})
+                  AND task_id NOT IN (
+                      SELECT task_id
+                      FROM task_leases
+                      WHERE lease_expires_at > ?
+                  )
+                """,
+                (*in_progress_statuses, now),
+            ).fetchall()
             rows = connection.execute(
                 f"""
                 UPDATE runs
@@ -95,6 +108,19 @@ class SQLiteHarnessStore(
                 (RunStatus.FAILED.value, now, *in_progress_statuses, now),
             ).rowcount
             recovered["runs"] = rows
+            stale_run_ids = [str(row["id"]) for row in stale_run_rows]
+            if stale_run_ids:
+                run_placeholders = ",".join("?" for _ in stale_run_ids)
+                connection.execute(
+                    f"""
+                    UPDATE control_worker_runs
+                    SET status = 'failed',
+                        classification = COALESCE(classification, 'system_failure'),
+                        ended_at = COALESCE(ended_at, ?)
+                    WHERE id IN ({run_placeholders})
+                    """,
+                    (now, *stale_run_ids),
+                )
 
             # Reset ACTIVE tasks with no active lease back to PENDING
             tasks_reset = connection.execute(

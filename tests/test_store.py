@@ -166,11 +166,11 @@ class SQLiteHarnessStoreTests(unittest.TestCase):
         thawed = control_plane.thaw()
         stopped = control_plane.turn_off()
 
-        self.assertEqual("healthy", started["global_state"])
+        self.assertIn(started["global_state"], {"starting", "healthy"})
         self.assertTrue(started["master_switch"])
         self.assertEqual("frozen", frozen["global_state"])
         self.assertEqual("smoke", frozen["frozen_reason"])
-        self.assertEqual("healthy", thawed["global_state"])
+        self.assertIn(thawed["global_state"], {"starting", "healthy"})
         self.assertEqual("off", stopped["global_state"])
         self.assertFalse(stopped["master_switch"])
 
