@@ -28,6 +28,7 @@ from ..interrogation import HarnessQueryService, InterrogationService
 from ..llm import build_llm_router
 from ..onboarding import detect_llm_command_candidates, probe_llm_command, prompt_text
 from ..runtime import WorkflowRuntime, build_runtime
+from ..services.workflow_service import WorkflowService
 from ..store import SQLiteHarnessStore
 from ..telemetry import TelemetrySink
 
@@ -786,6 +787,67 @@ def list_desired_supervisors(config: HarnessConfig) -> list[dict[str, Any]]:
     return records
 
 
+def startup_preflight(config: HarnessConfig, store: SQLiteHarnessStore) -> dict[str, Any]:
+    control_dir = config.db_path.parent / "supervisors"
+    control_dir.mkdir(parents=True, exist_ok=True)
+    recovered = store.recover_stale_state()
+    stale_supervisor_records: list[int] = []
+    for record in list_desired_supervisors(config):
+        pid = int(record.get("pid") or 0)
+        if pid > 0 and _pid_is_alive(pid):
+            continue
+        stale_supervisor_records.append(pid)
+        path = control_dir / f"{pid}.json"
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+    stop_request_cleared = False
+    stop_request_path = control_dir / "stop.request"
+    if stop_request_path.exists() and not list_desired_supervisors(config):
+        stop_request_path.unlink()
+        stop_request_cleared = True
+
+    stale_ui_runtime = False
+    ui_runtime = _read_json_file(ui_runtime_state_path(config)) or {}
+    ui_pid = int(ui_runtime.get("pid") or 0)
+    if ui_pid > 0 and not _pid_is_alive(ui_pid):
+        clear_ui_runtime_state(config)
+        stale_ui_runtime = True
+
+    stale_sa_watch_runtime = False
+    sa_watch_runtime = read_sa_watch_runtime_state(config) or {}
+    sa_watch_pid = int(sa_watch_runtime.get("pid") or 0)
+    if sa_watch_pid > 0 and not _pid_is_alive(sa_watch_pid):
+        clear_sa_watch_runtime_state(config)
+        stale_sa_watch_runtime = True
+
+    stale_sa_watch_launch = False
+    sa_watch_launch = read_sa_watch_launch_state(config)
+    if sa_watch_launch is not None and not _sa_watch_launch_is_active(
+        sa_watch_launch,
+        stale_after_seconds=_SA_WATCH_LAUNCH_STALE_SECONDS,
+    ):
+        clear_sa_watch_launch_state(config)
+        stale_sa_watch_launch = True
+
+    stale_restart_request = read_stack_restart_request(config)
+    restart_request_cleared = False
+    if stale_restart_request is not None:
+        clear_stack_restart_request(config)
+        restart_request_cleared = True
+
+    return {
+        "recovered": recovered,
+        "stale_supervisor_records": stale_supervisor_records,
+        "stop_request_cleared": stop_request_cleared,
+        "stale_ui_runtime_cleared": stale_ui_runtime,
+        "stale_sa_watch_runtime_cleared": stale_sa_watch_runtime,
+        "stale_sa_watch_launch_cleared": stale_sa_watch_launch,
+        "stale_restart_request_cleared": restart_request_cleared,
+    }
+
+
 def build_context(config: HarnessConfig) -> CLIContext:
     store = build_store(config)
     telemetry = build_telemetry(config)
@@ -859,6 +921,17 @@ def build_context(config: HarnessConfig) -> CLIContext:
             ctx.workflow_data_service = data_service
             ctx.engine.queue.post_task_callback = data_service.reconcile_task_workflow
             ctx.sa_watch.post_repair_callback = data_service.reconcile_task_workflow
+        else:
+            workflow_service = WorkflowService(store)
+            ctx.workflow_data_service = workflow_service
+
+            def _reconcile_task_workflow(task) -> None:
+                objective_id = str(getattr(task, "objective_id", "") or "").strip()
+                if objective_id:
+                    workflow_service.reconcile_objective(objective_id)
+
+            ctx.engine.queue.post_task_callback = _reconcile_task_workflow
+            ctx.sa_watch.post_repair_callback = _reconcile_task_workflow
         ctx.sa_watch.structural_progress_callback = ctx.control_runtime.handle
         ctx.sa_watch.restart_stack = lambda payload: _restart_stack_from_sa_watch(ctx, payload)
     return ctx

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from ..control_plane import EXPENSIVE_CODING_RUN_LIMIT, EXPENSIVE_CODING_RUN_WINDOW
 from ..context_control import objective_execution_gate, task_bypasses_objective_execution_gate
 from ..llm_availability import LLMAvailabilityGate
 from ..store import SQLiteHarnessStore
@@ -57,6 +59,21 @@ class QueueService:
                         "project_id": task.project_id,
                         "strategy": task.strategy,
                         "message": "Worker lane is paused.",
+                    }
+                )
+                local_exclusions.add(task.id)
+                self.store.release_task_lease(task.id, worker_id)
+                continue
+            objective_block_reason = self._objective_dispatch_block_reason(task.objective_id)
+            if objective_block_reason is not None:
+                progress(
+                    {
+                        "type": "objective_gate_blocked",
+                        "task_id": task.id,
+                        "task_title": task.title,
+                        "project_id": task.project_id,
+                        "objective_id": task.objective_id,
+                        "message": objective_block_reason,
                     }
                 )
                 local_exclusions.add(task.id)
@@ -153,3 +170,31 @@ class QueueService:
         if lane.state.value != "paused":
             return False
         return True
+
+    def _objective_dispatch_block_reason(self, objective_id: str | None) -> str | None:
+        if not objective_id:
+            return None
+        if self._objective_budget_exhausted(objective_id):
+            return "Objective budget exhausted for the current hour."
+        if self._objective_no_progress_blocked(objective_id):
+            return "Objective is paused for no_progress; operator review required before more work on this objective."
+        return None
+
+    def _objective_budget_exhausted(self, objective_id: str) -> bool:
+        total = 0
+        cutoff = datetime.now(UTC) - EXPENSIVE_CODING_RUN_WINDOW
+        budgets = self.store.list_control_budgets(budget_scope="objective", budget_key=objective_id)
+        for budget in budgets:
+            if budget.window_end >= cutoff:
+                total += budget.usage_count
+        return total > EXPENSIVE_CODING_RUN_LIMIT
+
+    def _objective_no_progress_blocked(self, objective_id: str) -> bool:
+        for event in self.store.list_control_events(event_type="human_escalation_required", limit=50):
+            payload = dict(event.payload or {})
+            if str(payload.get("objective_id") or "") != objective_id:
+                continue
+            if str(payload.get("reason") or "") != "Three completed coding runs did not advance the objective to a mergeable state.":
+                continue
+            return True
+        return False

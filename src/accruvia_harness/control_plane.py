@@ -210,15 +210,32 @@ class ControlPlane:
         self.store.upsert_control_budget(budget)
         return budget
 
-    def expensive_coding_budget_exhausted(self) -> bool:
+    def expensive_coding_budget_exhausted(
+        self,
+        *,
+        budget_scope: str = "worker",
+        budget_key: str = "expensive_coding_runs",
+    ) -> bool:
         now = datetime.now(UTC)
-        budgets = self.store.list_control_budgets(budget_scope="worker", budget_key="expensive_coding_runs")
+        budgets = self.store.list_control_budgets(budget_scope=budget_scope, budget_key=budget_key)
         total = 0
         cutoff = now - EXPENSIVE_CODING_RUN_WINDOW
         for budget in budgets:
             if budget.window_end >= cutoff:
                 total += budget.usage_count
         return total > EXPENSIVE_CODING_RUN_LIMIT
+
+    def objective_no_progress_blocked(self, objective_id: str) -> bool:
+        if not objective_id:
+            return False
+        for event in self.store.list_control_events(event_type="human_escalation_required", limit=50):
+            payload = dict(event.payload or {})
+            if str(payload.get("objective_id") or "") != objective_id:
+                continue
+            if str(payload.get("reason") or "") != "Three completed coding runs did not advance the objective to a mergeable state.":
+                continue
+            return True
+        return False
 
     def record_human_escalation(self, reason: str, *, payload: dict[str, object] | None = None) -> dict[str, object]:
         self.store.create_control_recovery_action(

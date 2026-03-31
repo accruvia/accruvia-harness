@@ -22,8 +22,7 @@ from .common import (
     ensure_llm_ready,
     record_desired_supervisor_state,
     record_desired_ui_state,
-    start_sa_watch_process,
-    stop_sa_watch_process,
+    startup_preflight,
     stop_ui_process,
 )
 
@@ -130,7 +129,7 @@ def _smoke_test_text(payload: dict[str, object]) -> str:
         f"- Events recorded: {len(events)}",
         "",
         "Next step",
-        "- Use `./bin/accruvia-harness supervise` to keep the machine running.",
+        "- Use `./bin/accruvia-harness supervise` to start the harness.",
     ]
     return "\n".join(lines)
 
@@ -205,7 +204,7 @@ def _supervise_start_text(
     startup_line = f"Starting {', '.join(startup_actions)} pass..."
     return "\n".join(
         [
-            _timestamped("Supervisor started"),
+            _timestamped("Harness started"),
             _timestamped(f"- Scope: {scope}"),
             _timestamped(f"- Mode: {mode}"),
             _timestamped(f"- Worker: {worker_id}"),
@@ -581,7 +580,7 @@ def _emit_supervise_progress(event: dict[str, object]) -> None:
 def _supervise_summary_text(result) -> str:
     return "\n".join(
         [
-            _timestamped("Supervisor stopped"),
+            _timestamped("Harness stopped"),
             _timestamped(f"- Exit reason: {result.exit_reason}"),
             _timestamped(f"- Tasks processed: {result.processed_count}"),
             _timestamped(f"- Heartbeats run: {result.heartbeat_count}"),
@@ -1079,6 +1078,7 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
         emit({"killed_supervisors": killed, "count": len(killed)})
         return True
     if args.command == "supervise":
+        startup_preflight(config, store)
         ctx.control_plane.turn_on()
         max_idle_cycles = args.max_idle_cycles
         if max_idle_cycles is None:
@@ -1090,7 +1090,7 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
         if heartbeat_project_ids and heartbeat_interval_seconds is None:
             heartbeat_interval_seconds = 60.0
         if heartbeat_project_ids or args.heartbeat_all_projects:
-            config = ensure_llm_ready(args, ctx, reason="Supervisor heartbeats")
+            config = ensure_llm_ready(args, ctx, reason="Harness heartbeats")
         record_desired_supervisor_state(
             config,
             project_id=args.project_id,
@@ -1119,7 +1119,6 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
             if not args.json:
                 print(f"\n{_timestamped('Shutting down...')}", flush=True)
             stop_ui_process(config)
-            stop_sa_watch_process(config)
             stop_request_path.write_text("graceful-stop-requested\n", encoding="utf-8")
             if stop_requested["signal_count"] >= 2:
                 raise KeyboardInterrupt
@@ -1165,25 +1164,6 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
                 ),
                 flush=True,
             )
-        sa_watch_process = None
-        if not args.no_sa_watch_autostart:
-            sa_watch_process = start_sa_watch_process(
-                config,
-                interval_seconds=args.sa_watch_interval_seconds,
-                stream_output=not args.json,
-            )
-            if not args.json and sa_watch_process is not None:
-                print(
-                    "\n".join(
-                        [
-                            _timestamped("sa-watch started"),
-                            _timestamped(f"- PID: {sa_watch_process['pid']}"),
-                            _timestamped(f"- Interval: {args.sa_watch_interval_seconds:.1f}s"),
-                            _timestamped(f"- Output: live console + {sa_watch_process['log_path']}"),
-                        ]
-                    ),
-                    flush=True,
-                )
         def _control_aware_progress(event: dict[str, object]) -> None:
             ctx.control_runtime.handle(event)
             ctx.control_watch.observe(event, api_url=desired_api_url(config))
@@ -1284,9 +1264,8 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
             ctx.control_plane.pause_lane("harness", reason="supervise_exit")
             if shutting_down:
                 if not args.json:
-                    print(_timestamped("Shutdown requested; stopping ui + sa-watch + control-plane"), flush=True)
+                    print(_timestamped("Shutdown requested; stopping ui + control-plane"), flush=True)
                 stop_ui_process(config)
-                stop_sa_watch_process(config)
                 ctx.control_plane.turn_off()
                 if not args.json:
                     print(_timestamped("System stopped"), flush=True)
@@ -1297,10 +1276,7 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
             if stop_request_path.exists() and not _prune_supervisor_records(config):
                 stop_request_path.unlink()
         if args.json:
-            payload = serialize_dataclass(result)
-            if sa_watch_process is not None:
-                payload["sa_watch"] = sa_watch_process
-            emit(payload)
+            emit(serialize_dataclass(result))
         else:
             print(_supervise_summary_text(result))
         return True

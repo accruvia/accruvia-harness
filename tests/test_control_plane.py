@@ -7,6 +7,7 @@ import json
 import os
 import threading
 import tempfile
+import time
 import unittest
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
@@ -16,6 +17,7 @@ from types import SimpleNamespace
 from accruvia_harness.commands.common import (
     build_context,
     desired_sa_watch_state_path,
+    sa_watch_launch_state_path,
     sa_watch_runtime_state_path,
     clear_stack_restart_request,
     read_stack_restart_request,
@@ -23,6 +25,8 @@ from accruvia_harness.commands.common import (
     record_desired_ui_state,
     restart_api_process,
     restart_harness_process,
+    startup_preflight,
+    ui_runtime_state_path,
     update_ui_runtime_state,
 )
 from accruvia_harness.commands.control import handle_control_command
@@ -41,7 +45,7 @@ from accruvia_harness.services.task_service import TaskService
 from accruvia_harness.services.workflow_service import WorkflowService
 from accruvia_harness.llm import LLMExecutionResult, LLMRouter
 from accruvia_harness.sa_watch import SAWatchRepairResult, SAWatchService
-from accruvia_harness.domain import ContextRecord, ControlEvent, ControlRecoveryAction, ControlWorkerRun, Objective, ObjectiveStatus, Project, RunStatus, TaskStatus, new_id
+from accruvia_harness.domain import Artifact, ContextRecord, ControlEvent, ControlRecoveryAction, ControlWorkerRun, Objective, ObjectiveStatus, Project, PromotionRecord, PromotionStatus, Run, RunStatus, Task, TaskStatus, new_id
 from accruvia_harness.store import SQLiteHarnessStore
 
 
@@ -258,6 +262,56 @@ class ControlRestartHelperTests(unittest.TestCase):
             self.assertTrue(bool(result and result.get("existing")))
             popen.assert_not_called()
 
+    def test_startup_preflight_clears_stale_restart_request_and_dead_runtime_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = HarnessConfig.from_env(root / "harness.db", root / "workspace", root / "harness.log")
+            store = SQLiteHarnessStore(config.db_path)
+            store.initialize()
+            control_dir = config.db_path.parent / "control"
+            control_dir.mkdir(parents=True, exist_ok=True)
+            (control_dir / "restart_stack_request.json").write_text(
+                json.dumps({"reason": "sa_structural_fix_completed", "task_id": "task_123"}, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            ui_runtime_state_path(config).write_text(json.dumps({"pid": 999999}), encoding="utf-8")
+            sa_watch_runtime_state_path(config).write_text(json.dumps({"pid": 999999, "mode": "idle"}), encoding="utf-8")
+            sa_watch_launch_state_path(config).write_text(
+                json.dumps({"launcher_pid": 999999, "pid": 999998, "created_at": 1.0, "interval_seconds": 300.0}),
+                encoding="utf-8",
+            )
+
+            result = startup_preflight(config, store)
+
+            self.assertTrue(result["stale_restart_request_cleared"])
+            self.assertTrue(result["stale_ui_runtime_cleared"])
+            self.assertTrue(result["stale_sa_watch_runtime_cleared"])
+            self.assertTrue(result["stale_sa_watch_launch_cleared"])
+            self.assertIsNone(read_stack_restart_request(config))
+            self.assertFalse(ui_runtime_state_path(config).exists())
+            self.assertFalse(sa_watch_runtime_state_path(config).exists())
+            self.assertFalse(sa_watch_launch_state_path(config).exists())
+
+    def test_startup_preflight_prunes_dead_supervisor_records_and_stop_request(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = HarnessConfig.from_env(root / "harness.db", root / "workspace", root / "harness.log")
+            store = SQLiteHarnessStore(config.db_path)
+            store.initialize()
+            supervisor_dir = config.db_path.parent / "supervisors"
+            supervisor_dir.mkdir(parents=True, exist_ok=True)
+            stale_record = supervisor_dir / "999999.json"
+            stale_record.write_text(json.dumps({"pid": 999999, "worker_id": "stale"}), encoding="utf-8")
+            stop_request = supervisor_dir / "stop.request"
+            stop_request.write_text("graceful-stop-requested\n", encoding="utf-8")
+
+            result = startup_preflight(config, store)
+
+            self.assertEqual([999999], result["stale_supervisor_records"])
+            self.assertTrue(result["stop_request_cleared"])
+            self.assertFalse(stale_record.exists())
+            self.assertFalse(stop_request.exists())
+
 
 class ControlWatchServiceTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -278,176 +332,150 @@ class ControlWatchServiceTests(unittest.TestCase):
             supervisor_control_dir=self.supervisor_dir,
         )
 
-    def test_watch_degrades_when_no_supervisor_is_running(self) -> None:
+    def _create_task(self, *, status: TaskStatus = TaskStatus.PENDING, required_artifacts: list[str] | None = None) -> Task:
+        project = Project(id=new_id("project"), name="watch-project", description="watch")
+        self.store.create_project(project)
+        task = Task(
+            id=new_id("task"),
+            project_id=project.id,
+            title="Watch task",
+            objective="Watch objective",
+            required_artifacts=required_artifacts or ["plan", "report"],
+            status=status,
+        )
+        self.store.create_task(task)
+        return task
+
+    def _create_run(self, task: Task, *, status: RunStatus = RunStatus.WORKING, updated_at: datetime | None = None) -> Run:
+        run = Run(
+            id=new_id("run"),
+            task_id=task.id,
+            status=status,
+            attempt=1,
+            summary="watch",
+            updated_at=updated_at or datetime.now(UTC),
+        )
+        self.store.create_run(run)
+        return run
+
+    def test_watch_detects_no_active_tasks_while_work_exists(self) -> None:
+        task = self._create_task(status=TaskStatus.PENDING)
+        with self.store.connect() as connection:
+            connection.execute(
+                "UPDATE tasks SET updated_at = ? WHERE id = ?",
+                ((datetime.now(UTC) - timedelta(minutes=3)).isoformat(), task.id),
+            )
+
         result = self.watch.run_once()
 
-        self.assertFalse(result["harness"]["ok"])
-        self.assertEqual("degraded", result["status"]["global_state"])
-        breadcrumbs = self.store.list_control_breadcrumbs(entity_type="lane", entity_id="harness")
-        self.assertEqual("system_failure", breadcrumbs[0].classification)
+        self.assertTrue(result["stuck"])
+        self.assertIn("No active tasks while work exists", result["matched_rules"])
+        self.assertIn(task.id, result["affected_task_ids"])
 
-    def test_watch_freezes_on_stalled_objective(self) -> None:
-        project = Project(id=new_id("project"), name="watch-project", description="watch")
+    def test_watch_detects_recent_stalled_objective(self) -> None:
+        project = Project(id=new_id("project"), name="objective-project", description="watch")
         self.store.create_project(project)
         objective = Objective(
             id=new_id("objective"),
             project_id=project.id,
             title="Stalled objective",
             summary="stalled",
-            status=ObjectiveStatus.EXECUTING,
+            status=ObjectiveStatus.PLANNING,
         )
         self.store.create_objective(objective)
+        self.store.create_control_event(
+            ControlEvent(
+                id=new_id("control_event"),
+                event_type="objective_stalled",
+                entity_type="objective",
+                entity_id=objective.id,
+                producer="test",
+                payload={"objective_id": objective.id},
+                idempotency_key=new_id("event_key"),
+            )
+        )
+
+        result = self.watch.run_once()
+
+        self.assertTrue(result["stuck"])
+        self.assertIn("Stalled objective exists", result["matched_rules"])
+
+    def test_watch_detects_active_task_with_only_liveness_noise(self) -> None:
+        task = self._create_task(status=TaskStatus.ACTIVE)
+        run = self._create_run(task)
+        lease_expires_at = datetime.now(UTC) + timedelta(minutes=5)
         with self.store.connect() as connection:
             connection.execute(
-                "UPDATE objectives SET updated_at = '2000-01-01T00:00:00+00:00' WHERE id = ?",
-                (objective.id,),
+                "INSERT INTO task_leases (task_id, worker_id, lease_expires_at, created_at) VALUES (?, ?, ?, ?)",
+                (task.id, "restart-worker", lease_expires_at.isoformat(), datetime.now(UTC).isoformat()),
             )
-
-        result = self.watch.run_once(stalled_objective_hours=1.0)
-
-        self.assertEqual("frozen", result["status"]["global_state"])
-        self.assertEqual(objective.id, result["stalled_objectives"][0]["objective_id"])
-
-    def test_watch_restarts_api_once_and_recovers(self) -> None:
-        server = HTTPServer(("127.0.0.1", 0), _VersionHandler)
-        port = server.server_address[1]
-        server.server_close()
-        live_server: HTTPServer | None = None
-        thread: threading.Thread | None = None
-
-        def restart_api():
-            nonlocal live_server, thread
-            live_server = HTTPServer(("127.0.0.1", port), _VersionHandler)
-            thread = threading.Thread(target=live_server.serve_forever, daemon=True)
-            thread.start()
-            return {"pid": os.getpid()}
-
-        self.addCleanup(lambda: live_server.shutdown() if live_server is not None else None)
-        self.addCleanup(lambda: live_server.server_close() if live_server is not None else None)
-        self.addCleanup(lambda: thread.join(timeout=1) if thread is not None else None)
-        watch = ControlWatchService(
-            self.store,
-            self.control_plane,
-            FailureClassifier(),
-            BreadcrumbWriter(self.store, self.workspace_root),
-            supervisor_control_dir=self.supervisor_dir,
-            restart_api=restart_api,
+        self.supervisor_dir.mkdir(parents=True, exist_ok=True)
+        (self.supervisor_dir / "123.json").write_text(
+            json.dumps({"pid": os.getpid(), "project_id": task.project_id, "worker_id": "restart-worker"}),
+            encoding="utf-8",
         )
+        run_dir = self.workspace_root / "runs" / run.id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        heartbeat = run_dir / "worker.heartbeat.json"
+        heartbeat.write_text('{"ok": true}', encoding="utf-8")
+        stale_time = time.time() - 601
+        os.utime(heartbeat, (stale_time, stale_time))
 
-        result = watch.check_api(f"http://127.0.0.1:{port}/api/version")
+        result = self.watch.run_once()
 
-        self.assertTrue(result["ok"])
-        self.assertTrue(result["restarted"])
-        lane = self.store.get_control_lane_state("api")
-        self.assertEqual("running", lane.state.value if lane else None)
-        actions = self.store.list_control_recovery_actions(target_type="lane", target_id="api")
-        self.assertEqual("restart", actions[0].action_type)
-        self.assertEqual("restarted", actions[0].result)
+        self.assertTrue(result["stuck"])
+        self.assertIn("Active task produced no artifact", result["matched_rules"])
+        self.assertIn("Active task produced only liveness noise", result["matched_rules"])
+        self.assertIn(task.id, result["affected_task_ids"])
 
-    def test_watch_restarts_harness_once_and_recovers(self) -> None:
-        def restart_harness():
-            self.supervisor_dir.mkdir(parents=True, exist_ok=True)
-            (self.supervisor_dir / "123.json").write_text(
-                json.dumps({"pid": os.getpid(), "project_id": "project_123", "worker_id": "restart-worker"}),
-                encoding="utf-8",
-            )
-            return {"pid": os.getpid()}
+    def test_watch_detects_active_task_that_lost_worker(self) -> None:
+        task = self._create_task(status=TaskStatus.ACTIVE)
+        self._create_run(task)
 
-        watch = ControlWatchService(
-            self.store,
-            self.control_plane,
-            FailureClassifier(),
-            BreadcrumbWriter(self.store, self.workspace_root),
-            supervisor_control_dir=self.supervisor_dir,
-            restart_harness=restart_harness,
+        result = self.watch.run_once()
+
+        self.assertTrue(result["stuck"])
+        self.assertIn("Active task lost its worker", result["matched_rules"])
+        self.assertIn(task.id, result["affected_task_ids"])
+
+    def test_watch_detects_promotion_blocked_on_missing_prerequisite(self) -> None:
+        task = self._create_task(status=TaskStatus.COMPLETED, required_artifacts=["plan", "report"])
+        run = self._create_run(task, status=RunStatus.COMPLETED, updated_at=datetime.now(UTC) - timedelta(minutes=5))
+        self.store.create_artifact(
+            Artifact(id=new_id("artifact"), run_id=run.id, kind="plan", path="/tmp/plan.txt", summary="plan")
         )
-
-        result = watch.check_harness()
-
-        self.assertTrue(result["ok"])
-        self.assertTrue(result["restarted"])
-        lane = self.store.get_control_lane_state("harness")
-        self.assertEqual("running", lane.state.value if lane else None)
-        actions = self.store.list_control_recovery_actions(target_type="lane", target_id="harness")
-        self.assertEqual("restart", actions[0].action_type)
-        self.assertEqual("restarted", actions[0].result)
-
-    def test_old_failed_restart_does_not_block_new_harness_restart(self) -> None:
-        self.store.create_control_recovery_action(
-            ControlRecoveryAction(
-                id=new_id("recovery"),
-                action_type="restart",
-                target_type="lane",
-                target_id="harness",
-                reason="no_supervisor",
-                result="restart_failed",
-                created_at=datetime.now(UTC) - timedelta(seconds=120),
+        self.store.create_promotion(
+            PromotionRecord(
+                id=new_id("promotion"),
+                task_id=task.id,
+                run_id=run.id,
+                status=PromotionStatus.PENDING,
+                summary="pending",
+                details={},
+                created_at=datetime.now(UTC) - timedelta(minutes=5),
             )
         )
 
-        def restart_harness():
-            self.supervisor_dir.mkdir(parents=True, exist_ok=True)
-            (self.supervisor_dir / "124.json").write_text(
-                json.dumps({"pid": os.getpid(), "project_id": "project_124", "worker_id": "restart-worker"}),
-                encoding="utf-8",
+        result = self.watch.run_once()
+
+        self.assertTrue(result["stuck"])
+        self.assertIn("Promotion is blocked on a missing prerequisite", result["matched_rules"])
+        self.assertTrue(result["affected_promotion_ids"])
+
+    def test_watch_counts_same_state_loops_deterministically(self) -> None:
+        task = self._create_task(status=TaskStatus.PENDING)
+        with self.store.connect() as connection:
+            connection.execute(
+                "UPDATE tasks SET updated_at = ? WHERE id = ?",
+                ((datetime.now(UTC) - timedelta(minutes=3)).isoformat(), task.id),
             )
-            return {"pid": os.getpid()}
 
-        watch = ControlWatchService(
-            self.store,
-            self.control_plane,
-            FailureClassifier(),
-            BreadcrumbWriter(self.store, self.workspace_root),
-            supervisor_control_dir=self.supervisor_dir,
-            restart_harness=restart_harness,
-        )
+        first = self.watch.run_once()
+        second = self.watch.run_once()
 
-        result = watch.check_harness()
-
-        self.assertTrue(result["ok"])
-        self.assertTrue(result["restarted"])
-
-    def test_old_successful_restart_does_not_block_new_api_restart(self) -> None:
-        self.store.create_control_recovery_action(
-            ControlRecoveryAction(
-                id=new_id("recovery"),
-                action_type="restart",
-                target_type="lane",
-                target_id="api",
-                reason="system_failure",
-                result="restarted",
-                created_at=datetime.now(UTC) - timedelta(seconds=120),
-            )
-        )
-        server = HTTPServer(("127.0.0.1", 0), _VersionHandler)
-        port = server.server_address[1]
-        server.server_close()
-        live_server: HTTPServer | None = None
-        thread: threading.Thread | None = None
-
-        def restart_api():
-            nonlocal live_server, thread
-            live_server = HTTPServer(("127.0.0.1", port), _VersionHandler)
-            thread = threading.Thread(target=live_server.serve_forever, daemon=True)
-            thread.start()
-            return {"pid": os.getpid()}
-
-        self.addCleanup(lambda: live_server.shutdown() if live_server is not None else None)
-        self.addCleanup(lambda: live_server.server_close() if live_server is not None else None)
-        self.addCleanup(lambda: thread.join(timeout=1) if thread is not None else None)
-        watch = ControlWatchService(
-            self.store,
-            self.control_plane,
-            FailureClassifier(),
-            BreadcrumbWriter(self.store, self.workspace_root),
-            supervisor_control_dir=self.supervisor_dir,
-            restart_api=restart_api,
-        )
-
-        result = watch.check_api(f"http://127.0.0.1:{port}/api/version")
-
-        self.assertTrue(result["ok"])
-        self.assertTrue(result["restarted"])
+        self.assertTrue(first["stuck"])
+        self.assertTrue(second["stuck"])
+        self.assertIn("Task is looping in the same state", second["matched_rules"])
 
 
 class ControlRuntimeObserverWorkflowTests(unittest.TestCase):
@@ -587,7 +615,7 @@ class ControlRuntimeObserverTests(unittest.TestCase):
         self.assertEqual("healthy", status["global_state"])
         self.assertFalse(escalations)
 
-    def test_no_progress_pauses_worker_lane_and_records_escalation(self) -> None:
+    def test_no_progress_records_objective_scoped_escalation_without_pausing_worker_lane(self) -> None:
         tasks = TaskService(self.store)
         project = tasks.create_project("progress-project", "progress")
         objective = Objective(
@@ -627,11 +655,14 @@ class ControlRuntimeObserverTests(unittest.TestCase):
 
         lane = self.store.get_control_lane_state("worker")
         actions = self.store.list_control_recovery_actions()
+        escalations = self.store.list_control_events(event_type="human_escalation_required")
         breadcrumbs = self.store.list_control_breadcrumbs(entity_type="objective", entity_id=objective.id)
 
         self.assertIsNotNone(lane)
-        self.assertEqual("paused", lane.state.value if lane else None)
+        self.assertEqual("running", lane.state.value if lane else None)
         self.assertEqual("escalate", actions[0].action_type)
+        self.assertEqual(objective.id, escalations[0].payload.get("objective_id") if escalations else None)
+        self.assertTrue(self.control_plane.objective_no_progress_blocked(objective.id))
         self.assertEqual("no_progress", breadcrumbs[0].classification)
 
     def test_structural_fix_completion_requests_stack_restart(self) -> None:
@@ -931,7 +962,7 @@ class StructuralFixPromotionServiceTests(unittest.TestCase):
             announcements,
         )
 
-    def test_control_loop_consumes_restart_request_and_relaunches_stack(self) -> None:
+    def test_control_loop_clears_stale_restart_request_during_startup_preflight(self) -> None:
         root = Path(self.temp_dir.name)
         config = HarnessConfig.from_env(
             db_path=root / "loop.db",
@@ -972,74 +1003,90 @@ class StructuralFixPromotionServiceTests(unittest.TestCase):
             handled = handle_control_command(args, ctx)
 
         self.assertTrue(handled)
-        restart_api.assert_called_once_with(config, force=True)
-        restart_harness.assert_called_once_with(config, force=True)
-        restart_loop.assert_called_once()
+        restart_api.assert_not_called()
+        restart_harness.assert_not_called()
+        restart_loop.assert_not_called()
         self.assertIsNone(read_stack_restart_request(config))
         actions = ctx.store.list_control_recovery_actions(target_type="system", target_id="system")
-        self.assertEqual("restart", actions[0].action_type)
+        self.assertEqual("observe", actions[0].action_type)
 
-    def test_supervise_autostarts_sa_watch_with_default_600_second_interval(self) -> None:
+    def test_control_loop_runs_sa_watch_and_restarts_when_stuck_detected(self) -> None:
         root = Path(self.temp_dir.name)
         config = HarnessConfig.from_env(
-            db_path=root / "supervise-sa-watch.db",
-            workspace_root=root / "supervise-sa-watch-workspace",
-            log_path=root / "supervise-sa-watch.log",
-            config_file=root / "supervise-sa-watch-config.json",
+            db_path=root / "loop-stuck.db",
+            workspace_root=root / "loop-stuck-workspace",
+            log_path=root / "loop-stuck.log",
+            config_file=root / "loop-stuck-config.json",
         )
-        store = SQLiteHarnessStore(config.db_path)
-        store.initialize()
-        control_plane = ControlPlane(store)
-        control_plane.turn_on()
-
-        class _Engine:
-            def supervise(self, **kwargs):
-                return _FakeSuperviseResult(processed_count=0, processed_task_ids=[], exit_reason="idle")
-
-        ctx = SimpleNamespace(
-            config=config,
-            store=store,
-            engine=_Engine(),
-            control_plane=control_plane,
-            control_runtime=SimpleNamespace(handle=lambda event: None),
-            control_watch=SimpleNamespace(observe=lambda event, api_url=None: None),
+        ctx = build_context(config)
+        ctx.control_plane.turn_on()
+        project = Project(id=new_id("project"), name="loop-project", description="loop")
+        ctx.store.create_project(project)
+        task = Task(
+            id=new_id("task"),
+            project_id=project.id,
+            title="Pending forever",
+            objective="Pending forever",
+            status=TaskStatus.PENDING,
         )
+        ctx.store.create_task(task)
+        with ctx.store.connect() as connection:
+            connection.execute(
+                "UPDATE tasks SET updated_at = ? WHERE id = ?",
+                ((datetime.now(UTC) - timedelta(minutes=3)).isoformat(), task.id),
+            )
+
         args = Namespace(
-            command="supervise",
-            json=False,
-            project_id=None,
-            worker_id="supervisor",
-            lease_seconds=300,
-            watch=False,
-            idle_sleep_seconds=0.0,
-            max_idle_cycles=None,
+            command="control-loop",
+            api_url=None,
+            stalled_objective_hours=6.0,
+            no_freeze_on_stall=False,
+            interval_seconds=0.1,
             max_iterations=1,
-            heartbeat_project_ids=[],
-            heartbeat_interval_seconds=None,
-            heartbeat_all_projects=False,
-            review_check_enabled=False,
-            review_check_interval_seconds=None,
-            no_sa_watch_autostart=False,
-            sa_watch_interval_seconds=600.0,
         )
 
         with (
-            patch("accruvia_harness.commands.core.print") as print_mock,
-            patch(
-                "accruvia_harness.commands.core.start_sa_watch_process",
-                return_value={"pid": 999, "interval_seconds": 600.0, "log_path": "/tmp/sa_watch.log"},
-            ) as start_sa_watch,
+            patch.object(ctx.sa_watch, "run_once", return_value={"decision": {"action": "repair_workflow_state"}}) as sa_watch_run,
+            patch("accruvia_harness.commands.control.restart_harness_process", return_value={"pid": 2}) as restart_harness,
+            patch("accruvia_harness.commands.control.restart_control_loop_process", return_value={"pid": 3}) as restart_loop,
         ):
-            handled = handle_core_command(args, ctx)
+            handled = handle_control_command(args, ctx)
 
         self.assertTrue(handled)
-        start_sa_watch.assert_called_once_with(config, interval_seconds=600.0, stream_output=True)
-        printed = "\n".join(call.args[0] for call in print_mock.call_args_list if call.args)
-        self.assertIn("sa-watch started", printed)
-        self.assertNotEqual("off", control_plane.status()["global_state"])
-        self.assertTrue(control_plane.status()["master_switch"])
+        sa_watch_run.assert_called_once()
+        restart_harness.assert_called_once_with(config, force=True)
+        restart_loop.assert_called_once()
 
-    def test_supervise_can_disable_sa_watch_autostart(self) -> None:
+    def test_control_loop_runs_startup_preflight_before_evaluating_stuck(self) -> None:
+        root = Path(self.temp_dir.name)
+        config = HarnessConfig.from_env(
+            db_path=root / "loop-preflight.db",
+            workspace_root=root / "loop-preflight-workspace",
+            log_path=root / "loop-preflight.log",
+            config_file=root / "loop-preflight-config.json",
+        )
+        ctx = build_context(config)
+        ctx.control_plane.turn_on()
+        args = Namespace(
+            command="control-loop",
+            api_url=None,
+            stalled_objective_hours=6.0,
+            no_freeze_on_stall=False,
+            interval_seconds=0.1,
+            max_iterations=1,
+        )
+
+        with (
+            patch("accruvia_harness.commands.control.startup_preflight") as preflight,
+            patch.object(ctx.control_watch, "run_once", return_value={"stuck": False}),
+            patch("accruvia_harness.commands.control.emit"),
+        ):
+            handled = handle_control_command(args, ctx)
+
+        self.assertTrue(handled)
+        preflight.assert_called_once_with(config, ctx.store)
+
+    def test_supervise_does_not_autostart_sa_watch(self) -> None:
         root = Path(self.temp_dir.name)
         config = HarnessConfig.from_env(
             db_path=root / "supervise-no-sa-watch.db",
@@ -1068,7 +1115,7 @@ class StructuralFixPromotionServiceTests(unittest.TestCase):
             command="supervise",
             json=False,
             project_id=None,
-            worker_id="supervisor",
+            worker_id="harness",
             lease_seconds=300,
             watch=False,
             idle_sleep_seconds=0.0,
@@ -1079,20 +1126,18 @@ class StructuralFixPromotionServiceTests(unittest.TestCase):
             heartbeat_all_projects=False,
             review_check_enabled=False,
             review_check_interval_seconds=None,
-            no_sa_watch_autostart=True,
-            sa_watch_interval_seconds=600.0,
         )
 
         with (
             patch("accruvia_harness.commands.core.print") as print_mock,
-            patch("accruvia_harness.commands.core.start_sa_watch_process") as start_sa_watch,
         ):
             handled = handle_core_command(args, ctx)
 
         self.assertTrue(handled)
-        start_sa_watch.assert_not_called()
         printed = "\n".join(call.args[0] for call in print_mock.call_args_list if call.args)
         self.assertNotIn("sa-watch started", printed)
+        self.assertNotEqual("off", control_plane.status()["global_state"])
+        self.assertTrue(control_plane.status()["master_switch"])
 
     def test_supervise_turns_control_plane_on_before_running(self) -> None:
         root = Path(self.temp_dir.name)
@@ -1122,7 +1167,7 @@ class StructuralFixPromotionServiceTests(unittest.TestCase):
             command="supervise",
             json=True,
             project_id=None,
-            worker_id="supervisor",
+            worker_id="harness",
             lease_seconds=300,
             watch=False,
             idle_sleep_seconds=0.0,
@@ -1133,8 +1178,6 @@ class StructuralFixPromotionServiceTests(unittest.TestCase):
             heartbeat_all_projects=False,
             review_check_enabled=False,
             review_check_interval_seconds=None,
-            no_sa_watch_autostart=True,
-            sa_watch_interval_seconds=600.0,
         )
 
         with patch("accruvia_harness.commands.core.emit"):
@@ -1144,7 +1187,57 @@ class StructuralFixPromotionServiceTests(unittest.TestCase):
         self.assertNotEqual("off", control_plane.status()["global_state"])
         self.assertTrue(control_plane.status()["master_switch"])
 
-    def test_supervise_interrupt_stops_sa_watch_and_turns_system_off(self) -> None:
+    def test_supervise_runs_startup_preflight_before_turning_on_control_plane(self) -> None:
+        root = Path(self.temp_dir.name)
+        config = HarnessConfig.from_env(
+            db_path=root / "supervise-preflight.db",
+            workspace_root=root / "supervise-preflight-workspace",
+            log_path=root / "supervise-preflight.log",
+            config_file=root / "supervise-preflight-config.json",
+        )
+        store = SQLiteHarnessStore(config.db_path)
+        store.initialize()
+        control_plane = ControlPlane(store)
+
+        class _Engine:
+            def supervise(self, **kwargs):
+                return _FakeSuperviseResult(processed_count=0, processed_task_ids=[], exit_reason="idle")
+
+        ctx = SimpleNamespace(
+            config=config,
+            store=store,
+            engine=_Engine(),
+            control_plane=control_plane,
+            control_runtime=SimpleNamespace(handle=lambda event: None),
+            control_watch=SimpleNamespace(observe=lambda event, api_url=None: None),
+        )
+        args = Namespace(
+            command="supervise",
+            json=True,
+            project_id=None,
+            worker_id="harness",
+            lease_seconds=300,
+            watch=False,
+            idle_sleep_seconds=0.0,
+            max_idle_cycles=None,
+            max_iterations=1,
+            heartbeat_project_ids=[],
+            heartbeat_interval_seconds=None,
+            heartbeat_all_projects=False,
+            review_check_enabled=False,
+            review_check_interval_seconds=None,
+        )
+
+        with (
+            patch("accruvia_harness.commands.core.startup_preflight") as preflight,
+            patch("accruvia_harness.commands.core.emit"),
+        ):
+            handled = handle_core_command(args, ctx)
+
+        self.assertTrue(handled)
+        preflight.assert_called_once_with(config, store)
+
+    def test_supervise_interrupt_turns_system_off_without_stopping_sa_watch(self) -> None:
         root = Path(self.temp_dir.name)
         config = HarnessConfig.from_env(
             db_path=root / "supervise-interrupt.db",
@@ -1173,7 +1266,7 @@ class StructuralFixPromotionServiceTests(unittest.TestCase):
             command="supervise",
             json=True,
             project_id=None,
-            worker_id="supervisor",
+            worker_id="harness",
             lease_seconds=300,
             watch=True,
             idle_sleep_seconds=0.0,
@@ -1184,21 +1277,162 @@ class StructuralFixPromotionServiceTests(unittest.TestCase):
             heartbeat_all_projects=False,
             review_check_enabled=False,
             review_check_interval_seconds=None,
-            no_sa_watch_autostart=False,
-            sa_watch_interval_seconds=600.0,
         )
 
         with (
-            patch("accruvia_harness.commands.core.start_sa_watch_process", return_value={"pid": 999, "interval_seconds": 600.0, "log_path": "/tmp/sa_watch.log"}),
-            patch("accruvia_harness.commands.core.stop_sa_watch_process") as stop_sa_watch,
             patch("accruvia_harness.commands.core.stop_ui_process") as stop_ui,
         ):
             with self.assertRaises(KeyboardInterrupt):
                 handle_core_command(args, ctx)
 
-        stop_sa_watch.assert_called_once_with(config)
         stop_ui.assert_called_once_with(config)
         self.assertEqual("off", control_plane.status()["global_state"])
+
+
+class ControlPlaneSplitTests(unittest.TestCase):
+    """Tests verifying the control-plane split: supervise runs work only,
+    control-loop is the single recovery authority."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+
+    def test_control_loop_detects_stalled_objective_as_stuck(self) -> None:
+        root = Path(self.temp_dir.name)
+        config = HarnessConfig.from_env(
+            db_path=root / "stalled-obj.db",
+            workspace_root=root / "stalled-obj-workspace",
+            log_path=root / "stalled-obj.log",
+            config_file=root / "stalled-obj-config.json",
+        )
+        ctx = build_context(config)
+        ctx.control_plane.turn_on()
+        project = Project(id=new_id("project"), name="stalled-proj", description="stalled")
+        ctx.store.create_project(project)
+        objective = Objective(
+            id=new_id("objective"),
+            project_id=project.id,
+            title="Stalled objective",
+            summary="test",
+            status=ObjectiveStatus.OPEN,
+        )
+        ctx.store.create_objective(objective)
+        ctx.store.create_control_event(ControlEvent(
+            id=new_id("event"),
+            event_type="objective_stalled",
+            entity_type="objective",
+            entity_id=objective.id,
+            producer="test",
+            payload={"objective_id": objective.id},
+            idempotency_key=new_id("idem"),
+        ))
+        args = Namespace(
+            command="control-loop",
+            api_url=None,
+            stalled_objective_hours=0.0,
+            no_freeze_on_stall=False,
+            interval_seconds=0.1,
+            max_iterations=1,
+        )
+        with (
+            patch.object(ctx.sa_watch, "run_once", return_value={"decision": {"action": "none"}}) as sa_watch_run,
+            patch("accruvia_harness.commands.control.restart_harness_process", return_value={"pid": 2}),
+            patch("accruvia_harness.commands.control.restart_control_loop_process", return_value={"pid": 3}),
+        ):
+            handled = handle_control_command(args, ctx)
+        self.assertTrue(handled)
+        sa_watch_run.assert_called_once()
+
+    def test_startup_preflight_clears_stale_runtime_state(self) -> None:
+        root = Path(self.temp_dir.name)
+        config = HarnessConfig.from_env(
+            db_path=root / "preflight-stale.db",
+            workspace_root=root / "preflight-stale-workspace",
+            log_path=root / "preflight-stale.log",
+            config_file=root / "preflight-stale-config.json",
+        )
+        store = SQLiteHarnessStore(config.db_path)
+        store.initialize()
+        sa_watch_path = sa_watch_runtime_state_path(config)
+        sa_watch_path.parent.mkdir(parents=True, exist_ok=True)
+        sa_watch_path.write_text(json.dumps({"pid": 99999, "heartbeat_at": 0}), encoding="utf-8")
+        result = startup_preflight(config, store)
+        self.assertTrue(result["stale_sa_watch_runtime_cleared"])
+        self.assertFalse(sa_watch_path.exists())
+
+    def test_sa_watch_status_requires_fresh_heartbeat(self) -> None:
+        root = Path(self.temp_dir.name)
+        config = HarnessConfig.from_env(
+            db_path=root / "status-hb.db",
+            workspace_root=root / "status-hb-workspace",
+            log_path=root / "status-hb.log",
+            config_file=root / "status-hb-config.json",
+        )
+        ctx = build_context(config)
+        ctx.control_plane.turn_on()
+        runtime_path = sa_watch_runtime_state_path(config)
+        runtime_path.parent.mkdir(parents=True, exist_ok=True)
+        runtime_path.write_text(json.dumps({
+            "pid": os.getpid(),
+            "heartbeat_at": time.time() - 300,
+            "mode": "active",
+            "interval_seconds": 60,
+        }), encoding="utf-8")
+        args = Namespace(command="sa-watch-status")
+        captured = {}
+        with patch("accruvia_harness.commands.control.emit", side_effect=lambda v: captured.update(v)):
+            handle_control_command(args, ctx)
+        self.assertTrue(captured.get("running"))
+        self.assertFalse(captured.get("heartbeat_fresh"))
+        self.assertFalse(captured.get("healthy"))
+
+    def test_no_duplicate_recovery_processes_on_repeated_stuck(self) -> None:
+        root = Path(self.temp_dir.name)
+        config = HarnessConfig.from_env(
+            db_path=root / "no-dup.db",
+            workspace_root=root / "no-dup-workspace",
+            log_path=root / "no-dup.log",
+            config_file=root / "no-dup-config.json",
+        )
+        ctx = build_context(config)
+        ctx.control_plane.turn_on()
+        project = Project(id=new_id("project"), name="dup-proj", description="dup")
+        ctx.store.create_project(project)
+        task = Task(
+            id=new_id("task"),
+            project_id=project.id,
+            title="Stuck task",
+            objective="stuck",
+            status=TaskStatus.PENDING,
+        )
+        ctx.store.create_task(task)
+        with ctx.store.connect() as connection:
+            connection.execute(
+                "UPDATE tasks SET updated_at = ? WHERE id = ?",
+                ((datetime.now(UTC) - timedelta(minutes=3)).isoformat(), task.id),
+            )
+        args = Namespace(
+            command="control-loop",
+            api_url=None,
+            stalled_objective_hours=6.0,
+            no_freeze_on_stall=False,
+            interval_seconds=0.1,
+            max_iterations=1,
+        )
+        sa_watch_call_count = 0
+
+        def _sa_watch_run_once():
+            nonlocal sa_watch_call_count
+            sa_watch_call_count += 1
+            return {"decision": {"action": "none"}}
+
+        with (
+            patch.object(ctx.sa_watch, "run_once", side_effect=_sa_watch_run_once),
+            patch("accruvia_harness.commands.control.restart_harness_process", return_value={"pid": 2}),
+            patch("accruvia_harness.commands.control.restart_control_loop_process", return_value={"pid": 3}),
+        ):
+            handle_control_command(args, ctx)
+        self.assertEqual(1, sa_watch_call_count)
 
 
 class SAWatchServiceTests(unittest.TestCase):
@@ -1393,6 +1627,73 @@ class SAWatchServiceTests(unittest.TestCase):
         repeated = [signal for signal in packet["continuity_signals"] if signal.get("kind") == "repeated_failure"]
 
         self.assertEqual([], repeated)
+
+    def test_sa_watch_detects_low_value_churn_from_repeated_insufficient_artifacts(self) -> None:
+        project = Project(id=new_id("project"), name="watch-project", description="watch")
+        self.store.create_project(project)
+        objective = Objective(
+            id=new_id("objective"),
+            project_id=project.id,
+            title="Churning objective",
+            summary="retries are not shrinking the backlog",
+            status=ObjectiveStatus.EXECUTING,
+        )
+        self.store.create_objective(objective)
+        tasks = [
+            TaskService(self.store).create_task_with_policy(
+                project_id=project.id,
+                objective_id=objective.id,
+                title=f"Retrying task {index}",
+                objective="Keep trying the same low-value artifact-producing path.",
+                priority=100,
+                parent_task_id=None,
+                source_run_id=None,
+                external_ref_type=None,
+                external_ref_id=None,
+                strategy="default",
+                max_attempts=4,
+            )
+            for index in range(3)
+        ]
+        for index, task in enumerate(tasks):
+            run = Run(
+                id=f"run_{index}",
+                task_id=task.id,
+                status=RunStatus.FAILED,
+                attempt=1,
+                summary="Artifacts were insufficient; retry within bounded task budget.",
+            )
+            self.store.create_run(run)
+            self.store.upsert_control_worker_run(
+                ControlWorkerRun(
+                    id=run.id,
+                    task_id=task.id,
+                    objective_id=objective.id,
+                    status="failed",
+                    classification="artifact_contract_failure",
+                )
+            )
+        service = SAWatchService(
+            self.store,
+            self.control_plane,
+            LLMRouter(
+                "codex",
+                {
+                    "codex": FakeExecutor(
+                        '{"action":"record_escalation","reason":"Repeated insufficient-artifact retries are not reducing backlog.","confidence":0.9,"target_lane":"worker","escalate":true}'
+                    )
+                },
+            ),
+            self.workspace_root,
+            interval_seconds=0,
+        )
+
+        packet = service._build_packet()  # type: ignore[attr-defined]
+        churn = [signal for signal in packet["continuity_signals"] if signal.get("kind") == "low_value_churn"]
+
+        self.assertEqual(1, len(churn))
+        self.assertEqual(objective.id, churn[0]["objective_id"])
+        self.assertEqual(3, churn[0]["count"])
 
     def test_sa_watch_packet_uses_local_time_context(self) -> None:
         project = Project(id=new_id("project"), name="watch-project", description="watch")
@@ -2034,7 +2335,7 @@ class SAWatchServiceTests(unittest.TestCase):
         printed = "\n".join(call.args[0] for call in print_mock.call_args_list if call.args)
         self.assertIn("workflow state: UNPLUGGED (1 stalled objective, 1 pending task, 0 active)", printed)
 
-    def test_sa_watch_loop_waits_full_interval_before_first_check(self) -> None:
+    def test_sa_watch_loop_uses_short_startup_grace_before_first_check(self) -> None:
         root = Path(self.temp_dir.name)
         config = HarnessConfig.from_env(
             db_path=root / "sa-watch-grace.db",
@@ -2068,16 +2369,15 @@ class SAWatchServiceTests(unittest.TestCase):
             control_watch=grace_control_watch,
             sa_watch=sa_watch_mock,
         )
-        args = Namespace(command="sa-watch-loop", interval_seconds=300.0, max_iterations=1)
+        args = Namespace(command="sa-watch-loop", interval_seconds=300.0, max_iterations=6)
 
         with patch("accruvia_harness.commands.control.emit") as emit_mock:
             handled = handle_control_command(args, ctx)
 
         self.assertTrue(handled)
-        self.assertEqual(0, called["count"])
+        self.assertGreaterEqual(called["count"], 1)
         emitted = emit_mock.call_args.args[0]
-        self.assertEqual("idle", emitted["mode"])
-        self.assertEqual("startup_grace_period", emitted["reason"])
+        self.assertEqual("active", emitted["mode"])
 
     def test_sa_watch_start_records_desired_state_and_spawns_process(self) -> None:
         root = Path(self.temp_dir.name)
@@ -2092,6 +2392,7 @@ class SAWatchServiceTests(unittest.TestCase):
 
         with (
             patch("accruvia_harness.commands.control.emit") as emit_mock,
+            patch("accruvia_harness.commands.common.subprocess.check_output", return_value=""),
             patch("accruvia_harness.commands.common.subprocess.Popen") as popen,
         ):
             popen.return_value.pid = 4242
@@ -2692,6 +2993,113 @@ class QueueServiceWorkerLaneTests(unittest.TestCase):
         self.assertEqual(remediation_task.id, result["task"].id if result is not None else None)
         self.assertEqual([remediation_task.id], self.runner.ran_task_ids)
 
+    def test_objective_budget_exhaustion_skips_blocked_objective_and_runs_next_objective(self) -> None:
+        blocked_objective = Objective(
+            id=new_id("objective"),
+            project_id=self.project.id,
+            title="Blocked objective",
+            summary="over budget",
+            status=ObjectiveStatus.EXECUTING,
+        )
+        runnable_objective = Objective(
+            id=new_id("objective"),
+            project_id=self.project.id,
+            title="Runnable objective",
+            summary="ready",
+            status=ObjectiveStatus.EXECUTING,
+        )
+        self.store.create_objective(blocked_objective)
+        self.store.create_objective(runnable_objective)
+        blocked_task = self.tasks.create_task_with_policy(
+            project_id=self.project.id,
+            objective_id=blocked_objective.id,
+            title="Blocked work",
+            objective="Should be skipped due to objective budget exhaustion.",
+            priority=200,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type="objective_review",
+            external_ref_id=f"{blocked_objective.id}:review_1:budget",
+            strategy="objective_review_remediation",
+        )
+        runnable_task = self.tasks.create_task_with_policy(
+            project_id=self.project.id,
+            objective_id=runnable_objective.id,
+            title="Runnable work",
+            objective="Should run after the blocked objective is skipped.",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type="objective_review",
+            external_ref_id=f"{runnable_objective.id}:review_1:budget",
+            strategy="objective_review_remediation",
+        )
+        for _ in range(4):
+            self.control_plane.record_budget_usage(budget_scope="objective", budget_key=blocked_objective.id)
+
+        result = self.queue.process_next_task(worker_id="tester")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(runnable_task.id, result["task"].id if result is not None else None)
+        self.assertEqual([runnable_task.id], self.runner.ran_task_ids)
+        self.assertEqual(TaskStatus.PENDING, self.store.get_task(blocked_task.id).status)
+
+    def test_objective_no_progress_skip_allows_other_objectives_to_run(self) -> None:
+        blocked_objective = Objective(
+            id=new_id("objective"),
+            project_id=self.project.id,
+            title="No progress objective",
+            summary="stalled",
+            status=ObjectiveStatus.EXECUTING,
+        )
+        runnable_objective = Objective(
+            id=new_id("objective"),
+            project_id=self.project.id,
+            title="Fresh objective",
+            summary="ready",
+            status=ObjectiveStatus.EXECUTING,
+        )
+        self.store.create_objective(blocked_objective)
+        self.store.create_objective(runnable_objective)
+        blocked_task = self.tasks.create_task_with_policy(
+            project_id=self.project.id,
+            objective_id=blocked_objective.id,
+            title="Blocked work",
+            objective="Should be skipped due to no_progress.",
+            priority=200,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type="objective_review",
+            external_ref_id=f"{blocked_objective.id}:review_1:no_progress",
+            strategy="objective_review_remediation",
+        )
+        runnable_task = self.tasks.create_task_with_policy(
+            project_id=self.project.id,
+            objective_id=runnable_objective.id,
+            title="Runnable work",
+            objective="Should run after skipping no_progress objective.",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type="objective_review",
+            external_ref_id=f"{runnable_objective.id}:review_1:no_progress",
+            strategy="objective_review_remediation",
+        )
+        self.control_plane.record_human_escalation(
+            "no_progress",
+            payload={
+                "objective_id": blocked_objective.id,
+                "reason": "Three completed coding runs did not advance the objective to a mergeable state.",
+            },
+        )
+
+        result = self.queue.process_next_task(worker_id="tester")
+
+        self.assertIsNotNone(result)
+        self.assertEqual(runnable_task.id, result["task"].id if result is not None else None)
+        self.assertEqual([runnable_task.id], self.runner.ran_task_ids)
+        self.assertEqual(TaskStatus.PENDING, self.store.get_task(blocked_task.id).status)
+
 
 class WorkflowServiceTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -2885,8 +3293,14 @@ class ControlPlaneStatusTests(unittest.TestCase):
         self.assertEqual("paused", status["lanes"]["worker"])
         self.assertEqual(task.id, status["active_task_id"])
 
-    def test_budget_exhaustion_pauses_worker_lane(self) -> None:
+    def test_budget_exhaustion_is_scope_specific(self) -> None:
         for _ in range(4):
-            self.control_plane.record_budget_usage(budget_scope="worker", budget_key="expensive_coding_runs")
+            self.control_plane.record_budget_usage(budget_scope="objective", budget_key="objective_123")
 
-        self.assertTrue(self.control_plane.expensive_coding_budget_exhausted())
+        self.assertTrue(
+            self.control_plane.expensive_coding_budget_exhausted(
+                budget_scope="objective",
+                budget_key="objective_123",
+            )
+        )
+        self.assertFalse(self.control_plane.expensive_coding_budget_exhausted())

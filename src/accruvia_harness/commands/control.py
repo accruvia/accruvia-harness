@@ -20,9 +20,14 @@ from .common import (
     restart_control_loop_process,
     restart_harness_process,
     start_sa_watch_process,
+    startup_preflight,
     stop_sa_watch_process,
     update_sa_watch_runtime_state,
 )
+
+SA_WATCH_STARTUP_GRACE_SECONDS = 5.0
+SA_WATCH_LOOP_POLL_SECONDS = 1.0
+_HEARTBEAT_STALE_SECONDS = 120.0
 
 
 def handle_control_command(args, ctx: CLIContext) -> bool:
@@ -59,6 +64,7 @@ def handle_control_command(args, ctx: CLIContext) -> bool:
         )
         return True
     if args.command == "control-loop":
+        startup_preflight(ctx.config, ctx.store)
         stop_requested = {"value": False, "signal_count": 0}
 
         def _request_stop(_signum, _frame):
@@ -81,6 +87,27 @@ def handle_control_command(args, ctx: CLIContext) -> bool:
                     stalled_objective_hours=args.stalled_objective_hours,
                     freeze_on_stall=not args.no_freeze_on_stall,
                 )
+                if bool(latest.get("stuck")):
+                    sa_watch_result = ctx.sa_watch.run_once()
+                    ctx.store.create_control_recovery_action(
+                        ControlRecoveryAction(
+                            id=new_id("recovery"),
+                            action_type="restart",
+                            target_type="system",
+                            target_id="system",
+                            reason="stuck_detected",
+                            result="applied",
+                        )
+                    )
+                    restart_harness_process(ctx.config, force=True)
+                    restart_control_loop_process(ctx.config, args)
+                    latest = {
+                        "mode": "restarting",
+                        "stuck_evaluation": latest,
+                        "sa_watch": sa_watch_result,
+                    }
+                    stop_requested["value"] = True
+                    break
                 restart_request = read_stack_restart_request(ctx.config)
                 if restart_request is not None:
                     ctx.store.create_control_recovery_action(
@@ -123,17 +150,26 @@ def handle_control_command(args, ctx: CLIContext) -> bool:
         runtime = read_sa_watch_runtime_state(ctx.config) or {}
         desired = read_desired_sa_watch_state(ctx.config) or {}
         pid = int(runtime.get("pid") or 0)
+        pid_alive = pid > 0 and _pid_alive(pid)
+        heartbeat_at = float(runtime.get("heartbeat_at") or 0)
+        heartbeat_age = max(time.time() - heartbeat_at, 0) if heartbeat_at > 0 else None
+        heartbeat_fresh = heartbeat_age is not None and heartbeat_age < _HEARTBEAT_STALE_SECONDS
+        healthy = pid_alive and heartbeat_fresh
         emit(
             {
                 "desired": desired or None,
                 "runtime": runtime or None,
-                "running": pid > 0 and _pid_alive(pid),
+                "running": pid_alive,
+                "heartbeat_age_seconds": round(heartbeat_age, 1) if heartbeat_age is not None else None,
+                "heartbeat_fresh": heartbeat_fresh,
+                "healthy": healthy,
                 "active": _sa_watch_is_active(ctx),
                 "log_path": str(ctx.config.db_path.parent / "control" / "sa_watch.log"),
             }
         )
         return True
     if args.command == "sa-watch-loop":
+        startup_preflight(ctx.config, ctx.store)
         stop_requested = {"value": False, "signal_count": 0}
 
         def _request_stop(_signum, _frame):
@@ -160,8 +196,10 @@ def handle_control_command(args, ctx: CLIContext) -> bool:
         iteration = 0
         previous_kpis: dict[str, int] | None = None
         started_at = time.monotonic()
+        next_check_at = started_at + min(max(SA_WATCH_STARTUP_GRACE_SECONDS, 0.0), max(args.interval_seconds, 0.0))
         try:
             while not stop_requested["value"]:
+                now_monotonic = time.monotonic()
                 desired = read_desired_sa_watch_state(ctx.config)
                 if desired is None:
                     update_sa_watch_runtime_state(
@@ -190,8 +228,8 @@ def handle_control_command(args, ctx: CLIContext) -> bool:
                     print(_sa_watch_workflow_state_line(current_kpis), flush=True)
                     print(_sa_watch_kpi_line(current_kpis, previous_kpis, changed=False), flush=True)
                     previous_kpis = current_kpis
-                elif time.monotonic() - started_at < args.interval_seconds:
-                    remaining = max(args.interval_seconds - (time.monotonic() - started_at), 0.0)
+                elif now_monotonic < next_check_at:
+                    remaining = max(next_check_at - now_monotonic, 0.0)
                     update_sa_watch_runtime_state(
                         ctx.config,
                         interval_seconds=args.interval_seconds,
@@ -237,10 +275,12 @@ def handle_control_command(args, ctx: CLIContext) -> bool:
                     for effect in effects:
                         print(_sa_watch_effect_line(effect), flush=True)
                     previous_kpis = current_kpis
+                    next_check_at = time.monotonic() + max(args.interval_seconds, 0.1)
                 iteration += 1
                 if args.max_iterations is not None and iteration >= args.max_iterations:
                     break
-                time.sleep(max(args.interval_seconds, 0.1))
+                sleep_seconds = min(max(args.interval_seconds, 0.1), SA_WATCH_LOOP_POLL_SECONDS)
+                time.sleep(sleep_seconds)
         finally:
             clear_sa_watch_runtime_state(ctx.config)
             signal.signal(signal.SIGINT, previous_int)

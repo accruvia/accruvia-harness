@@ -40,12 +40,20 @@ class ControlRuntimeObserver:
                     status="started",
                 )
             )
-            self.control_plane.record_budget_usage(budget_scope="worker", budget_key="expensive_coding_runs")
-            if self.control_plane.expensive_coding_budget_exhausted():
-                self.control_plane.pause_lane("worker", reason="budget_exhausted")
+            if task is not None and task.objective_id:
+                self.control_plane.record_budget_usage(budget_scope="objective", budget_key=task.objective_id)
+            else:
+                self.control_plane.record_budget_usage(budget_scope="worker", budget_key="expensive_coding_runs")
+            if task is not None and task.objective_id and self.control_plane.expensive_coding_budget_exhausted(
+                budget_scope="objective",
+                budget_key=task.objective_id,
+            ):
                 self.control_plane.record_human_escalation(
                     "budget_exhausted",
-                    payload={"reason": "Expensive coding run budget exhausted for the current hour."},
+                    payload={
+                        "objective_id": task.objective_id,
+                        "reason": "Expensive coding run budget exhausted for this objective in the current hour.",
+                    },
                 )
             return
         if event_type == "task_finished":
@@ -195,7 +203,6 @@ class ControlRuntimeObserver:
             classification="no_progress",
             summary=f"Objective {completed_task.objective_id} completed three runs without reaching promotion-ready state.",
         )
-        self.control_plane.pause_lane("worker", reason="no_progress")
         self.control_plane.record_human_escalation(
             "no_progress",
             payload={

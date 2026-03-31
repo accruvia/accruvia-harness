@@ -819,6 +819,7 @@ class SAWatchService:
         for signal in (
             self._stale_atomic_generation_signal(),
             self._repeated_failure_signal(),
+            self._low_value_churn_signal(),
             self._no_progress_signal(),
             self._objective_stalled_signal(),
             self._worker_paused_signal(),
@@ -867,6 +868,53 @@ class SAWatchService:
                             "task_id": recent_objective_runs[0].task_id,
                             "count": len(recent_objective_runs[:3]),
                         }
+        return None
+
+    def _low_value_churn_signal(self) -> dict[str, object] | None:
+        summary_text = "Artifacts were insufficient; retry within bounded task budget."
+        recent_terminal_runs: list[tuple[Run, Task]] = []
+        for task in self.store.list_tasks():
+            if not task.objective_id:
+                continue
+            for run in self.store.list_runs(task.id):
+                if run.status not in {RunStatus.FAILED, RunStatus.BLOCKED}:
+                    continue
+                recent_terminal_runs.append((run, task))
+        recent_terminal_runs.sort(key=lambda item: item[0].updated_at, reverse=True)
+        by_objective: dict[str, list[tuple[Run, Task]]] = {}
+        for run, task in recent_terminal_runs[:16]:
+            if task.objective_id:
+                by_objective.setdefault(task.objective_id, []).append((run, task))
+        for objective_id, entries in by_objective.items():
+            matching = [(run, task) for run, task in entries if summary_text in run.summary]
+            if len(matching) < 3:
+                continue
+            objective = self.store.get_objective(objective_id)
+            if objective is None or objective.status == ObjectiveStatus.RESOLVED:
+                continue
+            linked_tasks = [task for task in self.store.list_tasks(objective.project_id) if task.objective_id == objective_id]
+            pending_count = sum(1 for task in linked_tasks if task.status == TaskStatus.PENDING)
+            active_count = sum(1 for task in linked_tasks if task.status == TaskStatus.ACTIVE)
+            if pending_count == 0:
+                continue
+            most_recent_run, most_recent_task = matching[0]
+            oldest_considered_run = matching[min(2, len(matching) - 1)][0]
+            completed_since_first_failure = any(
+                task.status == TaskStatus.COMPLETED and task.updated_at >= oldest_considered_run.updated_at
+                for task in linked_tasks
+            )
+            if completed_since_first_failure:
+                continue
+            return {
+                "kind": "low_value_churn",
+                "objective_id": objective_id,
+                "task_id": most_recent_task.id,
+                "count": len(matching[:5]),
+                "run_ids": [run.id for run, _task in matching[:5]],
+                "pending_tasks": pending_count,
+                "active_tasks": active_count,
+                "summary": summary_text,
+            }
         return None
 
     def _objective_stalled_signal(self) -> dict[str, object] | None:

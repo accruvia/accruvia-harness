@@ -4,16 +4,35 @@ import json
 import os
 import time
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Callable
-from urllib.request import urlopen
 
 from .control_breadcrumbs import BreadcrumbWriter
 from .control_classifier import FailureClassifier
 from .control_plane import ControlPlane
-from .domain import ControlLaneStateValue, GlobalSystemState, ObjectiveStatus, new_id
+from .domain import (
+    ControlLaneStateValue,
+    ControlRecoveryAction,
+    ControlEvent,
+    PromotionStatus,
+    RunStatus,
+    Task,
+    TaskStatus,
+    new_id,
+)
 from .store import SQLiteHarnessStore
+
+
+NO_ACTIVE_TASKS_TIMEOUT_SECONDS = 120
+NO_ARTIFACT_TIMEOUT_SECONDS = 600
+RECONCILE_TIMEOUT_SECONDS = 120
+MISSING_PREREQUISITE_TIMEOUT_SECONDS = 120
+SAME_STATE_LOOP_THRESHOLD = 2
+SAME_STATE_LOOP_HARD_MAX = 3
+NON_MEANINGFUL_ARTIFACT_KINDS = frozenset({"heartbeat", "stdout", "stderr"})
+TERMINAL_RUN_STATUSES = frozenset({RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.BLOCKED, RunStatus.DISPOSED})
+OBJECTIVE_STALLED_SIGNAL_WINDOW = timedelta(minutes=30)
 
 
 class ControlWatchService:
@@ -27,6 +46,12 @@ class ControlWatchService:
         supervisor_control_dir: str | Path,
         restart_api: Callable[[], dict[str, object] | None] | None = None,
         restart_harness: Callable[[], dict[str, object] | None] | None = None,
+        no_active_tasks_timeout_seconds: int = NO_ACTIVE_TASKS_TIMEOUT_SECONDS,
+        no_artifact_timeout_seconds: int = NO_ARTIFACT_TIMEOUT_SECONDS,
+        reconcile_timeout_seconds: int = RECONCILE_TIMEOUT_SECONDS,
+        missing_prerequisite_timeout_seconds: int = MISSING_PREREQUISITE_TIMEOUT_SECONDS,
+        same_state_loop_threshold: int = SAME_STATE_LOOP_THRESHOLD,
+        same_state_loop_hard_max: int = SAME_STATE_LOOP_HARD_MAX,
     ) -> None:
         self.store = store
         self.control_plane = control_plane
@@ -37,6 +62,12 @@ class ControlWatchService:
         self.restart_harness = restart_harness
         self.interval_seconds = 60
         self._last_invoked_at = 0.0
+        self.no_active_tasks_timeout_seconds = max(int(no_active_tasks_timeout_seconds), 1)
+        self.no_artifact_timeout_seconds = max(int(no_artifact_timeout_seconds), 1)
+        self.reconcile_timeout_seconds = max(int(reconcile_timeout_seconds), 1)
+        self.missing_prerequisite_timeout_seconds = max(int(missing_prerequisite_timeout_seconds), 1)
+        self.same_state_loop_threshold = max(int(same_state_loop_threshold), 1)
+        self.same_state_loop_hard_max = max(int(same_state_loop_hard_max), self.same_state_loop_threshold)
 
     def observe(self, event: dict[str, object], *, api_url: str | None = None) -> dict[str, object] | None:
         if str(event.get("type") or "") != "sleeping":
@@ -53,225 +84,472 @@ class ControlWatchService:
         stalled_objective_hours: float = 6.0,
         freeze_on_stall: bool = True,
     ) -> dict[str, object]:
-        results: dict[str, object] = {}
-        system = self.store.get_control_system_state()
-        healthy = True
-        reasons: list[str] = []
+        del api_url, stalled_objective_hours, freeze_on_stall
+        evaluation = self._evaluate_stuck_state()
+        matched_rules = list(evaluation["matched_rules"])
+        if matched_rules:
+            self.control_plane.mark_degraded(",".join(matched_rules))
+            self._record_stuck_event(evaluation)
+            self._write_stuck_breadcrumbs(evaluation)
+        else:
+            self.control_plane.mark_healthy(reason="stuck_checks_passed")
+        self._record_state_snapshots(evaluation)
+        evaluation["status"] = self.control_plane.status()
+        return evaluation
 
-        if api_url:
-            api_result = self.check_api(api_url)
-            results["api"] = api_result
-            healthy = healthy and bool(api_result["ok"])
-            if not api_result["ok"]:
-                reasons.append("api_down")
-
-        harness_result = self.check_harness()
-        results["harness"] = harness_result
-        healthy = healthy and bool(harness_result["ok"])
-        if not harness_result["ok"]:
-            reasons.append("harness_down")
-
-        stalled = self.find_stalled_objectives(hours=stalled_objective_hours)
-        results["stalled_objectives"] = stalled
-        if stalled:
-            healthy = False
-            reasons.append("objective_stalled")
-            if freeze_on_stall:
-                self.control_plane.freeze(
-                    "objective_stalled:" + ",".join(item["objective_id"] for item in stalled[:3])
-                )
-
-        if system.master_switch and system.global_state != GlobalSystemState.FROZEN:
-            if healthy:
-                self.control_plane.mark_healthy()
-            else:
-                self.control_plane.mark_degraded(",".join(reasons))
-        results["status"] = self.control_plane.status()
-        return results
-
-    def check_api(self, api_url: str) -> dict[str, object]:
-        lane = self.store.get_control_lane_state("api")
-        assert lane is not None
-        try:
-            body = self._fetch_api_body(api_url)
-            self.store.update_control_lane_state(
-                replace(lane, state=ControlLaneStateValue.RUNNING, reason="api_up", cooldown_until=None, updated_at=datetime.now(UTC))
-            )
-            self.store.create_control_event(
-                self._control_event("api_up", "lane", "api", {"url": api_url, "body_preview": body[:200]})
-            )
-            return {"ok": True, "url": api_url, "body_preview": body[:200]}
-        except Exception as exc:
-            classification = self.classifier.classify(str(exc))
-            if "connection refused" in str(exc).lower():
-                classification = replace(classification, classification="system_failure", retry_recommended=True, cooldown_seconds=0)
-            restarted = False
-            if self.restart_api is not None and self._restart_allowed("api", classification.classification):
-                restarted = bool(self.restart_api())
-                if restarted:
-                    body = self._await_api_recovery(api_url)
-                    if body is not None:
-                        self._record_restart("api", classification.classification, "restarted")
-                        self.store.update_control_lane_state(
-                            replace(lane, state=ControlLaneStateValue.RUNNING, reason="api_restarted", cooldown_until=None, updated_at=datetime.now(UTC))
-                        )
-                        self.store.create_control_event(
-                            self._control_event("api_up", "lane", "api", {"url": api_url, "body_preview": body[:200], "restarted": True})
-                        )
-                        return {"ok": True, "url": api_url, "body_preview": body[:200], "restarted": True}
-                    self._record_restart("api", classification.classification, "restart_failed")
-            if classification.classification in {"provider_rate_limit", "provider_outage"} and classification.cooldown_seconds > 0:
-                self.control_plane.enter_cooldown("api", reason=classification.classification, seconds=classification.cooldown_seconds)
-            else:
-                self.store.update_control_lane_state(
-                    replace(
-                        lane,
-                        state=ControlLaneStateValue.PAUSED,
-                        reason=classification.classification,
-                        cooldown_until=None,
-                        updated_at=datetime.now(UTC),
-                    )
-                )
-                self.store.create_control_event(
-                    self._control_event(
-                        "api_down",
-                        "lane",
-                        "api",
-                        {"url": api_url, "class": classification.classification, "message": str(exc)},
-                    )
-                )
-            self.breadcrumb_writer.write_bundle(
-                entity_type="lane",
-                entity_id="api",
-                meta={"lane": "api", "url": api_url},
-                evidence={"error": str(exc)},
-                decision={
-                    "classification": classification.classification,
-                    "retry_recommended": classification.retry_recommended,
-                    "cooldown_seconds": classification.cooldown_seconds,
-                },
-                classification=classification.classification,
-                summary=f"API check failed for {api_url}: {classification.classification}",
-            )
-            return {"ok": False, "url": api_url, "classification": classification.classification, "message": str(exc)}
-
-    def check_harness(self) -> dict[str, object]:
-        lane = self.store.get_control_lane_state("harness")
-        assert lane is not None
-        running = self._running_supervisors()
-        if running:
-            self.store.update_control_lane_state(
-                replace(lane, state=ControlLaneStateValue.RUNNING, reason="supervisor_running", cooldown_until=None, updated_at=datetime.now(UTC))
-            )
-            self.store.create_control_event(
-                self._control_event("harness_up", "lane", "harness", {"supervisor_count": len(running)})
-            )
-            return {"ok": True, "supervisor_count": len(running), "supervisors": running}
-
-        if self.restart_harness is not None and self._restart_allowed("harness", "no_supervisor"):
-            restarted = self.restart_harness()
-            if restarted:
-                running = self._await_supervisor_recovery()
-                self._record_restart("harness", "no_supervisor", "restarted" if running else "restart_failed")
-                if running:
-                    self.store.update_control_lane_state(
-                        replace(lane, state=ControlLaneStateValue.RUNNING, reason="supervisor_restarted", cooldown_until=None, updated_at=datetime.now(UTC))
-                    )
-                    self.store.create_control_event(
-                        self._control_event("harness_up", "lane", "harness", {"supervisor_count": len(running), "restarted": True})
-                    )
-                    return {"ok": True, "supervisor_count": len(running), "supervisors": running, "restarted": True}
-
-        self.store.update_control_lane_state(
-            replace(lane, state=ControlLaneStateValue.PAUSED, reason="no_supervisor", cooldown_until=None, updated_at=datetime.now(UTC))
-        )
-        self.store.create_control_event(
-            self._control_event("harness_down", "lane", "harness", {"supervisor_count": 0})
-        )
-        self.breadcrumb_writer.write_bundle(
-            entity_type="lane",
-            entity_id="harness",
-            meta={"lane": "harness"},
-            evidence={"supervisors": []},
-            decision={"classification": "system_failure", "retry_recommended": True, "cooldown_seconds": 0},
-            classification="system_failure",
-            summary="Harness watch detected no running supervisor processes.",
-        )
-        return {"ok": False, "supervisor_count": 0, "supervisors": []}
-
-    def _fetch_api_body(self, api_url: str) -> str:
-        with urlopen(api_url, timeout=5) as response:
-            return response.read(2000).decode("utf-8", errors="replace")
-
-    def _await_api_recovery(self, api_url: str, *, timeout_seconds: float = 10.0) -> str | None:
-        deadline = time.monotonic() + timeout_seconds
-        while time.monotonic() < deadline:
-            try:
-                return self._fetch_api_body(api_url)
-            except Exception:
-                time.sleep(0.25)
-        return None
-
-    def _await_supervisor_recovery(self, *, timeout_seconds: float = 10.0) -> list[dict[str, object]]:
-        deadline = time.monotonic() + timeout_seconds
-        while time.monotonic() < deadline:
-            running = self._running_supervisors()
-            if running:
-                return running
-            time.sleep(0.25)
-        return []
-
-    def _restart_allowed(self, target_id: str, reason: str) -> bool:
-        recent = self.store.list_control_recovery_actions(target_type="lane", target_id=target_id)
+    def _evaluate_stuck_state(self) -> dict[str, object]:
         now = datetime.now(UTC)
-        for action in recent[:5]:
-            if action.action_type != "restart":
-                continue
-            if action.reason != reason:
-                continue
-            age_seconds = (now - action.created_at).total_seconds()
-            if age_seconds < 60:
-                return False
-        return True
+        tasks = self.store.list_tasks()
+        task_by_id = {task.id: task for task in tasks}
+        runs_by_task = {task.id: self.store.list_runs(task.id) for task in tasks}
+        promotions_by_task = {task.id: self.store.list_promotions(task.id) for task in tasks}
+        leases = {lease.task_id: lease for lease in self.store.list_task_leases()}
+        supervisors = self._running_supervisors()
+        running_worker_ids = {
+            str(payload.get("worker_id") or "").strip()
+            for payload in supervisors
+            if str(payload.get("worker_id") or "").strip()
+        }
+        objectives = {objective.id: objective for objective in self.store.list_objectives()}
 
-    def _record_restart(self, target_id: str, reason: str, result: str) -> None:
-        self.store.create_control_recovery_action(
-            self._recovery_action("restart", "lane", target_id, reason, result)
-        )
+        matched_rules: list[str] = []
+        reasons: list[dict[str, object]] = []
+        affected_task_ids: set[str] = set()
+        affected_promotion_ids: set[str] = set()
 
-    def find_stalled_objectives(self, *, hours: float = 6.0) -> list[dict[str, object]]:
-        stalled: list[dict[str, object]] = []
-        cutoff_seconds = hours * 3600.0
-        now = datetime.now(UTC)
-        for objective in self.store.list_objectives():
-            if objective.status == ObjectiveStatus.RESOLVED:
+        active_tasks = [task for task in tasks if task.status == TaskStatus.ACTIVE]
+        pending_tasks = [task for task in tasks if task.status == TaskStatus.PENDING]
+        if pending_tasks and not active_tasks:
+            latest_pending_update = max(task.updated_at for task in pending_tasks)
+            idle_seconds = (now - latest_pending_update).total_seconds()
+            if idle_seconds >= self.no_active_tasks_timeout_seconds:
+                matched_rules.append("No active tasks while work exists")
+                reasons.append(
+                    {
+                        "rule": "No active tasks while work exists",
+                        "seconds_idle": round(idle_seconds, 1),
+                        "task_ids": [task.id for task in pending_tasks],
+                    }
+                )
+                affected_task_ids.update(task.id for task in pending_tasks)
+
+        if pending_tasks and supervisors:
+            oldest_pending_age = max((now - task.updated_at).total_seconds() for task in pending_tasks)
+            if oldest_pending_age >= self.no_active_tasks_timeout_seconds and not active_tasks:
+                matched_rules.append("Pending work is not being claimed")
+                reasons.append(
+                    {
+                        "rule": "Pending work is not being claimed",
+                        "seconds_without_claim": round(oldest_pending_age, 1),
+                        "task_ids": [task.id for task in pending_tasks],
+                    }
+                )
+                affected_task_ids.update(task.id for task in pending_tasks)
+
+        stalled_objective_ids: list[str] = []
+        for event in self.store.list_control_events(event_type="objective_stalled", limit=20):
+            objective = objectives.get(event.entity_id)
+            if objective is None:
                 continue
-            age_seconds = (now - objective.updated_at).total_seconds()
-            linked_tasks = [task for task in self.store.list_tasks(objective.project_id) if task.objective_id == objective.id]
-            rejected_promotions = 0
-            for task in linked_tasks:
-                promotions = self.store.list_promotions(task.id)
-                rejected_promotions += sum(1 for promotion in promotions[-2:] if promotion.status.value == "rejected")
-            if age_seconds >= cutoff_seconds or rejected_promotions >= 2:
-                payload = {
-                    "objective_id": objective.id,
-                    "hours_without_progress": round(age_seconds / 3600.0, 2),
-                    "failed_promotion_cycles": rejected_promotions,
+            if objective.status.value == "resolved":
+                continue
+            if event.created_at < now - OBJECTIVE_STALLED_SIGNAL_WINDOW:
+                continue
+            stalled_objective_ids.append(objective.id)
+        if stalled_objective_ids:
+            matched_rules.append("Stalled objective exists")
+            reasons.append(
+                {
+                    "rule": "Stalled objective exists",
+                    "objective_ids": sorted(dict.fromkeys(stalled_objective_ids)),
+                    "window_seconds": int(OBJECTIVE_STALLED_SIGNAL_WINDOW.total_seconds()),
                 }
-                self.store.create_control_event(
-                    self._control_event("objective_stalled", "objective", objective.id, payload)
+            )
+
+        for task in active_tasks:
+            latest_run = runs_by_task.get(task.id, [])[-1] if runs_by_task.get(task.id) else None
+            run_dir = self._run_dir(latest_run.id) if latest_run is not None else None
+            artifact_info = self._artifact_inventory(run_dir) if run_dir is not None else self._empty_artifact_inventory()
+
+            if artifact_info["latest_artifact_age_seconds"] is not None and artifact_info["latest_artifact_age_seconds"] >= self.no_artifact_timeout_seconds:
+                matched_rules.append("Active task produced no artifact")
+                reasons.append(
+                    {
+                        "rule": "Active task produced no artifact",
+                        "task_id": task.id,
+                        "run_id": latest_run.id if latest_run is not None else None,
+                        "seconds_since_artifact": round(float(artifact_info["latest_artifact_age_seconds"]), 1),
+                    }
                 )
-                self.breadcrumb_writer.write_bundle(
-                    entity_type="objective",
-                    entity_id=objective.id,
-                    meta={"objective_id": objective.id, "title": objective.title},
-                    evidence={"hours_without_progress": payload["hours_without_progress"], "failed_promotion_cycles": rejected_promotions},
-                    decision={"classification": "objective_stalled", "retry_recommended": False, "cooldown_seconds": 0},
-                    classification="objective_stalled",
-                    summary=f"Objective {objective.id} appears stalled.",
+                affected_task_ids.add(task.id)
+            elif artifact_info["latest_artifact_age_seconds"] is None and (now - task.updated_at).total_seconds() >= self.no_artifact_timeout_seconds:
+                matched_rules.append("Active task produced no artifact")
+                reasons.append(
+                    {
+                        "rule": "Active task produced no artifact",
+                        "task_id": task.id,
+                        "run_id": latest_run.id if latest_run is not None else None,
+                        "seconds_since_activity": round((now - task.updated_at).total_seconds(), 1),
+                    }
                 )
-                stalled.append(payload)
-        return stalled
+                affected_task_ids.add(task.id)
+
+            if (
+                artifact_info["recent_artifact_count"] > 0
+                and artifact_info["recent_meaningful_artifact_count"] == 0
+                and artifact_info["recent_window_age_seconds"] >= self.no_artifact_timeout_seconds
+            ):
+                matched_rules.append("Active task produced only liveness noise")
+                reasons.append(
+                    {
+                        "rule": "Active task produced only liveness noise",
+                        "task_id": task.id,
+                        "run_id": latest_run.id if latest_run is not None else None,
+                        "artifact_kinds": sorted(set(artifact_info["recent_artifact_kinds"])),
+                    }
+                )
+                affected_task_ids.add(task.id)
+            elif (
+                artifact_info["latest_artifact_kind"] in NON_MEANINGFUL_ARTIFACT_KINDS
+                and artifact_info["latest_artifact_age_seconds"] is not None
+                and artifact_info["latest_artifact_age_seconds"] >= self.no_artifact_timeout_seconds
+            ):
+                matched_rules.append("Active task produced only liveness noise")
+                reasons.append(
+                    {
+                        "rule": "Active task produced only liveness noise",
+                        "task_id": task.id,
+                        "run_id": latest_run.id if latest_run is not None else None,
+                        "artifact_kinds": [artifact_info["latest_artifact_kind"]],
+                    }
+                )
+                affected_task_ids.add(task.id)
+
+            lease = leases.get(task.id)
+            lease_worker_id = str(lease.worker_id).strip() if lease is not None else ""
+            if lease is None or (running_worker_ids and lease_worker_id and lease_worker_id not in running_worker_ids) or (not supervisors):
+                matched_rules.append("Active task lost its worker")
+                reasons.append(
+                    {
+                        "rule": "Active task lost its worker",
+                        "task_id": task.id,
+                        "lease_present": lease is not None,
+                        "lease_worker_id": lease_worker_id,
+                        "running_supervisor_count": len(supervisors),
+                    }
+                )
+                affected_task_ids.add(task.id)
+
+            if latest_run is not None and latest_run.status in TERMINAL_RUN_STATUSES:
+                reconcile_age = (now - latest_run.updated_at).total_seconds()
+                if reconcile_age >= self.reconcile_timeout_seconds:
+                    matched_rules.append("Run finished but state did not reconcile")
+                    reasons.append(
+                        {
+                            "rule": "Run finished but state did not reconcile",
+                            "task_id": task.id,
+                            "run_id": latest_run.id,
+                            "run_status": latest_run.status.value,
+                            "seconds_since_run_end": round(reconcile_age, 1),
+                        }
+                    )
+                    affected_task_ids.add(task.id)
+
+        for task in tasks:
+            if task.status not in {TaskStatus.PENDING, TaskStatus.ACTIVE}:
+                continue
+            latest_run = runs_by_task.get(task.id, [])[-1] if runs_by_task.get(task.id) else None
+            run_dir = self._run_dir(latest_run.id) if latest_run is not None else None
+            artifact_info = self._artifact_inventory(run_dir) if run_dir is not None else self._empty_artifact_inventory()
+            task_loop = self._same_state_loop(
+                entity_type="task",
+                entity_id=task.id,
+                fingerprint=self._task_state_fingerprint(task, latest_run, artifact_info, task.id in leases),
+            )
+            if task_loop >= self.same_state_loop_threshold:
+                matched_rules.append("Task is looping in the same state")
+                reasons.append(
+                    {
+                        "rule": "Task is looping in the same state",
+                        "task_id": task.id,
+                        "consecutive_loops": task_loop,
+                        "hard_max_reached": task_loop >= self.same_state_loop_hard_max,
+                    }
+                )
+                affected_task_ids.add(task.id)
+
+        for task in tasks:
+            promotions = promotions_by_task.get(task.id, [])
+            if not promotions:
+                continue
+            promotion = promotions[-1]
+            if promotion.status != PromotionStatus.PENDING:
+                continue
+            promotion_age = (now - promotion.created_at).total_seconds()
+            artifacts = self.store.list_artifacts(promotion.run_id)
+            artifact_kinds = {artifact.kind for artifact in artifacts}
+            latest_artifact_at = max((artifact.created_at for artifact in artifacts), default=None)
+            if latest_artifact_at is None:
+                latest_movement_age = promotion_age
+            else:
+                latest_movement_age = (now - latest_artifact_at).total_seconds()
+
+            if latest_movement_age >= self.no_artifact_timeout_seconds:
+                matched_rules.append("Promotion produced no movement")
+                reasons.append(
+                    {
+                        "rule": "Promotion produced no movement",
+                        "promotion_id": promotion.id,
+                        "task_id": task.id,
+                        "seconds_without_movement": round(latest_movement_age, 1),
+                    }
+                )
+                affected_task_ids.add(task.id)
+                affected_promotion_ids.add(promotion.id)
+
+            missing_required = sorted(kind for kind in task.required_artifacts if kind not in artifact_kinds)
+            if missing_required and promotion_age >= self.missing_prerequisite_timeout_seconds:
+                matched_rules.append("Promotion is blocked on a missing prerequisite")
+                reasons.append(
+                    {
+                        "rule": "Promotion is blocked on a missing prerequisite",
+                        "promotion_id": promotion.id,
+                        "task_id": task.id,
+                        "missing_required_artifacts": missing_required,
+                        "seconds_blocked": round(promotion_age, 1),
+                    }
+                )
+                affected_task_ids.add(task.id)
+                affected_promotion_ids.add(promotion.id)
+
+            promotion_loop = self._same_state_loop(
+                entity_type="promotion",
+                entity_id=promotion.id,
+                fingerprint=self._promotion_state_fingerprint(promotion, task, artifact_kinds),
+            )
+            if promotion_loop >= self.same_state_loop_threshold:
+                matched_rules.append("Promotion is looping in the same state")
+                reasons.append(
+                    {
+                        "rule": "Promotion is looping in the same state",
+                        "promotion_id": promotion.id,
+                        "task_id": task.id,
+                        "consecutive_loops": promotion_loop,
+                        "hard_max_reached": promotion_loop >= self.same_state_loop_hard_max,
+                    }
+                )
+                affected_task_ids.add(task.id)
+                affected_promotion_ids.add(promotion.id)
+
+        deduped_rules = list(dict.fromkeys(matched_rules))
+        return {
+            "stuck": bool(deduped_rules),
+            "matched_rules": deduped_rules,
+            "reasons": reasons,
+            "affected_task_ids": sorted(affected_task_ids),
+            "affected_promotion_ids": sorted(affected_promotion_ids),
+            "supervisor_count": len(supervisors),
+        }
+
+    def _record_stuck_event(self, evaluation: dict[str, object]) -> None:
+        payload = {
+            "matched_rules": list(evaluation["matched_rules"]),
+            "reasons": list(evaluation["reasons"]),
+            "affected_task_ids": list(evaluation["affected_task_ids"]),
+            "affected_promotion_ids": list(evaluation["affected_promotion_ids"]),
+        }
+        self.store.create_control_event(
+            ControlEvent(
+                id=new_id("control_event"),
+                event_type="stuck_detected",
+                entity_type="system",
+                entity_id="system",
+                producer="control-watch",
+                payload=payload,
+                idempotency_key=new_id("event_key"),
+            )
+        )
+        self.store.create_control_recovery_action(
+            ControlRecoveryAction(
+                id=new_id("recovery"),
+                action_type="observe",
+                target_type="system",
+                target_id="system",
+                reason="stuck_detected",
+                result="recorded",
+            )
+        )
+
+    def _write_stuck_breadcrumbs(self, evaluation: dict[str, object]) -> None:
+        for task_id in evaluation["affected_task_ids"]:
+            matching_reasons = [item for item in evaluation["reasons"] if item.get("task_id") == task_id]
+            summary = ", ".join(str(item.get("rule") or "") for item in matching_reasons[:3]) or "Task appears stuck."
+            self.breadcrumb_writer.write_bundle(
+                entity_type="task",
+                entity_id=task_id,
+                meta={"task_id": task_id},
+                evidence={"reasons": matching_reasons},
+                decision={"matched_rules": evaluation["matched_rules"], "stuck": True},
+                classification="stuck_detected",
+                summary=summary,
+            )
+        for promotion_id in evaluation["affected_promotion_ids"]:
+            matching_reasons = [item for item in evaluation["reasons"] if item.get("promotion_id") == promotion_id]
+            summary = ", ".join(str(item.get("rule") or "") for item in matching_reasons[:3]) or "Promotion appears stuck."
+            self.breadcrumb_writer.write_bundle(
+                entity_type="promotion",
+                entity_id=promotion_id,
+                meta={"promotion_id": promotion_id},
+                evidence={"reasons": matching_reasons},
+                decision={"matched_rules": evaluation["matched_rules"], "stuck": True},
+                classification="stuck_detected",
+                summary=summary,
+            )
+
+    def _record_state_snapshots(self, evaluation: dict[str, object]) -> None:
+        now = datetime.now(UTC)
+        tasks = self.store.list_tasks()
+        leases = {lease.task_id: lease for lease in self.store.list_task_leases()}
+        for task in tasks:
+            latest_run = self.store.list_runs(task.id)[-1] if self.store.list_runs(task.id) else None
+            run_dir = self._run_dir(latest_run.id) if latest_run is not None else None
+            artifact_info = self._artifact_inventory(run_dir) if run_dir is not None else self._empty_artifact_inventory()
+            fingerprint = self._task_state_fingerprint(task, latest_run, artifact_info, task.id in leases)
+            self.store.create_control_event(
+                ControlEvent(
+                    id=new_id("control_event"),
+                    event_type="stuck_snapshot",
+                    entity_type="task",
+                    entity_id=task.id,
+                    producer="control-watch",
+                    payload={"fingerprint": fingerprint, "stuck": bool(evaluation["stuck"])},
+                    idempotency_key=new_id("event_key"),
+                    created_at=now,
+                )
+            )
+            promotions = self.store.list_promotions(task.id)
+            if not promotions:
+                continue
+            promotion = promotions[-1]
+            artifact_kinds = {artifact.kind for artifact in self.store.list_artifacts(promotion.run_id)}
+            self.store.create_control_event(
+                ControlEvent(
+                    id=new_id("control_event"),
+                    event_type="stuck_snapshot",
+                    entity_type="promotion",
+                    entity_id=promotion.id,
+                    producer="control-watch",
+                    payload={
+                        "fingerprint": self._promotion_state_fingerprint(promotion, task, artifact_kinds),
+                        "stuck": bool(evaluation["stuck"]),
+                    },
+                    idempotency_key=new_id("event_key"),
+                    created_at=now,
+                )
+            )
+
+    def _same_state_loop(self, *, entity_type: str, entity_id: str, fingerprint: str) -> int:
+        events = self.store.list_control_events(
+            event_type="stuck_snapshot",
+            entity_type=entity_type,
+            entity_id=entity_id,
+            limit=self.same_state_loop_hard_max - 1,
+        )
+        count = 1
+        for event in events:
+            payload = dict(event.payload or {})
+            if str(payload.get("fingerprint") or "") != fingerprint:
+                break
+            count += 1
+        return count
+
+    def _task_state_fingerprint(self, task: Task, latest_run, artifact_info: dict[str, object], lease_present: bool) -> str:
+        return "|".join(
+            [
+                task.status.value,
+                latest_run.status.value if latest_run is not None else "no_run",
+                str(artifact_info.get("latest_artifact_kind") or "none"),
+                "leased" if lease_present else "unleased",
+            ]
+        )
+
+    def _promotion_state_fingerprint(self, promotion, task: Task, artifact_kinds: set[str]) -> str:
+        missing_required = sorted(kind for kind in task.required_artifacts if kind not in artifact_kinds)
+        return "|".join(
+            [
+                promotion.status.value,
+                ",".join(missing_required) or "all_required_present",
+                ",".join(sorted(artifact_kinds)) or "no_artifacts",
+            ]
+        )
+
+    def _run_dir(self, run_id: str) -> Path:
+        return (self.breadcrumb_writer.workspace_root / "runs" / run_id).resolve()
+
+    def _artifact_inventory(self, run_dir: Path) -> dict[str, object]:
+        if not run_dir.exists() or not run_dir.is_dir():
+            return self._empty_artifact_inventory()
+        latest_path: Path | None = None
+        latest_mtime = 0.0
+        recent_kinds: list[str] = []
+        recent_meaningful_count = 0
+        recent_window_age_seconds = 0.0
+        now_epoch = time.time()
+        threshold_epoch = now_epoch - self.no_artifact_timeout_seconds
+        for child in run_dir.iterdir():
+            if not child.is_file():
+                continue
+            stat = child.stat()
+            kind = self._artifact_kind(child)
+            if stat.st_mtime > latest_mtime:
+                latest_mtime = stat.st_mtime
+                latest_path = child
+            if stat.st_mtime >= threshold_epoch:
+                recent_kinds.append(kind)
+                recent_window_age_seconds = max(recent_window_age_seconds, now_epoch - stat.st_mtime)
+                if kind not in NON_MEANINGFUL_ARTIFACT_KINDS:
+                    recent_meaningful_count += 1
+        latest_artifact_age_seconds = max(0.0, now_epoch - latest_mtime) if latest_path is not None else None
+        return {
+            "latest_artifact": latest_path.name if latest_path is not None else None,
+            "latest_artifact_kind": self._artifact_kind(latest_path) if latest_path is not None else None,
+            "latest_artifact_age_seconds": latest_artifact_age_seconds,
+            "recent_artifact_count": len(recent_kinds),
+            "recent_artifact_kinds": recent_kinds,
+            "recent_meaningful_artifact_count": recent_meaningful_count,
+            "recent_window_age_seconds": recent_window_age_seconds,
+        }
+
+    def _empty_artifact_inventory(self) -> dict[str, object]:
+        return {
+            "latest_artifact": None,
+            "latest_artifact_kind": None,
+            "latest_artifact_age_seconds": None,
+            "recent_artifact_count": 0,
+            "recent_artifact_kinds": [],
+            "recent_meaningful_artifact_count": 0,
+            "recent_window_age_seconds": 0.0,
+        }
+
+    def _artifact_kind(self, path: Path) -> str:
+        name = path.name
+        if name == "worker.heartbeat.json":
+            return "heartbeat"
+        if name == "phase.txt":
+            return "phase"
+        if name == "plan.txt":
+            return "plan"
+        if name == "report.json":
+            return "report"
+        if name == "compile_output.txt":
+            return "compile-output"
+        if name == "test_output.txt":
+            return "test-output"
+        if name.endswith(".stdout.txt"):
+            return "stdout"
+        if name.endswith(".stderr.txt"):
+            return "stderr"
+        return "artifact"
 
     def _running_supervisors(self) -> list[dict[str, object]]:
         if not self.supervisor_control_dir.exists():
@@ -291,28 +569,3 @@ class ControlWatchService:
                 continue
             running.append(payload)
         return running
-
-    def _control_event(self, event_type: str, entity_type: str, entity_id: str, payload: dict[str, object]):
-        from .domain import ControlEvent
-
-        return ControlEvent(
-            id=new_id("control_event"),
-            event_type=event_type,
-            entity_type=entity_type,
-            entity_id=entity_id,
-            producer="control-watch",
-            payload=payload,
-            idempotency_key=new_id("event_key"),
-        )
-
-    def _recovery_action(self, action_type: str, target_type: str, target_id: str, reason: str, result: str):
-        from .domain import ControlRecoveryAction
-
-        return ControlRecoveryAction(
-            id=new_id("recovery"),
-            action_type=action_type,
-            target_type=target_type,
-            target_id=target_id,
-            reason=reason,
-            result=result,
-        )
