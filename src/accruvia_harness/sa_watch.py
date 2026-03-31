@@ -5,6 +5,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from hashlib import sha1
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -127,7 +128,7 @@ class SAWatchService:
                 "payload": event.payload,
                 "created_at": self._local_time(event.created_at),
             }
-            for event in self.store.list_control_events(limit=8)
+            for event in self.store.list_control_events(limit=25)
         ]
         recent_runs = [
             {
@@ -138,7 +139,7 @@ class SAWatchService:
                 "started_at": self._local_time(item.started_at),
                 "ended_at": self._local_time(item.ended_at),
             }
-            for item in self.store.list_control_worker_runs()[:5]
+            for item in self.store.list_control_worker_runs()[:25]
         ]
         recent_actions = [
             {
@@ -149,8 +150,9 @@ class SAWatchService:
                 "result": item.result,
                 "created_at": self._local_time(item.created_at),
             }
-            for item in self.store.list_control_recovery_actions()[:5]
+            for item in self.store.list_control_recovery_actions()[:25]
         ]
+        evidence_manifest = self._evidence_manifest(structural_signal)
         return {
             "time_context": {
                 "now_local": now_local.strftime("%Y-%m-%d %H:%M:%S %Z"),
@@ -170,6 +172,8 @@ class SAWatchService:
             "recent_events": recent_events,
             "recent_worker_runs": recent_runs,
             "recent_recovery_actions": recent_actions,
+            "evidence_manifest_summary": evidence_manifest.get("summary"),
+            "evidence_manifest": evidence_manifest,
             "allowed_actions": [
                 "resume_worker",
                 "restart_stack",
@@ -193,23 +197,28 @@ class SAWatchService:
         except Exception:
             return str(self.workspace_root)
 
-    def _build_prompt(self, packet: dict[str, object]) -> str:
+    def _build_prompt(self, packet: dict[str, object], *, evidence_manifest_path: Path) -> str:
         repo_root = self._source_repo_root()
         db_path = str(self.store.db_path)
         return (
             "You are sa-watch, the recovery authority for the Accruvia harness.\n"
-            "You are only invoked when the system is stuck. Doing nothing is not an option.\n\n"
+            "You are only invoked when the system is stuck.\n\n"
             "The control-loop has determined that forward progress has stopped. "
             "Your job is to diagnose WHY from the evidence below, then fix the root cause. "
             "You have full access to the harness codebase, database, logs, and runtime artifacts. "
             "Read whatever you need. Change whatever you need. There are no scope limits.\n\n"
-            "Do not observe. Do not escalate to a human. You are the escalation. "
-            "Analyze the artifacts and logs, then make changes that address the root cause.\n\n"
+            "Do not stop at observation. Inspect the full evidence manifest and prior related artifacts first, "
+            "then make the smallest durable change that addresses the root cause.\n\n"
             "CRITICAL REQUIREMENTS:\n"
             f"- The harness source code is at: {repo_root}\n"
             f"- The harness database is at: {db_path}\n"
+            f"- The full evidence manifest for this invocation is at: {evidence_manifest_path}\n"
             "- You are running in a temporary directory. Any code changes you make MUST be\n"
             f"  made in the source repo at {repo_root}, not in your current working directory.\n"
+            "- Start by reading the evidence manifest, prior repair evidence, and repeated failure artifacts.\n"
+            "- Do not claim write-permission or sandbox blockage unless the recorded workspace write probe failed.\n"
+            "- If the same repair class already produced zero durable changes, do not repeat it.\n"
+            "- If you cannot make a durable repair, emit a structured incident explanation in the report instead of prose-only recovery.\n"
             "- After fixing code: run the tests, then commit to the main branch and push.\n"
             "  Do NOT leave changes uncommitted — they will be lost.\n"
             "- After fixing database state: verify by querying the database that the stuck\n"
@@ -243,8 +252,14 @@ class SAWatchService:
             summary="sa-watch recovery",
         )
         run_dir = self.workspace_root / "control" / "sa_watch" / run.id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        evidence_manifest_path = run_dir / "evidence_manifest.json"
+        evidence_manifest_path.write_text(
+            json.dumps(packet.get("evidence_manifest", {}), indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
         result, _backend = self.llm_router.execute(
-            LLMInvocation(task=task, run=run, prompt=self._build_prompt(packet), run_dir=run_dir)
+            LLMInvocation(task=task, run=run, prompt=self._build_prompt(packet, evidence_manifest_path=evidence_manifest_path), run_dir=run_dir)
         )
         report = result.response_text.strip()
         report_path = run_dir / "sa_watch_report.txt"
@@ -439,26 +454,62 @@ class SAWatchService:
             if target_task is not None
             else str(signal.get("kind") or "structural_stall")
         )
+        failure_family = self._failure_family(structural_signal=signal, classification=classification, task=target_task)
+        repair_task_id = new_id("sa_watch_repair")
+        repair_run = Run(
+            id=new_id("run"),
+            task_id=repair_task_id,
+            status=RunStatus.WORKING,
+            attempt=1,
+            summary=f"sa-watch direct repair for {classification}",
+        )
+        repair_run_dir = self.workspace_root / "control" / "sa_watch_repairs" / repair_run.id
+        repair_run_dir.mkdir(parents=True, exist_ok=True)
+        write_probe = self._workspace_write_probe(repo_root=_HARNESS_REPO_ROOT, probe_key=repair_run.id)
+        repair_memory = self._related_repair_memory(objective_id=objective_id, failure_family=failure_family)
+        manifest_path = repair_run_dir / "evidence_manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                self._repair_evidence_manifest(
+                    signal=signal,
+                    target_task=target_task,
+                    target_objective=target_objective,
+                    classification=classification,
+                    failure_family=failure_family,
+                    write_probe=write_probe,
+                    repair_memory=repair_memory,
+                ),
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
         repair_task = Task(
-            id=new_id("sa_watch_repair"),
+            id=repair_task_id,
             project_id=project_id,
             objective_id=objective_id,
             title=decision.task_title or self._default_repair_title(target_task, target_objective, classification),
-            objective=decision.task_objective or self._default_repair_objective(target_task, target_objective, classification),
+            objective=decision.task_objective or self._default_repair_objective(
+                target_task,
+                target_objective,
+                classification,
+                manifest_path=manifest_path,
+            ),
             priority=max(150, int(target_task.priority if target_task is not None else target_objective.priority)),
             validation_profile=target_task.validation_profile if target_task is not None else "generic",
             validation_mode=target_task.validation_mode if target_task is not None else "default_focused",
             scope=dict(target_task.scope) if target_task is not None else {},
+            external_ref_metadata={
+                "sa_watch_context": {
+                    "evidence_manifest_path": str(manifest_path),
+                    "failure_family": failure_family,
+                    "workspace_write_probe": write_probe,
+                    "related_repair_memory": repair_memory,
+                }
+            },
             strategy="sa_watch_direct_repair",
             max_attempts=1,
             required_artifacts=["plan", "report"],
-        )
-        repair_run = Run(
-            id=new_id("run"),
-            task_id=repair_task.id,
-            status=RunStatus.WORKING,
-            attempt=1,
-            summary=f"sa-watch direct repair for {classification}",
         )
         effects: list[dict[str, object]] = []
         self._persist_repair_start(repair_task, repair_run, decision=decision, signal=signal)
@@ -493,7 +544,12 @@ class SAWatchService:
         if self.post_repair_callback is not None:
             self.post_repair_callback(repair_task)
         after_progress = self._progress_snapshot(signal)
-        movement_restored = self._forward_progress_resumed(signal, before_progress)
+        movement_restored = self._verified_recovery(
+            repair_result,
+            signal=signal,
+            before=before_progress,
+            after=after_progress,
+        )
         self._persist_repair_completion(repair_task, repair_run, repair_result, movement_restored=movement_restored)
         self._record_repair_evidence(
             repair_task=repair_task,
@@ -687,12 +743,14 @@ class SAWatchService:
             return None
         linked_tasks = [task for task in self.store.list_tasks(objective.project_id) if task.objective_id == objective.id]
         latest_atomic = self._latest_atomic_generation_state(objective.id)
+        failed_counts = self._failed_task_counts(linked_tasks)
         return {
             "linked_task_counts": {
                 "pending": sum(1 for task in linked_tasks if task.status == TaskStatus.PENDING),
                 "active": sum(1 for task in linked_tasks if task.status == TaskStatus.ACTIVE),
                 "completed": sum(1 for task in linked_tasks if task.status == TaskStatus.COMPLETED),
-                "failed": sum(1 for task in linked_tasks if task.status == TaskStatus.FAILED),
+                "failed_unresolved": failed_counts["failed_unresolved"],
+                "failed_historical": failed_counts["failed_waived_or_superseded"],
             },
             "latest_atomic_generation": {
                 **latest_atomic,
@@ -707,13 +765,15 @@ class SAWatchService:
         if objective is None:
             return {"objective_id": None}
         linked_tasks = [task for task in self.store.list_tasks(objective.project_id) if task.objective_id == objective.id]
+        failed_counts = self._failed_task_counts(linked_tasks)
         return {
             "objective_id": objective.id,
             "status": objective.status.value,
             "pending": sum(1 for task in linked_tasks if task.status == TaskStatus.PENDING),
             "active": sum(1 for task in linked_tasks if task.status == TaskStatus.ACTIVE),
             "completed": sum(1 for task in linked_tasks if task.status == TaskStatus.COMPLETED),
-            "failed": sum(1 for task in linked_tasks if task.status == TaskStatus.FAILED),
+            "failed_unresolved": failed_counts["failed_unresolved"],
+            "failed_historical": failed_counts["failed_waived_or_superseded"],
             "stale_atomic_generation": bool((self._latest_atomic_generation_state(objective.id) or {}).get("is_stale")),
         }
 
@@ -728,12 +788,43 @@ class SAWatchService:
             return True
         if before.get("stale_atomic_generation") and not after.get("stale_atomic_generation"):
             return True
+        if after.get("failed_unresolved", 0) < before.get("failed_unresolved", 0):
+            return True
         if before.get("status") != after.get("status") and after.get("status") in {
             ObjectiveStatus.PLANNING.value,
             ObjectiveStatus.EXECUTING.value,
         }:
             return True
         return False
+
+    def _repair_is_durable(self, repair_result: SAWatchRepairResult) -> bool:
+        if repair_result.changed_files:
+            return True
+        diagnostics = repair_result.diagnostics if isinstance(repair_result.diagnostics, dict) else {}
+        return any(
+            bool(diagnostics.get(key))
+            for key in (
+                "db_reconciliation_applied",
+                "workflow_state_reconciled",
+                "stack_restart_requested",
+                "explicit_reconciliation_applied",
+            )
+        )
+
+    def _verified_recovery(
+        self,
+        repair_result: SAWatchRepairResult,
+        *,
+        signal: dict[str, object] | None,
+        before: dict[str, object],
+        after: dict[str, object],
+    ) -> bool:
+        del after
+        return (
+            repair_result.status == "validated"
+            and self._repair_is_durable(repair_result)
+            and self._forward_progress_resumed(signal, before)
+        )
 
     def _continuity_signals(self) -> list[dict[str, object]]:
         signals: list[dict[str, object]] = []
@@ -751,20 +842,21 @@ class SAWatchService:
         return signals
 
     def _repeated_failure_signal(self) -> dict[str, object] | None:
-        recent_runs = self.store.list_control_worker_runs()[:8]
-        grouped: dict[tuple[str, str], list[object]] = {}
+        recent_runs = self.store.list_control_worker_runs()
+        grouped: dict[tuple[str, str, str], list[object]] = {}
         ignorable = {"artifact_contract_failure"}
         for run in recent_runs:
             if not run.task_id or not run.classification:
                 continue
             if run.classification in ignorable:
                 continue
-            grouped.setdefault((run.task_id, run.classification), []).append(run)
-        for (task_id, classification), runs in grouped.items():
+            grouped.setdefault((str(run.objective_id or ""), run.task_id, run.classification), []).append(run)
+        for (objective_id, task_id, classification), runs in grouped.items():
             if len(runs) >= 2:
                 return {
                     "kind": "repeated_failure",
                     "task_id": task_id,
+                    "objective_id": objective_id,
                     "classification": classification,
                     "count": len(runs),
                 }
@@ -839,7 +931,7 @@ class SAWatchService:
         return None
 
     def _objective_stalled_signal(self) -> dict[str, object] | None:
-        stalled = self.store.list_control_events(event_type="objective_stalled", limit=8)
+        stalled = self.store.list_control_events(event_type="objective_stalled")
         recent_cutoff = datetime.now(UTC) - timedelta(minutes=30)
         for event in stalled:
             if event.created_at < recent_cutoff:
@@ -879,9 +971,10 @@ class SAWatchService:
 
     def _objective_summaries(self) -> list[dict[str, object]]:
         summaries: list[dict[str, object]] = []
-        for objective in self.store.list_objectives()[:5]:
+        for objective in self.store.list_objectives():
             linked_tasks = [task for task in self.store.list_tasks(objective.project_id) if task.objective_id == objective.id]
             latest_atomic = self._latest_atomic_generation_state(objective.id)
+            failed_counts = self._failed_task_counts(linked_tasks)
             summaries.append(
                 {
                     "objective_id": objective.id,
@@ -891,7 +984,8 @@ class SAWatchService:
                     "pending_tasks": sum(1 for task in linked_tasks if task.status == TaskStatus.PENDING),
                     "active_tasks": sum(1 for task in linked_tasks if task.status == TaskStatus.ACTIVE),
                     "completed_tasks": sum(1 for task in linked_tasks if task.status == TaskStatus.COMPLETED),
-                    "failed_tasks": sum(1 for task in linked_tasks if task.status == TaskStatus.FAILED),
+                    "failed_unresolved_tasks": failed_counts["failed_unresolved"],
+                    "failed_historical_tasks": failed_counts["failed_waived_or_superseded"],
                     "latest_atomic_generation": {
                         **latest_atomic,
                         "last_activity_at": self._local_time(latest_atomic["last_activity_at"]) if latest_atomic is not None else None,
@@ -904,12 +998,230 @@ class SAWatchService:
 
     def _task_summary(self) -> dict[str, int]:
         tasks = self.store.list_tasks()
+        failed_counts = self._failed_task_counts(tasks)
         return {
             "pending": sum(1 for task in tasks if task.status == TaskStatus.PENDING),
             "active": sum(1 for task in tasks if task.status == TaskStatus.ACTIVE),
             "completed": sum(1 for task in tasks if task.status == TaskStatus.COMPLETED),
-            "failed": sum(1 for task in tasks if task.status == TaskStatus.FAILED),
+            "failed_unresolved": failed_counts["failed_unresolved"],
+            "failed_historical": failed_counts["failed_waived_or_superseded"],
         }
+
+    def _failed_task_counts(self, tasks: list[Task]) -> dict[str, int]:
+        completed_external_refs = {
+            (str(task.external_ref_type or "").strip(), str(task.external_ref_id or "").strip())
+            for task in tasks
+            if task.status == TaskStatus.COMPLETED
+            and str(task.external_ref_type or "").strip()
+            and str(task.external_ref_id or "").strip()
+        }
+        completed_review_dimensions = {
+            str((task.external_ref_metadata or {}).get("objective_review_remediation", {}).get("dimension") or "").strip()
+            for task in tasks
+            if task.status == TaskStatus.COMPLETED
+            and isinstance(task.external_ref_metadata, dict)
+            and isinstance(task.external_ref_metadata.get("objective_review_remediation"), dict)
+            and str((task.external_ref_metadata or {}).get("objective_review_remediation", {}).get("dimension") or "").strip()
+        }
+        unresolved = 0
+        historical = 0
+        total = 0
+        for task in tasks:
+            if task.status != TaskStatus.FAILED:
+                continue
+            total += 1
+            if self._failed_task_is_historical(task, completed_external_refs, completed_review_dimensions):
+                historical += 1
+            else:
+                unresolved += 1
+        return {
+            "failed_total": total,
+            "failed_unresolved": unresolved,
+            "failed_waived_or_superseded": historical,
+        }
+
+    def _failed_task_is_historical(
+        self,
+        task: Task,
+        completed_external_refs: set[tuple[str, str]],
+        completed_review_dimensions: set[str],
+    ) -> bool:
+        if task.status != TaskStatus.FAILED:
+            return False
+        metadata = task.external_ref_metadata if isinstance(task.external_ref_metadata, dict) else {}
+        disposition = metadata.get("failed_task_disposition") if isinstance(metadata.get("failed_task_disposition"), dict) else None
+        if disposition and str(disposition.get("kind") or "").strip() == "waive_obsolete":
+            return True
+        remediation = metadata.get("objective_review_remediation") if isinstance(metadata.get("objective_review_remediation"), dict) else {}
+        dimension = str(remediation.get("dimension") or "").strip()
+        normalized_type = str(task.external_ref_type or "").strip()
+        normalized_id = str(task.external_ref_id or "").strip()
+        return bool(
+            normalized_type == "objective_review"
+            and (
+                (normalized_id and (normalized_type, normalized_id) in completed_external_refs)
+                or (dimension and dimension in completed_review_dimensions)
+            )
+        )
+
+    def _failure_family(self, *, structural_signal: dict[str, object] | None, classification: str | None, task: Task | None) -> str:
+        objective_id = str((structural_signal or {}).get("objective_id") or "")
+        if not objective_id and task is not None:
+            objective_id = str(task.objective_id or "")
+        task_id = str(task.id) if task is not None else str((structural_signal or {}).get("task_id") or "")
+        signal_kind = str((structural_signal or {}).get("kind") or "structural_stall")
+        raw = "|".join([objective_id, task_id, str(classification or ""), signal_kind])
+        return sha1(raw.encode("utf-8")).hexdigest()[:12]
+
+    def _related_repair_memory(self, *, objective_id: str | None, failure_family: str) -> list[dict[str, object]]:
+        if not objective_id:
+            return []
+        memories: list[dict[str, object]] = []
+        for record in reversed(self.store.list_context_records(objective_id=objective_id, record_type="sa_watch_repair")):
+            metadata = record.metadata if isinstance(record.metadata, dict) else {}
+            memory = metadata.get("repair_memory") if isinstance(metadata.get("repair_memory"), dict) else {}
+            if not memory:
+                continue
+            if str(memory.get("failure_family") or "") != failure_family:
+                continue
+            memories.append(memory)
+            if len(memories) >= 5:
+                break
+        return memories
+
+    def _workspace_write_probe(self, *, repo_root: Path, probe_key: str) -> dict[str, object]:
+        probe_dir = repo_root / ".accruvia-harness" / "control"
+        probe_dir.mkdir(parents=True, exist_ok=True)
+        probe_path = probe_dir / f"sa_watch_probe_{probe_key}.tmp"
+        payload = f"probe:{probe_key}\n"
+        try:
+            probe_path.write_text(payload, encoding="utf-8")
+            observed = probe_path.read_text(encoding="utf-8")
+            probe_path.unlink(missing_ok=True)
+            return {
+                "ok": observed == payload,
+                "path": str(probe_path),
+                "error": "" if observed == payload else "probe_read_mismatch",
+            }
+        except Exception as exc:
+            try:
+                probe_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return {"ok": False, "path": str(probe_path), "error": str(exc)}
+
+    def _evidence_manifest(self, structural_signal: dict[str, object] | None) -> dict[str, object]:
+        target_task = self.store.get_task(str((structural_signal or {}).get("task_id") or "")) if structural_signal else None
+        target_objective = self._target_objective_for_signal(structural_signal)
+        objective_id = str(target_objective.id) if target_objective is not None else str(target_task.objective_id or "") if target_task is not None else ""
+        linked_tasks = (
+            [task for task in self.store.list_tasks(target_objective.project_id) if task.objective_id == target_objective.id]
+            if target_objective is not None
+            else []
+        )
+        failed_counts = self._failed_task_counts(linked_tasks)
+        classification = (
+            self._latest_classification_for_task(target_task.id)
+            if target_task is not None
+            else str((structural_signal or {}).get("kind") or "")
+        )
+        failure_family = self._failure_family(structural_signal=structural_signal, classification=classification, task=target_task)
+        completed_external_refs = {
+            (str(task.external_ref_type or "").strip(), str(task.external_ref_id or "").strip())
+            for task in linked_tasks
+            if task.status == TaskStatus.COMPLETED
+            and str(task.external_ref_type or "").strip()
+            and str(task.external_ref_id or "").strip()
+        }
+        completed_review_dimensions = {
+            str((task.external_ref_metadata or {}).get("objective_review_remediation", {}).get("dimension") or "").strip()
+            for task in linked_tasks
+            if task.status == TaskStatus.COMPLETED
+            and isinstance(task.external_ref_metadata, dict)
+            and isinstance(task.external_ref_metadata.get("objective_review_remediation"), dict)
+            and str((task.external_ref_metadata or {}).get("objective_review_remediation", {}).get("dimension") or "").strip()
+        }
+        objective_runs = [
+            run for run in self.store.list_control_worker_runs()
+            if objective_id and str(run.objective_id or "") == objective_id
+        ]
+        return {
+            "summary": {
+                "signal_kind": str((structural_signal or {}).get("kind") or ""),
+                "target_objective_id": objective_id or None,
+                "target_task_id": target_task.id if target_task is not None else None,
+                "failure_family": failure_family,
+                "unresolved_failed_tasks": failed_counts["failed_unresolved"],
+                "historical_failed_tasks": failed_counts["failed_waived_or_superseded"],
+                "objective_run_count": len(objective_runs),
+                "related_repair_memory_count": len(self._related_repair_memory(objective_id=objective_id, failure_family=failure_family)),
+            },
+            "paths": {
+                "repo_root": self._source_repo_root(),
+                "db_path": str(self.store.db_path),
+                "runs_root": str(self.workspace_root / "runs"),
+                "sa_watch_repairs_root": str(self.workspace_root / "control" / "sa_watch_repairs"),
+            },
+            "target_objective_runs": [
+                {
+                    "run_id": run.id,
+                    "task_id": run.task_id,
+                    "status": run.status,
+                    "classification": run.classification,
+                    "breadcrumb_path": run.breadcrumb_path,
+                    "started_at": self._local_time(run.started_at),
+                    "ended_at": self._local_time(run.ended_at),
+                }
+                for run in objective_runs
+            ],
+            "target_task_runs": [
+                {
+                    "run_id": run.id,
+                    "status": run.status,
+                    "classification": run.classification,
+                    "breadcrumb_path": run.breadcrumb_path,
+                    "started_at": self._local_time(run.started_at),
+                    "ended_at": self._local_time(run.ended_at),
+                }
+                for run in (self.store.list_control_worker_runs(task_id=target_task.id) if target_task is not None else [])
+            ],
+            "related_repair_memory": self._related_repair_memory(objective_id=objective_id, failure_family=failure_family),
+            "unresolved_failed_tasks": [
+                {
+                    "task_id": task.id,
+                    "title": task.title,
+                    "strategy": task.strategy,
+                    "updated_at": self._local_time(task.updated_at),
+                    "external_ref_type": task.external_ref_type,
+                    "external_ref_id": task.external_ref_id,
+                }
+                for task in linked_tasks
+                if task.status == TaskStatus.FAILED
+                and not self._failed_task_is_historical(task, completed_external_refs, completed_review_dimensions)
+            ],
+        }
+
+    def _repair_evidence_manifest(
+        self,
+        *,
+        signal: dict[str, object],
+        target_task: Task | None,
+        target_objective,
+        classification: str | None,
+        failure_family: str,
+        write_probe: dict[str, object],
+        repair_memory: list[dict[str, object]],
+    ) -> dict[str, object]:
+        manifest = self._evidence_manifest(signal)
+        manifest["repair_context"] = {
+            "classification": classification,
+            "failure_family": failure_family,
+            "target_task_id": target_task.id if target_task is not None else None,
+            "target_objective_id": target_objective.id if target_objective is not None else None,
+            "workspace_write_probe": write_probe,
+            "related_repair_memory": repair_memory,
+        }
+        return manifest
 
     def _latest_classification_for_task(self, task_id: str) -> str | None:
         for run in self.store.list_control_worker_runs(task_id=task_id):
@@ -922,7 +1234,7 @@ class SAWatchService:
             return f"Repair harness workflow blocking {task.title}"
         return f"Repair harness workflow blocking {objective.title}"
 
-    def _default_repair_objective(self, task: Task | None, objective, classification: str | None) -> str:
+    def _default_repair_objective(self, task: Task | None, objective, classification: str | None, *, manifest_path: Path) -> str:
         classification_text = classification or "structural failure"
         subject = f"task '{task.title}'" if task is not None else f"objective '{objective.title}'"
         return (
@@ -930,7 +1242,11 @@ class SAWatchService:
             f"The current pipeline is blocked around {subject} because of {classification_text}.\n"
             "Inspect the harness codebase and make the architectural, workflow, or control-plane change directly.\n"
             "Do not create product work. Do not stop at a band-aid restart. Fix the machine.\n"
+            f"Read the full evidence manifest first: {manifest_path}\n"
             "Required proof:\n"
+            "- inspect prior related repair artifacts and repeated failure evidence before changing code\n"
+            "- do not claim workspace blockage unless the manifest shows the write probe failed\n"
+            "- do not repeat a repair class that already produced zero durable changes\n"
             "- identify the root cause precisely in the repair evidence\n"
             "- record a blameless six-whys review grounded in concrete evidence; if you cannot support a deeper why, say what evidence is missing\n"
             "- implement the durable harness change\n"
@@ -1226,15 +1542,27 @@ class SAWatchService:
                 movement_restored=movement_restored,
             ),
             "signal": signal,
+            "repair_memory": {
+                "failure_family": str(
+                    ((repair_task.external_ref_metadata or {}).get("sa_watch_context") or {}).get("failure_family") or ""
+                ),
+                "signal_kind": str(signal.get("kind") or "structural_stall"),
+                "root_cause_hypothesis": decision.reason,
+                "action_class": "repair_harness",
+                "changed_files_count": len(repair_result.changed_files),
+                "validation_result": repair_result.status,
+                "movement_result": "restored" if movement_restored else "not_restored",
+                "durable_repair": self._repair_is_durable(repair_result),
+            },
             "movement_validation": {
                 "before": before_progress,
                 "after": after_progress,
                 "movement_restored": movement_restored,
             },
             "why_pipeline_can_move_again": (
-                "Forward-progress indicators improved after the repair."
+                "Forward-progress indicators improved after a durable repair."
                 if movement_restored
-                else "Local validation did not provide enough evidence that the pipeline resumed."
+                else "Local validation did not provide enough evidence that a durable repair restored pipeline movement."
             ),
         }
         evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True), encoding="utf-8")

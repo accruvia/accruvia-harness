@@ -40,6 +40,21 @@ class WorkflowService:
 
     def review_readiness(self, objective_id: str, linked_tasks: list[Task] | None = None) -> ObjectiveReadiness:
         linked = list(linked_tasks or self._linked_tasks(objective_id))
+        completed_external_refs = {
+            (str(task.external_ref_type or "").strip(), str(task.external_ref_id or "").strip())
+            for task in linked
+            if task.status == TaskStatus.COMPLETED
+            and str(task.external_ref_type or "").strip()
+            and str(task.external_ref_id or "").strip()
+        }
+        completed_review_dimensions = {
+            str((task.external_ref_metadata or {}).get("objective_review_remediation", {}).get("dimension") or "").strip()
+            for task in linked
+            if task.status == TaskStatus.COMPLETED
+            and isinstance(task.external_ref_metadata, dict)
+            and isinstance(task.external_ref_metadata.get("objective_review_remediation"), dict)
+            and str((task.external_ref_metadata or {}).get("objective_review_remediation", {}).get("dimension") or "").strip()
+        }
         unresolved_failed = 0
         completed = 0
         pending = 0
@@ -51,7 +66,11 @@ class WorkflowService:
                 pending += 1
             elif task.status == TaskStatus.ACTIVE:
                 active += 1
-            elif task.status == TaskStatus.FAILED and not self._is_waived_failed_task(task):
+            elif task.status == TaskStatus.FAILED and not self._is_waived_failed_task(
+                task,
+                completed_external_refs,
+                completed_review_dimensions,
+            ):
                 unresolved_failed += 1
         checks = [
             {
@@ -175,14 +194,36 @@ class WorkflowService:
             return []
         return [task for task in self.store.list_tasks(objective.project_id) if task.objective_id == objective_id]
 
-    def _is_waived_failed_task(self, task: Task) -> bool:
+    def _is_waived_failed_task(
+        self,
+        task: Task,
+        completed_external_refs: set[tuple[str, str]] | None = None,
+        completed_review_dimensions: set[str] | None = None,
+    ) -> bool:
         metadata = task.external_ref_metadata if isinstance(task.external_ref_metadata, dict) else {}
         workflow_disposition = metadata.get("workflow_state_disposition") if isinstance(metadata, dict) else None
         if isinstance(workflow_disposition, dict) and str(workflow_disposition.get("kind") or "").strip() == "ignore_obsolete":
             return True
         disposition = metadata.get("failed_task_disposition") if isinstance(metadata, dict) else None
+        completed_refs = completed_external_refs or set()
+        completed_dimensions = completed_review_dimensions or set()
+        external_ref_type = str(task.external_ref_type or "").strip()
+        external_ref_id = str(task.external_ref_id or "").strip()
+        remediation = metadata.get("objective_review_remediation") if isinstance(metadata, dict) else None
+        dimension = str(remediation.get("dimension") or "").strip() if isinstance(remediation, dict) else ""
         return bool(
             task.status == TaskStatus.FAILED
-            and isinstance(disposition, dict)
-            and str(disposition.get("kind") or "").strip() == "waive_obsolete"
+            and (
+                (
+                    isinstance(disposition, dict)
+                    and str(disposition.get("kind") or "").strip() == "waive_obsolete"
+                )
+                or (
+                    external_ref_type == "objective_review"
+                    and (
+                        (external_ref_id and (external_ref_type, external_ref_id) in completed_refs)
+                        or (dimension and dimension in completed_dimensions)
+                    )
+                )
+            )
         )

@@ -453,6 +453,29 @@ def _task_specific_guidance(
         guidance.append(
             "Atomicity-sensitive task: keep the change set narrowly scoped to the intended files and avoid modifying worker/validation/control-plane machinery unless the objective explicitly requires it."
         )
+    if strategy == "sa_watch_direct_repair":
+        sa_watch_context = (
+            external_metadata.get("sa_watch_context")
+            if isinstance(external_metadata.get("sa_watch_context"), dict)
+            else {}
+        )
+        manifest_path = str(sa_watch_context.get("evidence_manifest_path") or "").strip()
+        if manifest_path:
+            guidance.append(
+                f"Read the full sa-watch evidence manifest at {manifest_path} before choosing a repair."
+            )
+        write_probe = (
+            sa_watch_context.get("workspace_write_probe")
+            if isinstance(sa_watch_context.get("workspace_write_probe"), dict)
+            else {}
+        )
+        if write_probe:
+            guidance.append(
+                f"Workspace write probe result is ok={bool(write_probe.get('ok'))}; do not claim sandbox or write blockage unless this recorded probe failed."
+            )
+        guidance.append(
+            "If prior related repairs produced no durable change, choose a different repair class or record a structured incident instead of repeating the same attempt."
+        )
     return guidance
 
 

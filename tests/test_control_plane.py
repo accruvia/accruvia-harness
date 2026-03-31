@@ -44,7 +44,7 @@ from accruvia_harness.services.structural_fix_promotion_service import Structura
 from accruvia_harness.services.task_service import TaskService
 from accruvia_harness.services.workflow_service import WorkflowService
 from accruvia_harness.llm import LLMExecutionResult, LLMRouter
-from accruvia_harness.sa_watch import SAWatchRepairResult, SAWatchService
+from accruvia_harness.sa_watch import SAWatchDecision, SAWatchRepairResult, SAWatchService
 from accruvia_harness.domain import Artifact, ContextRecord, ControlEvent, ControlRecoveryAction, ControlWorkerRun, Objective, ObjectiveStatus, Project, PromotionRecord, PromotionStatus, Run, RunStatus, Task, TaskStatus, new_id
 from accruvia_harness.store import SQLiteHarnessStore
 
@@ -1410,8 +1410,9 @@ class SAWatchServiceTests(unittest.TestCase):
         self.assertTrue(executor.prompts)
         prompt = executor.prompts[0]
         self.assertIn("You are sa-watch", prompt)
-        self.assertIn("Doing nothing is not an option", prompt)
-        self.assertIn("You are the escalation", prompt)
+        self.assertIn("full evidence manifest", prompt)
+        self.assertIn("Do not claim write-permission or sandbox blockage", prompt)
+        self.assertIn("If the same repair class already produced zero durable changes", prompt)
 
     def test_sa_watch_returns_report_for_objective_stall(self) -> None:
         project = Project(id=new_id("project"), name="watch-project", description="watch")
@@ -1665,6 +1666,140 @@ class SAWatchServiceTests(unittest.TestCase):
         self.assertEqual("All timestamps in this packet are local time.", packet["time_context"]["note"])
         self.assertIn(" ", packet["time_context"]["now_local"])
         self.assertNotIn("+00:00", packet["recent_events"][0]["created_at"])
+
+    def test_sa_watch_packet_counts_only_unresolved_failed_tasks(self) -> None:
+        project = Project(id=new_id("project"), name="counts-project", description="watch")
+        self.store.create_project(project)
+        objective = Objective(
+            id=new_id("objective"),
+            project_id=project.id,
+            title="Count objective",
+            summary="count failures correctly",
+            status=ObjectiveStatus.PAUSED,
+        )
+        self.store.create_objective(objective)
+        unresolved = TaskService(self.store).create_task_with_policy(
+            project_id=project.id,
+            objective_id=objective.id,
+            title="Unresolved failed task",
+            objective="Still failed.",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="default",
+        )
+        historical = TaskService(self.store).create_task_with_policy(
+            project_id=project.id,
+            objective_id=objective.id,
+            title="Historical failed task",
+            objective="Superseded failure.",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="default",
+        )
+        self.store.update_task_status(unresolved.id, TaskStatus.FAILED)
+        self.store.update_task_status(historical.id, TaskStatus.FAILED)
+        TaskService(self.store).apply_failed_task_disposition(
+            task_id=historical.id,
+            disposition="waive_obsolete",
+            rationale="Historical only.",
+        )
+        self.store.create_control_event(
+            ControlEvent(
+                id=new_id("control_event"),
+                event_type="objective_stalled",
+                entity_type="objective",
+                entity_id=objective.id,
+                producer="test",
+                payload={"objective_id": objective.id},
+                idempotency_key=new_id("event_key"),
+            )
+        )
+        service = SAWatchService(
+            self.store,
+            self.control_plane,
+            LLMRouter("codex", {"codex": FakeExecutor("counted failures")}),
+            self.workspace_root,
+            interval_seconds=0,
+        )
+
+        packet = service._build_packet()  # type: ignore[attr-defined]
+
+        self.assertEqual(1, packet["task_summary"]["failed_unresolved"])
+        self.assertEqual(1, packet["task_summary"]["failed_historical"])
+        self.assertEqual(1, packet["target_objective_evidence"]["linked_task_counts"]["failed_unresolved"])
+        self.assertEqual(1, packet["target_objective_evidence"]["linked_task_counts"]["failed_historical"])
+        self.assertEqual(1, len(packet["evidence_manifest"]["unresolved_failed_tasks"]))
+
+    def test_sa_watch_requires_durable_repair_before_claiming_recovery(self) -> None:
+        project = Project(id=new_id("project"), name="repair-project", description="watch")
+        self.store.create_project(project)
+        objective = Objective(
+            id=new_id("objective"),
+            project_id=project.id,
+            title="Repair objective",
+            summary="repair needs durable change",
+            status=ObjectiveStatus.PAUSED,
+        )
+        self.store.create_objective(objective)
+        failing_task = TaskService(self.store).create_task_with_policy(
+            project_id=project.id,
+            objective_id=objective.id,
+            title="Repeated failure",
+            objective="Keep failing.",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="default",
+            max_attempts=4,
+        )
+        self.store.upsert_control_worker_run(
+            ControlWorkerRun(id="run_1", task_id=failing_task.id, objective_id=objective.id, status="failed", classification="timeout")
+        )
+        self.store.upsert_control_worker_run(
+            ControlWorkerRun(id="run_2", task_id=failing_task.id, objective_id=objective.id, status="failed", classification="timeout")
+        )
+        captured: dict[str, object] = {}
+
+        def _repair_runner(task: Task, run: Run, repo_root: Path) -> SAWatchRepairResult:
+            captured["metadata"] = task.external_ref_metadata
+            captured["objective"] = task.objective
+            return SAWatchRepairResult(
+                status="validated",
+                run_id=run.id,
+                run_dir=self.workspace_root / "control" / "sa_watch_repairs" / run.id,
+                summary="validated but no durable change",
+                changed_files=[],
+                validation={"compile_check": {"ok": True}, "test_check": {"ok": True}},
+                diagnostics={},
+            )
+
+        service = SAWatchService(
+            self.store,
+            self.control_plane,
+            LLMRouter("codex", {"codex": FakeExecutor("repair")}),
+            self.workspace_root,
+            interval_seconds=0,
+            repair_runner=_repair_runner,
+            post_repair_callback=lambda _task: self.store.update_objective_status(objective.id, ObjectiveStatus.PLANNING),
+        )
+
+        status, effects = service._repair_harness(  # type: ignore[attr-defined]
+            SAWatchDecision(action="repair_harness", reason="timeout"),
+            {"structural_signal": {"kind": "repeated_failure", "task_id": failing_task.id, "objective_id": objective.id}},
+        )
+
+        self.assertEqual("degraded", status["global_state"])
+        self.assertIn({"kind": "noted_concern", "reason": "repair_validated_but_pipeline_still_stalled"}, effects)
+        self.assertIn("evidence_manifest_path", captured["metadata"]["sa_watch_context"])
+        self.assertIn("Read the full evidence manifest first", captured["objective"])
 
     def test_sa_watch_returns_report_even_with_empty_model_response(self) -> None:
         project = Project(id=new_id("project"), name="watch-project", description="watch")

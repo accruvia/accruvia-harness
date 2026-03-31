@@ -32,6 +32,7 @@ from accruvia_harness.domain import (
 )
 from accruvia_harness.control_plane import ControlPlane
 from accruvia_harness.migrations import Migration, apply_migrations
+from accruvia_harness.services.workflow_service import WorkflowService
 from accruvia_harness.store import SQLiteHarnessStore
 
 
@@ -136,6 +137,106 @@ class SQLiteHarnessStoreTests(unittest.TestCase):
 
         self.assertEqual(ObjectiveStatus.RESOLVED, phase)
         self.assertEqual(ObjectiveStatus.RESOLVED, objective_after.status if objective_after else None)
+
+    def test_update_objective_phase_ignores_failed_review_remediation_superseded_by_completed_peer(self) -> None:
+        project = Project(
+            id=new_id("project"),
+            name="phase-project",
+            description="Objective phase persistence",
+            adapter_name="generic",
+        )
+        self.store.create_project(project)
+        objective = Objective(
+            id=new_id("objective"),
+            project_id=project.id,
+            title="Objective phase",
+            summary="A failed duplicate remediation should not keep the objective paused.",
+            status=ObjectiveStatus.PLANNING,
+        )
+        self.store.create_objective(objective)
+        completed_ref_id = f"{objective.id}:review_1:unit_test_coverage"
+        failed_ref_id = f"{objective.id}:review_2:unit_test_coverage"
+        self.store.create_task(
+            Task(
+                id=new_id("task"),
+                project_id=project.id,
+                objective_id=objective.id,
+                title="Completed review remediation",
+                objective="Produce the review packet.",
+                status=TaskStatus.COMPLETED,
+                external_ref_type="objective_review",
+                external_ref_id=completed_ref_id,
+                external_ref_metadata={"objective_review_remediation": {"dimension": "unit_test_coverage"}},
+            )
+        )
+        self.store.create_task(
+            Task(
+                id=new_id("task"),
+                project_id=project.id,
+                objective_id=objective.id,
+                title="Failed duplicate remediation",
+                objective="Retry the same review packet.",
+                status=TaskStatus.FAILED,
+                external_ref_type="objective_review",
+                external_ref_id=failed_ref_id,
+                external_ref_metadata={"objective_review_remediation": {"dimension": "unit_test_coverage"}},
+            )
+        )
+
+        phase = self.store.update_objective_phase(objective.id)
+        objective_after = self.store.get_objective(objective.id)
+
+        self.assertEqual(ObjectiveStatus.RESOLVED, phase)
+        self.assertEqual(ObjectiveStatus.RESOLVED, objective_after.status if objective_after else None)
+
+    def test_review_readiness_ignores_failed_review_remediation_superseded_by_completed_peer(self) -> None:
+        project = Project(
+            id=new_id("project"),
+            name="review-project",
+            description="Review readiness",
+            adapter_name="generic",
+        )
+        self.store.create_project(project)
+        objective = Objective(
+            id=new_id("objective"),
+            project_id=project.id,
+            title="Review readiness",
+            summary="A failed duplicate remediation should not block promotion review.",
+            status=ObjectiveStatus.RESOLVED,
+        )
+        self.store.create_objective(objective)
+        completed_ref_id = f"{objective.id}:review_1:unit_test_coverage"
+        failed_ref_id = f"{objective.id}:review_2:unit_test_coverage"
+        completed = Task(
+            id=new_id("task"),
+            project_id=project.id,
+            objective_id=objective.id,
+            title="Completed review remediation",
+            objective="Produce the review packet.",
+            status=TaskStatus.COMPLETED,
+            external_ref_type="objective_review",
+            external_ref_id=completed_ref_id,
+            external_ref_metadata={"objective_review_remediation": {"dimension": "unit_test_coverage"}},
+        )
+        failed = Task(
+            id=new_id("task"),
+            project_id=project.id,
+            objective_id=objective.id,
+            title="Failed duplicate remediation",
+            objective="Retry the same review packet.",
+            status=TaskStatus.FAILED,
+            external_ref_type="objective_review",
+            external_ref_id=failed_ref_id,
+            external_ref_metadata={"objective_review_remediation": {"dimension": "unit_test_coverage"}},
+        )
+        self.store.create_task(completed)
+        self.store.create_task(failed)
+
+        readiness = WorkflowService(self.store).review_readiness(objective.id)
+
+        self.assertTrue(readiness.ready)
+        failed_check = next(check for check in readiness.checks if check["key"] == "no_unresolved_failed_tasks")
+        self.assertTrue(failed_check["ok"])
 
     def test_concurrent_initialize_serializes_pending_migrations(self) -> None:
         db_path = Path(self.temp_dir.name) / "concurrent-harness.db"

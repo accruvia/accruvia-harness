@@ -25,6 +25,37 @@ def _task_ignored_for_objective_phase(status: TaskStatus, metadata: dict[str, ob
     )
 
 
+def _task_superseded_by_completed_peer(
+    status: TaskStatus,
+    external_ref_type: str | None,
+    external_ref_id: str | None,
+    metadata: dict[str, object],
+    completed_external_refs: set[tuple[str, str]],
+    completed_review_dimensions: set[str],
+) -> bool:
+    if status != TaskStatus.FAILED:
+        return False
+    normalized_type = str(external_ref_type or "").strip()
+    normalized_id = str(external_ref_id or "").strip()
+    if not normalized_type:
+        return False
+    # Objective-review remediation tasks are keyed by review finding. If a later
+    # retry fails after an earlier sibling already completed for the same
+    # finding or review dimension, the failed duplicate should not keep the
+    # whole objective paused.
+    remediation = metadata.get("objective_review_remediation") if isinstance(metadata, dict) else None
+    dimension = ""
+    if isinstance(remediation, dict):
+        dimension = str(remediation.get("dimension") or "").strip()
+    return (
+        normalized_type == "objective_review"
+        and (
+            (normalized_id and (normalized_type, normalized_id) in completed_external_refs)
+            or (dimension and dimension in completed_review_dimensions)
+        )
+    )
+
+
 class ProjectTaskStoreMixin:
     def create_project(self, project: Project) -> None:
         with self.connect() as connection:
@@ -354,23 +385,53 @@ class ProjectTaskStoreMixin:
         """
         with self.connect() as connection:
             rows = connection.execute(
-                "SELECT status, external_ref_metadata_json FROM tasks WHERE objective_id = ?",
+                "SELECT status, external_ref_type, external_ref_id, external_ref_metadata_json FROM tasks WHERE objective_id = ?",
                 (objective_id,),
             ).fetchall()
             if not rows:
                 return None
+            completed_external_refs = {
+                (str(row["external_ref_type"] or "").strip(), str(row["external_ref_id"] or "").strip())
+                for row in rows
+                if TaskStatus(row["status"]) == TaskStatus.COMPLETED
+                and str(row["external_ref_type"] or "").strip()
+                and str(row["external_ref_id"] or "").strip()
+            }
+            completed_review_dimensions = set()
+            for row in rows:
+                if TaskStatus(row["status"]) != TaskStatus.COMPLETED:
+                    continue
+                metadata = json.loads(row["external_ref_metadata_json"]) if row["external_ref_metadata_json"] else {}
+                remediation = metadata.get("objective_review_remediation") if isinstance(metadata, dict) else None
+                if isinstance(remediation, dict):
+                    dimension = str(remediation.get("dimension") or "").strip()
+                    if dimension:
+                        completed_review_dimensions.add(dimension)
             effective_statuses: list[TaskStatus] = []
             for row in rows:
                 status = TaskStatus(row["status"])
                 metadata = json.loads(row["external_ref_metadata_json"]) if row["external_ref_metadata_json"] else {}
-                if _task_ignored_for_objective_phase(status, metadata):
+                if _task_ignored_for_objective_phase(status, metadata) or _task_superseded_by_completed_peer(
+                    status,
+                    row["external_ref_type"],
+                    row["external_ref_id"],
+                    metadata,
+                    completed_external_refs,
+                    completed_review_dimensions,
+                ):
                     continue
                 effective_statuses.append(status)
             if not effective_statuses:
-                # All linked tasks were explicitly ignored for phase purposes
-                # (for example waived obsolete failures), so the objective is
-                # effectively resolved rather than awaiting new work.
-                phase = ObjectiveStatus.RESOLVED
+                ignored_statuses = [TaskStatus(row["status"]) for row in rows]
+                if any(status == TaskStatus.ACTIVE for status in ignored_statuses):
+                    phase = ObjectiveStatus.EXECUTING
+                elif any(status == TaskStatus.PENDING for status in ignored_statuses):
+                    phase = ObjectiveStatus.PLANNING
+                else:
+                    # All linked tasks were explicitly ignored for phase
+                    # purposes and only terminal work remains, so the
+                    # objective is effectively resolved.
+                    phase = ObjectiveStatus.RESOLVED
             elif any(s == TaskStatus.ACTIVE for s in effective_statuses):
                 phase = ObjectiveStatus.EXECUTING
             elif all(s == TaskStatus.COMPLETED for s in effective_statuses):
