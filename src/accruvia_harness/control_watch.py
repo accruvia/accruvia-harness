@@ -147,7 +147,9 @@ class ControlWatchService:
                 affected_task_ids.update(task.id for task in pending_tasks)
 
         stalled_objective_ids: list[str] = []
+        stalled_event_ids = set()
         for event in self.store.list_control_events(event_type="objective_stalled", limit=20):
+            stalled_event_ids.add(event.entity_id)
             objective = objectives.get(event.entity_id)
             if objective is None:
                 continue
@@ -156,13 +158,17 @@ class ControlWatchService:
             if event.created_at < now - OBJECTIVE_STALLED_SIGNAL_WINDOW:
                 continue
             stalled_objective_ids.append(objective.id)
+        for objective in objectives.values():
+            if objective.id in stalled_objective_ids:
+                continue
+            if objective.status.value == "paused":
+                stalled_objective_ids.append(objective.id)
         if stalled_objective_ids:
             matched_rules.append("Stalled objective exists")
             reasons.append(
                 {
                     "rule": "Stalled objective exists",
                     "objective_ids": sorted(dict.fromkeys(stalled_objective_ids)),
-                    "window_seconds": int(OBJECTIVE_STALLED_SIGNAL_WINDOW.total_seconds()),
                 }
             )
 
