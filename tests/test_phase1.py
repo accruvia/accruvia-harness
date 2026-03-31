@@ -207,14 +207,14 @@ class Phase1Tests(unittest.TestCase):
             }
         )
 
-        self.assertIn("supervise", command)
+        self.assertIn("run-harness", command)
         self.assertIn("--project-id", command)
         self.assertIn("--worker-id", command)
         self.assertIn("--heartbeat-project-id", command)
         self.assertIn("--review-check-enabled", command)
 
     def test_supervise_cli_defaults_to_watch_mode(self) -> None:
-        args = build_parser().parse_args(["supervise"])
+        args = build_parser().parse_args(["run-harness"])
 
         self.assertTrue(args.watch)
 

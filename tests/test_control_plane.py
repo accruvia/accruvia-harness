@@ -1112,7 +1112,7 @@ class StructuralFixPromotionServiceTests(unittest.TestCase):
             control_watch=SimpleNamespace(observe=lambda event, api_url=None: None),
         )
         args = Namespace(
-            command="supervise",
+            command="run-harness",
             json=False,
             project_id=None,
             worker_id="harness",
@@ -1164,7 +1164,7 @@ class StructuralFixPromotionServiceTests(unittest.TestCase):
             control_watch=SimpleNamespace(observe=lambda event, api_url=None: None),
         )
         args = Namespace(
-            command="supervise",
+            command="run-harness",
             json=True,
             project_id=None,
             worker_id="harness",
@@ -1212,7 +1212,7 @@ class StructuralFixPromotionServiceTests(unittest.TestCase):
             control_watch=SimpleNamespace(observe=lambda event, api_url=None: None),
         )
         args = Namespace(
-            command="supervise",
+            command="run-harness",
             json=True,
             project_id=None,
             worker_id="harness",
@@ -1263,7 +1263,7 @@ class StructuralFixPromotionServiceTests(unittest.TestCase):
             control_watch=SimpleNamespace(observe=lambda event, api_url=None: None),
         )
         args = Namespace(
-            command="supervise",
+            command="run-harness",
             json=True,
             project_id=None,
             worker_id="harness",

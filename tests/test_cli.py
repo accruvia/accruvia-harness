@@ -292,7 +292,7 @@ class CLITests(unittest.TestCase):
             "-m",
             "accruvia_harness",
             "--json",
-            "supervise",
+            "run-harness",
             "--project-id",
             project["id"],
             "--one-shot",
@@ -509,7 +509,7 @@ class CLITests(unittest.TestCase):
             "--no-bootstrap-heartbeat",
         )["project"]
 
-        result = self.run_cli("supervise", "--project-id", project["id"], "--worker-id", "supervisor-a", "--one-shot")
+        result = self.run_cli("run-harness", "--project-id", project["id"], "--worker-id", "supervisor-a", "--one-shot")
         summary = self.run_cli("summary", "--project-id", project["id"])
 
         self.assertEqual(1, result["heartbeat_count"])
@@ -544,7 +544,7 @@ class CLITests(unittest.TestCase):
             "100",
         )["task"]
 
-        result = self.run_cli("supervise", "--project-id", project["id"], "--worker-id", "supervisor-a", "--one-shot")
+        result = self.run_cli("run-harness", "--project-id", project["id"], "--worker-id", "supervisor-a", "--one-shot")
         report = self.run_cli("ops-report")
 
         self.assertEqual(1, result["heartbeat_count"])
@@ -692,7 +692,7 @@ class CLITests(unittest.TestCase):
             "Prove project-name resolution works",
         )["task"]
         summary = self.run_cli("summary", "--project-id", "accruvia-harness")
-        result = self.run_cli("supervise", "--project-id", "accruvia-harness", "--one-shot")
+        result = self.run_cli("run-harness", "--project-id", "accruvia-harness", "--one-shot")
 
         self.assertEqual(project["id"], task["project_id"])
         self.assertEqual(project["id"], summary["project_id"])
@@ -789,7 +789,7 @@ class CLITests(unittest.TestCase):
             "100",
         )["task"]
 
-        result = self.run_cli("supervise", "--project-id", project["id"], "--worker-id", "supervisor-a", "--one-shot")
+        result = self.run_cli("run-harness", "--project-id", project["id"], "--worker-id", "supervisor-a", "--one-shot")
         summary = self.run_cli("summary", "--project-id", project["id"])
 
         self.assertEqual(2, result["processed_count"])

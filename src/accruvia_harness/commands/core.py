@@ -129,7 +129,7 @@ def _smoke_test_text(payload: dict[str, object]) -> str:
         f"- Events recorded: {len(events)}",
         "",
         "Next step",
-        "- Use `./bin/accruvia-harness supervise` to start the harness.",
+        "- Use `./bin/accruvia-harness run-harness` to start the harness.",
     ]
     return "\n".join(lines)
 
@@ -690,7 +690,7 @@ def _run_setup(args, config: HarnessConfig) -> dict[str, object]:
         "next_steps": [
             "Run `./bin/accruvia-harness doctor` to inspect readiness levels.",
             "Run `./bin/accruvia-harness smoke-test` before enabling autonomous heartbeats.",
-            "Use `./bin/accruvia-harness supervise --one-shot` before long-running watch mode.",
+            "Use `./bin/accruvia-harness run-harness --one-shot` before long-running watch mode.",
         ],
     }
 
@@ -1077,7 +1077,7 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
                 continue
         emit({"killed_supervisors": killed, "count": len(killed)})
         return True
-    if args.command == "supervise":
+    if args.command == "run-harness":
         startup_preflight(config, store)
         ctx.control_plane.turn_on()
         max_idle_cycles = args.max_idle_cycles
@@ -1135,7 +1135,7 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
                     "pid": pid,
                     "worker_id": args.worker_id,
                     "project_id": args.project_id,
-                    "command": "supervise",
+                    "command": "run-harness",
                     "watch": args.watch,
                     "lease_seconds": args.lease_seconds,
                     "idle_sleep_seconds": args.idle_sleep_seconds,

@@ -122,7 +122,7 @@ def build_parser() -> argparse.ArgumentParser:
     process_queue.add_argument("--lease-seconds", type=int, default=300)
 
     supervise = subparsers.add_parser(
-        "supervise",
+        "run-harness",
         help="Advance the queue continuously, watching for new work and scheduled heartbeats until stopped.",
     )
     supervise.add_argument("--project-id")

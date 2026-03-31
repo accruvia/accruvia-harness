@@ -673,7 +673,7 @@ class HarnessUIDataServiceTests(unittest.TestCase):
                     "pid": os.getpid(),
                     "worker_id": "external-supervisor",
                     "project_id": None,
-                    "command": "supervise",
+                    "command": "run-harness",
                     "watch": True,
                 }
             ),
@@ -697,7 +697,7 @@ class HarnessUIDataServiceTests(unittest.TestCase):
                     "pid": os.getpid(),
                     "worker_id": "external-supervisor",
                     "project_id": None,
-                    "command": "supervise",
+                    "command": "run-harness",
                     "watch": True,
                 }
             ),

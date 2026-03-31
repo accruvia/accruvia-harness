@@ -522,7 +522,7 @@ def restart_api_process(config: HarnessConfig, *, force: bool = False) -> dict[s
 
 
 def build_supervise_restart_command(record: dict[str, Any]) -> list[str]:
-    command = [sys.executable, "-m", "accruvia_harness", "supervise"]
+    command = [sys.executable, "-m", "accruvia_harness", "run-harness"]
     project_id = record.get("project_id")
     if project_id:
         command.extend(["--project-id", str(project_id)])
