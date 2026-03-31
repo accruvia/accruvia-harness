@@ -64,23 +64,16 @@ def handle_control_command(args, ctx: CLIContext) -> bool:
         return True
     if args.command == "control-loop":
         startup_preflight(ctx.config, ctx.store)
-        stop_requested = {"value": False, "signal_count": 0}
-
-        def _request_stop(_signum, _frame):
-            stop_requested["signal_count"] += 1
-            stop_requested["value"] = True
-            if stop_requested["signal_count"] >= 2:
-                raise KeyboardInterrupt
 
         previous_int = signal.getsignal(signal.SIGINT)
         previous_term = signal.getsignal(signal.SIGTERM)
-        signal.signal(signal.SIGINT, _request_stop)
-        signal.signal(signal.SIGTERM, _request_stop)
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        signal.signal(signal.SIGTERM, signal.default_int_handler)
         control_plane.resume_lane("watch", reason="control_loop_start")
         iteration = 0
         latest = control_plane.status()
         try:
-            while not stop_requested["value"]:
+            while True:
                 latest = control_watch.run_once(
                     api_url=args.api_url or desired_api_url(ctx.config),
                     stalled_objective_hours=args.stalled_objective_hours,
