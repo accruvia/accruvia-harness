@@ -70,53 +70,104 @@ def handle_control_command(args, ctx: CLIContext) -> bool:
         signal.signal(signal.SIGINT, signal.default_int_handler)
         signal.signal(signal.SIGTERM, signal.default_int_handler)
         control_plane.resume_lane("watch", reason="control_loop_start")
+        print(_control_loop_line("started; resuming watch lane"), flush=True)
         iteration = 0
+        sa_watch_cooldown_until = 0.0
         latest = control_plane.status()
         try:
             while True:
+                print(_control_loop_line(f"--- iteration {iteration + 1} ---"), flush=True)
+                print(_control_loop_line("evaluating stuck state..."), flush=True)
                 latest = control_watch.run_once(
                     api_url=args.api_url or desired_api_url(ctx.config),
                     stalled_objective_hours=args.stalled_objective_hours,
                     freeze_on_stall=not args.no_freeze_on_stall,
                 )
+                matched_rules = list(latest.get("matched_rules") or [])
+                affected_tasks = list(latest.get("affected_task_ids") or [])
+                affected_promotions = list(latest.get("affected_promotion_ids") or [])
                 if bool(latest.get("stuck")):
-                    sa_watch_result = ctx.sa_watch.run_once()
-                    ctx.store.create_control_recovery_action(
-                        ControlRecoveryAction(
-                            id=new_id("recovery"),
-                            action_type="recover",
-                            target_type="system",
-                            target_id="system",
-                            reason="stuck_detected",
-                            result="applied",
+                    print(_control_loop_line(f"STUCK detected; matched rules: {', '.join(matched_rules)}"), flush=True)
+                    for reason in list(latest.get("reasons") or []):
+                        rule = reason.get("rule", "")
+                        detail_parts = []
+                        if reason.get("task_id"):
+                            detail_parts.append(f"task={reason['task_id']}")
+                        if reason.get("objective_ids"):
+                            detail_parts.append(f"objectives={reason['objective_ids']}")
+                        if reason.get("promotion_id"):
+                            detail_parts.append(f"promotion={reason['promotion_id']}")
+                        detail = f" ({', '.join(detail_parts)})" if detail_parts else ""
+                        print(_control_loop_line(f"  reason: {rule}{detail}"), flush=True)
+                    if affected_tasks:
+                        print(_control_loop_line(f"  affected tasks: {', '.join(affected_tasks[:5])}{'...' if len(affected_tasks) > 5 else ''}"), flush=True)
+                    if affected_promotions:
+                        print(_control_loop_line(f"  affected promotions: {', '.join(affected_promotions[:5])}{'...' if len(affected_promotions) > 5 else ''}"), flush=True)
+                    if time.monotonic() < sa_watch_cooldown_until:
+                        remaining = sa_watch_cooldown_until - time.monotonic()
+                        print(_control_loop_line(f"sa-watch cooldown active ({remaining:.0f}s remaining); skipping to prevent re-trigger loop"), flush=True)
+                    else:
+                        print(_control_loop_line("invoking sa-watch for recovery..."), flush=True)
+                        sa_watch_start = time.monotonic()
+                        sa_watch_result = ctx.sa_watch.run_once()
+                        sa_watch_elapsed = time.monotonic() - sa_watch_start
+                        sa_report = str(sa_watch_result.get("report") or "") if isinstance(sa_watch_result, dict) else ""
+                        if sa_report:
+                            print(_control_loop_line(f"sa-watch recovery ({sa_watch_elapsed:.0f}s): {sa_report[:200].replace(chr(10), ' ')}"), flush=True)
+                        else:
+                            print(_control_loop_line(f"sa-watch: no action taken ({sa_watch_elapsed:.0f}s)"), flush=True)
+                        # Cooldown: don't re-invoke sa-watch for at least 2x the interval
+                        # to give fixes time to take effect and prevent infinite loops.
+                        sa_watch_cooldown_until = time.monotonic() + max(args.interval_seconds * 2, 600)
+                        print(_control_loop_line(f"sa-watch cooldown set for {max(args.interval_seconds * 2, 600):.0f}s"), flush=True)
+                        ctx.store.create_control_recovery_action(
+                            ControlRecoveryAction(
+                                id=new_id("recovery"),
+                                action_type="recover",
+                                target_type="system",
+                                target_id="system",
+                                reason="stuck_detected",
+                                result="applied",
+                            )
                         )
-                    )
-                    latest = {
-                        "mode": "recovered",
-                        "stuck_evaluation": latest,
-                        "sa_watch": sa_watch_result,
-                    }
+                        latest = {
+                            "mode": "recovered",
+                            "stuck_evaluation": latest,
+                            "sa_watch": sa_watch_result,
+                        }
+                else:
+                    print(_control_loop_line(f"healthy; no stuck rules matched (supervisors: {latest.get('supervisor_count', '?')})"), flush=True)
+                    # System is healthy — clear any active cooldown.
+                    sa_watch_cooldown_until = 0.0
                 restart_request = read_stack_restart_request(ctx.config)
                 if restart_request is not None:
+                    reason = str(restart_request.get("reason") or "requested")
+                    print(_control_loop_line(f"restart requested: {reason}"), flush=True)
                     ctx.store.create_control_recovery_action(
                         ControlRecoveryAction(
                             id=new_id("recovery"),
                             action_type="restart",
                             target_type="system",
                             target_id="system",
-                            reason=str(restart_request.get("reason") or "requested"),
+                            reason=reason,
                             result="applied",
                         )
                     )
                     clear_stack_restart_request(ctx.config)
+                    print(_control_loop_line("restarting API process..."), flush=True)
                     restart_api_process(ctx.config, force=True)
+                    print(_control_loop_line("restarting harness process..."), flush=True)
                     restart_harness_process(ctx.config, force=True)
                 iteration += 1
                 if args.max_iterations is not None and iteration >= args.max_iterations:
+                    print(_control_loop_line(f"max iterations ({args.max_iterations}) reached; exiting"), flush=True)
                     break
-                time.sleep(max(args.interval_seconds, 0.1))
+                sleep_seconds = max(args.interval_seconds, 0.1)
+                print(_control_loop_line(f"sleeping {sleep_seconds:.0f}s until next check"), flush=True)
+                time.sleep(sleep_seconds)
         finally:
             control_plane.pause_lane("watch", reason="control_loop_exit")
+            print(_control_loop_line("stopped; watch lane paused"), flush=True)
             signal.signal(signal.SIGINT, previous_int)
             signal.signal(signal.SIGTERM, previous_term)
         emit(latest)
@@ -290,6 +341,10 @@ def _pid_alive(pid: int) -> bool:
         return True
     except OSError:
         return False
+
+
+def _control_loop_line(text: str) -> str:
+    return f"{datetime.now().astimezone().strftime('%H:%M:%S')} control-loop {text}"
 
 
 def _sa_watch_line(text: str) -> str:

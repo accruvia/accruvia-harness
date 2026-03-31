@@ -440,8 +440,11 @@ class CLITests(unittest.TestCase):
         codex_script = Path(self.temp_dir.name) / "fake_codex_validation_mode.sh"
         codex_script.write_text(
             "#!/usr/bin/env bash\n"
-            "printf 'lightweight summary\\n'\n"
-            "printf 'value = 1\\n' > lightweight_module.py\n",
+            "git init -q . 2>/dev/null || true\n"
+            "git add -A 2>/dev/null || true\n"
+            "git -c user.email=test@test -c user.name=test commit -q --allow-empty -m init 2>/dev/null || true\n"
+            "printf 'value = 1\\n' > lightweight_module.py\n"
+            "printf 'lightweight summary\\n'\n",
             encoding="utf-8",
         )
         codex_script.chmod(0o755)

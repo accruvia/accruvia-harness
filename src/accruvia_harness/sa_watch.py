@@ -179,7 +179,23 @@ class SAWatchService:
             ],
         }
 
+    def _source_repo_root(self) -> str:
+        import os
+        import subprocess as _sp
+        configured = os.environ.get("ACCRUVIA_SOURCE_REPO_ROOT")
+        if configured:
+            return configured
+        try:
+            return _sp.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                check=True, capture_output=True, text=True,
+            ).stdout.strip()
+        except Exception:
+            return str(self.workspace_root)
+
     def _build_prompt(self, packet: dict[str, object]) -> str:
+        repo_root = self._source_repo_root()
+        db_path = str(self.store.db_path)
         return (
             "You are sa-watch, the recovery authority for the Accruvia harness.\n"
             "You are only invoked when the system is stuck. Doing nothing is not an option.\n\n"
@@ -189,6 +205,19 @@ class SAWatchService:
             "Read whatever you need. Change whatever you need. There are no scope limits.\n\n"
             "Do not observe. Do not escalate to a human. You are the escalation. "
             "Analyze the artifacts and logs, then make changes that address the root cause.\n\n"
+            "CRITICAL REQUIREMENTS:\n"
+            f"- The harness source code is at: {repo_root}\n"
+            f"- The harness database is at: {db_path}\n"
+            "- You are running in a temporary directory. Any code changes you make MUST be\n"
+            f"  made in the source repo at {repo_root}, not in your current working directory.\n"
+            "- After fixing code: run the tests, then commit to the main branch and push.\n"
+            "  Do NOT leave changes uncommitted — they will be lost.\n"
+            "- After fixing database state: verify by querying the database that the stuck\n"
+            "  condition is cleared. The control-loop checks for objective_stalled events\n"
+            "  and paused objectives. If you don't clear the root cause, the control-loop\n"
+            "  will detect stuck again and invoke you in an infinite loop.\n"
+            "- Common database fixes: resolve or delete stale objective_stalled control events,\n"
+            "  un-pause objectives that should be active, reset budget counters.\n\n"
             "Write a report as durable artifacts:\n"
             "1. Diagnosis: what broke and why, tied to specific evidence\n"
             "2. Actions taken: every change you made (code edits, database fixes, state resets, config changes)\n"
