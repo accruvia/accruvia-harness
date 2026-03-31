@@ -962,7 +962,7 @@ class StructuralFixPromotionServiceTests(unittest.TestCase):
             announcements,
         )
 
-    def test_control_loop_always_acts_when_stuck(self) -> None:
+    def test_control_loop_invokes_sa_watch_when_stuck(self) -> None:
         root = Path(self.temp_dir.name)
         config = HarnessConfig.from_env(
             db_path=root / "loop-stuck.db",
@@ -997,17 +997,13 @@ class StructuralFixPromotionServiceTests(unittest.TestCase):
             max_iterations=1,
         )
 
-        # When sa-watch does nothing and no breakers were cleared,
-        # the control-loop must force-restart the harness.
         with (
-            patch.object(ctx.sa_watch, "run_once", return_value={"decision": {"action": "none"}}) as sa_watch_run,
-            patch("accruvia_harness.commands.control.restart_harness_process", return_value={"pid": 2}) as restart_harness,
+            patch.object(ctx.sa_watch, "run_once", return_value={"decision": {"action": "repair_workflow_state", "reason": "cleared stale state"}}) as sa_watch_run,
         ):
             handled = handle_control_command(args, ctx)
 
         self.assertTrue(handled)
         sa_watch_run.assert_called_once()
-        restart_harness.assert_called_once_with(config, force=True)
         actions = ctx.store.list_control_recovery_actions(target_type="system", target_id="system")
         self.assertEqual("recover", actions[0].action_type)
 
@@ -1413,14 +1409,14 @@ class SAWatchServiceTests(unittest.TestCase):
 
         self.assertTrue(executor.prompts)
         prompt = executor.prompts[0]
-        self.assertIn("You are sa-watch for the Accruvia harness control plane.", prompt)
+        self.assertIn("You are sa-watch", prompt)
         self.assertIn('"repair_harness"', prompt)
         self.assertIn('"freeze_system"', prompt)
         self.assertIn('"resume_worker"', prompt)
         self.assertIn('"restart_stack"', prompt)
         self.assertIn('"repair_workflow_state"', prompt)
-        self.assertIn("keep work moving", prompt)
-        self.assertIn("Output JSON only.", prompt)
+        self.assertIn("Doing nothing is not an option", prompt)
+        self.assertIn("You are the escalation", prompt)
 
     def test_sa_watch_records_escalation_for_objective_stall_when_model_declines_intervention(self) -> None:
         project = Project(id=new_id("project"), name="watch-project", description="watch")
