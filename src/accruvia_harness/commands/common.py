@@ -837,6 +837,11 @@ def startup_preflight(config: HarnessConfig, store: SQLiteHarnessStore) -> dict[
         clear_stack_restart_request(config)
         restart_request_cleared = True
 
+    stuck_snapshots_cleared = 0
+    with store.connect() as conn:
+        result = conn.execute("DELETE FROM control_events WHERE event_type = 'stuck_snapshot'")
+        stuck_snapshots_cleared = result.rowcount
+
     return {
         "recovered": recovered,
         "stale_supervisor_records": stale_supervisor_records,
@@ -845,6 +850,7 @@ def startup_preflight(config: HarnessConfig, store: SQLiteHarnessStore) -> dict[
         "stale_sa_watch_runtime_cleared": stale_sa_watch_runtime,
         "stale_sa_watch_launch_cleared": stale_sa_watch_launch,
         "stale_restart_request_cleared": restart_request_cleared,
+        "stuck_snapshots_cleared": stuck_snapshots_cleared,
     }
 
 

@@ -88,19 +88,22 @@ def handle_control_command(args, ctx: CLIContext) -> bool:
                 )
                 if bool(latest.get("stuck")):
                     sa_watch_result = ctx.sa_watch.run_once()
+                    sa_watch_action = str((sa_watch_result.get("decision") or {}).get("action") or "none") if isinstance(sa_watch_result, dict) else "none"
+                    needs_restart = sa_watch_action not in {"none", "record_escalation", "skip", "model_response_unusable"}
                     ctx.store.create_control_recovery_action(
                         ControlRecoveryAction(
                             id=new_id("recovery"),
-                            action_type="restart",
+                            action_type="restart" if needs_restart else "observe",
                             target_type="system",
                             target_id="system",
                             reason="stuck_detected",
-                            result="applied",
+                            result="applied" if needs_restart else "recorded",
                         )
                     )
-                    restart_harness_process(ctx.config, force=True)
+                    if needs_restart:
+                        restart_harness_process(ctx.config, force=True)
                     latest = {
-                        "mode": "recovered",
+                        "mode": "recovered" if needs_restart else "observed",
                         "stuck_evaluation": latest,
                         "sa_watch": sa_watch_result,
                     }
