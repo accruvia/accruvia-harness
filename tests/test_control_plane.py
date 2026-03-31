@@ -962,55 +962,7 @@ class StructuralFixPromotionServiceTests(unittest.TestCase):
             announcements,
         )
 
-    def test_control_loop_clears_stale_restart_request_during_startup_preflight(self) -> None:
-        root = Path(self.temp_dir.name)
-        config = HarnessConfig.from_env(
-            db_path=root / "loop.db",
-            workspace_root=root / "loop-workspace",
-            log_path=root / "loop.log",
-            config_file=root / "loop-config.json",
-        )
-        ctx = build_context(config)
-        ctx.control_plane.turn_on()
-        ctx.store.create_control_recovery_action(
-            ControlRecoveryAction(
-                id=new_id("recovery"),
-                action_type="observe",
-                target_type="system",
-                target_id="system",
-                reason="baseline",
-                result="recorded",
-            )
-        )
-        from accruvia_harness.commands.common import record_stack_restart_request
-
-        record_stack_restart_request(config, {"reason": "sa_structural_fix_completed", "task_id": "task_123"})
-
-        args = Namespace(
-            command="control-loop",
-            api_url=None,
-            stalled_objective_hours=6.0,
-            no_freeze_on_stall=False,
-            interval_seconds=0.1,
-            max_iterations=1,
-        )
-
-        with (
-            patch("accruvia_harness.commands.control.restart_api_process", return_value={"pid": 1}) as restart_api,
-            patch("accruvia_harness.commands.control.restart_harness_process", return_value={"pid": 2}) as restart_harness,
-            patch("accruvia_harness.commands.control.restart_control_loop_process", return_value={"pid": 3}) as restart_loop,
-        ):
-            handled = handle_control_command(args, ctx)
-
-        self.assertTrue(handled)
-        restart_api.assert_not_called()
-        restart_harness.assert_not_called()
-        restart_loop.assert_not_called()
-        self.assertIsNone(read_stack_restart_request(config))
-        actions = ctx.store.list_control_recovery_actions(target_type="system", target_id="system")
-        self.assertEqual("observe", actions[0].action_type)
-
-    def test_control_loop_runs_sa_watch_and_restarts_when_stuck_detected(self) -> None:
+    def test_control_loop_runs_sa_watch_and_restarts_harness_when_stuck(self) -> None:
         root = Path(self.temp_dir.name)
         config = HarnessConfig.from_env(
             db_path=root / "loop-stuck.db",
@@ -1048,14 +1000,12 @@ class StructuralFixPromotionServiceTests(unittest.TestCase):
         with (
             patch.object(ctx.sa_watch, "run_once", return_value={"decision": {"action": "repair_workflow_state"}}) as sa_watch_run,
             patch("accruvia_harness.commands.control.restart_harness_process", return_value={"pid": 2}) as restart_harness,
-            patch("accruvia_harness.commands.control.restart_control_loop_process", return_value={"pid": 3}) as restart_loop,
         ):
             handled = handle_control_command(args, ctx)
 
         self.assertTrue(handled)
         sa_watch_run.assert_called_once()
         restart_harness.assert_called_once_with(config, force=True)
-        restart_loop.assert_called_once()
 
     def test_control_loop_runs_startup_preflight_before_evaluating_stuck(self) -> None:
         root = Path(self.temp_dir.name)
@@ -1337,7 +1287,6 @@ class ControlPlaneSplitTests(unittest.TestCase):
         with (
             patch.object(ctx.sa_watch, "run_once", return_value={"decision": {"action": "none"}}) as sa_watch_run,
             patch("accruvia_harness.commands.control.restart_harness_process", return_value={"pid": 2}),
-            patch("accruvia_harness.commands.control.restart_control_loop_process", return_value={"pid": 3}),
         ):
             handled = handle_control_command(args, ctx)
         self.assertTrue(handled)
@@ -1429,7 +1378,6 @@ class ControlPlaneSplitTests(unittest.TestCase):
         with (
             patch.object(ctx.sa_watch, "run_once", side_effect=_sa_watch_run_once),
             patch("accruvia_harness.commands.control.restart_harness_process", return_value={"pid": 2}),
-            patch("accruvia_harness.commands.control.restart_control_loop_process", return_value={"pid": 3}),
         ):
             handle_control_command(args, ctx)
         self.assertEqual(1, sa_watch_call_count)

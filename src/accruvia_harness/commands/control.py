@@ -17,7 +17,6 @@ from .common import (
     emit,
     read_stack_restart_request,
     restart_api_process,
-    restart_control_loop_process,
     restart_harness_process,
     start_sa_watch_process,
     startup_preflight,
@@ -100,14 +99,11 @@ def handle_control_command(args, ctx: CLIContext) -> bool:
                         )
                     )
                     restart_harness_process(ctx.config, force=True)
-                    restart_control_loop_process(ctx.config, args)
                     latest = {
-                        "mode": "restarting",
+                        "mode": "recovered",
                         "stuck_evaluation": latest,
                         "sa_watch": sa_watch_result,
                     }
-                    stop_requested["value"] = True
-                    break
                 restart_request = read_stack_restart_request(ctx.config)
                 if restart_request is not None:
                     ctx.store.create_control_recovery_action(
@@ -123,10 +119,6 @@ def handle_control_command(args, ctx: CLIContext) -> bool:
                     clear_stack_restart_request(ctx.config)
                     restart_api_process(ctx.config, force=True)
                     restart_harness_process(ctx.config, force=True)
-                    restart_control_loop_process(ctx.config, args)
-                    latest = control_plane.status()
-                    stop_requested["value"] = True
-                    break
                 iteration += 1
                 if args.max_iterations is not None and iteration >= args.max_iterations:
                     break
