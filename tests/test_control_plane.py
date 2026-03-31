@@ -962,7 +962,7 @@ class StructuralFixPromotionServiceTests(unittest.TestCase):
             announcements,
         )
 
-    def test_control_loop_runs_sa_watch_and_restarts_harness_when_stuck(self) -> None:
+    def test_control_loop_always_acts_when_stuck(self) -> None:
         root = Path(self.temp_dir.name)
         config = HarnessConfig.from_env(
             db_path=root / "loop-stuck.db",
@@ -997,8 +997,10 @@ class StructuralFixPromotionServiceTests(unittest.TestCase):
             max_iterations=1,
         )
 
+        # When sa-watch does nothing and no breakers were cleared,
+        # the control-loop must force-restart the harness.
         with (
-            patch.object(ctx.sa_watch, "run_once", return_value={"decision": {"action": "repair_workflow_state"}}) as sa_watch_run,
+            patch.object(ctx.sa_watch, "run_once", return_value={"decision": {"action": "none"}}) as sa_watch_run,
             patch("accruvia_harness.commands.control.restart_harness_process", return_value={"pid": 2}) as restart_harness,
         ):
             handled = handle_control_command(args, ctx)
@@ -1006,6 +1008,8 @@ class StructuralFixPromotionServiceTests(unittest.TestCase):
         self.assertTrue(handled)
         sa_watch_run.assert_called_once()
         restart_harness.assert_called_once_with(config, force=True)
+        actions = ctx.store.list_control_recovery_actions(target_type="system", target_id="system")
+        self.assertEqual("recover", actions[0].action_type)
 
     def test_control_loop_runs_startup_preflight_before_evaluating_stuck(self) -> None:
         root = Path(self.temp_dir.name)

@@ -80,27 +80,39 @@ def handle_control_command(args, ctx: CLIContext) -> bool:
                     freeze_on_stall=not args.no_freeze_on_stall,
                 )
                 if bool(latest.get("stuck")):
+                    # 1. Deterministic recovery: clear all circuit breakers.
                     resumed_objectives = _resume_stalled_objectives(ctx, latest)
+                    cleared_breakers = _clear_circuit_breakers(ctx)
+
+                    # 2. Let sa-watch analyze and act.
                     sa_watch_result = ctx.sa_watch.run_once()
                     sa_watch_action = str((sa_watch_result.get("decision") or {}).get("action") or "none") if isinstance(sa_watch_result, dict) else "none"
-                    needs_restart = sa_watch_action not in {"none", "record_escalation", "skip", "model_response_unusable"}
+
+                    # 3. If sa-watch did nothing but we cleared breakers, that counts as recovery.
+                    #    If nobody did anything, force a harness restart — stuck must never be ignored.
+                    took_action = sa_watch_action not in {"none", "record_escalation", "skip", "model_response_unusable"}
+                    breakers_cleared = bool(resumed_objectives) or bool(cleared_breakers)
+                    if not took_action and not breakers_cleared:
+                        # Nobody acted. Force restart the harness to break the stall.
+                        restart_harness_process(ctx.config, force=True)
+                        took_action = True
+
                     ctx.store.create_control_recovery_action(
                         ControlRecoveryAction(
                             id=new_id("recovery"),
-                            action_type="restart" if needs_restart else ("resume" if resumed_objectives else "observe"),
+                            action_type="recover",
                             target_type="system",
                             target_id="system",
                             reason="stuck_detected",
-                            result="applied" if (needs_restart or resumed_objectives) else "recorded",
+                            result="applied",
                         )
                     )
-                    if needs_restart:
-                        restart_harness_process(ctx.config, force=True)
                     latest = {
-                        "mode": "recovered" if needs_restart else ("resumed" if resumed_objectives else "observed"),
+                        "mode": "recovered",
                         "stuck_evaluation": latest,
                         "sa_watch": sa_watch_result,
                         "resumed_objectives": resumed_objectives,
+                        "cleared_breakers": cleared_breakers,
                     }
                 restart_request = read_stack_restart_request(ctx.config)
                 if restart_request is not None:
@@ -311,6 +323,30 @@ def _resume_stalled_objectives(ctx: CLIContext, stuck_evaluation: dict) -> list[
                 resumed.append(objective.id)
 
     return resumed
+
+
+def _clear_circuit_breakers(ctx: CLIContext) -> list[str]:
+    """Clear all circuit-breaker events that block work: budget exhaustion,
+    unknown classification escalations, cooldowns.  Returns list of cleared
+    breaker descriptions."""
+    cleared: list[str] = []
+
+    # Clear all human_escalation_required events — the control-loop owns recovery now.
+    with ctx.store.connect() as conn:
+        result = conn.execute("DELETE FROM control_events WHERE event_type = 'human_escalation_required'")
+        if result.rowcount > 0:
+            cleared.append(f"escalation_events:{result.rowcount}")
+
+    # Exit any lane cooldowns.
+    for lane in ctx.store.list_control_lane_states():
+        if lane.state.value == "cooldown":
+            ctx.control_plane.resume_lane(lane.lane_name, reason="control_loop_circuit_breaker_clear")
+            cleared.append(f"cooldown:{lane.lane_name}")
+        elif lane.state.value == "paused":
+            ctx.control_plane.resume_lane(lane.lane_name, reason="control_loop_circuit_breaker_clear")
+            cleared.append(f"paused_lane:{lane.lane_name}")
+
+    return cleared
 
 
 def _sa_watch_is_active(ctx: CLIContext) -> bool:
