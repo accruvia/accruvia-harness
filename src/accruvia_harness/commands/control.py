@@ -238,26 +238,23 @@ def handle_control_command(args, ctx: CLIContext) -> bool:
                     previous_kpis = current_kpis
                 else:
                     result = ctx.sa_watch.run_once()
-                    decision = result.get("decision") if isinstance(result, dict) else {}
-                    effects = list(result.get("effects") or []) if isinstance(result, dict) else []
+                    report = str(result.get("report") or "") if isinstance(result, dict) else ""
                     update_sa_watch_runtime_state(
                         ctx.config,
                         interval_seconds=args.interval_seconds,
                         mode="active",
-                        last_decision=str((decision or {}).get("action") or "unknown"),
-                        last_reason=str((decision or {}).get("reason") or ""),
+                        last_decision="recover" if report else "skip",
+                        last_reason=report[:200] if report else "",
                     )
                     latest = {
                         "mode": "active",
                         "result": result,
                     }
                     print(_sa_watch_result_line(result), flush=True)
-                    changed = _sa_watch_changed_anything(result)
+                    changed = bool(report)
                     current_kpis = _sa_watch_kpis(ctx)
                     print(_sa_watch_workflow_state_line(current_kpis), flush=True)
                     print(_sa_watch_kpi_line(current_kpis, previous_kpis, changed=changed), flush=True)
-                    for effect in effects:
-                        print(_sa_watch_effect_line(effect), flush=True)
                     previous_kpis = current_kpis
                     next_check_at = time.monotonic() + max(args.interval_seconds, 0.1)
                 iteration += 1
@@ -300,13 +297,13 @@ def _sa_watch_line(text: str) -> str:
 
 
 def _sa_watch_result_line(result: dict[str, object]) -> str:
-    decision = dict(result.get("decision") or {})
+    report = str(result.get("report") or "")
     packet = dict(result.get("packet") or {})
     signals = list(packet.get("continuity_signals") or [])
     signal_kinds = ", ".join(str(signal.get("kind") or "unknown") for signal in signals[:3]) or "none"
-    action = _sa_watch_action_label(str(decision.get("action") or "unknown"))
-    reason = _sa_watch_reason_text(str(decision.get("reason") or ""))
-    return _sa_watch_line(f"decision: {action}; signals: {signal_kinds}; reason: {reason}")
+    action = "recover" if report else "skip"
+    summary = report[:120].replace("\n", " ") if report else "no action needed"
+    return _sa_watch_line(f"sa-watch: {action}; signals: {signal_kinds}; summary: {summary}")
 
 
 def _sa_watch_kpis(ctx: CLIContext) -> dict[str, int]:
@@ -397,15 +394,7 @@ def _sa_watch_kpi_line(
 
 
 def _sa_watch_changed_anything(result: dict[str, object]) -> bool:
-    effects = list(result.get("effects") or [])
-    change_kinds = {
-        "lane_resumed",
-        "stack_restart_requested",
-        "system_frozen",
-        "repair_validated",
-        "repair_failed",
-    }
-    return any(str(effect.get("kind") or "") in change_kinds for effect in effects)
+    return bool(result.get("report"))
 
 
 def _sa_watch_delta(

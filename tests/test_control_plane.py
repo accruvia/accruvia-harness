@@ -998,7 +998,7 @@ class StructuralFixPromotionServiceTests(unittest.TestCase):
         )
 
         with (
-            patch.object(ctx.sa_watch, "run_once", return_value={"decision": {"action": "repair_workflow_state", "reason": "cleared stale state"}}) as sa_watch_run,
+            patch.object(ctx.sa_watch, "run_once", return_value={"report": "cleared stale state"}) as sa_watch_run,
         ):
             handled = handle_control_command(args, ctx)
 
@@ -1285,7 +1285,7 @@ class ControlPlaneSplitTests(unittest.TestCase):
             max_iterations=1,
         )
         with (
-            patch.object(ctx.sa_watch, "run_once", return_value={"decision": {"action": "none"}}) as sa_watch_run,
+            patch.object(ctx.sa_watch, "run_once", return_value={"report": "no action needed"}) as sa_watch_run,
             patch("accruvia_harness.commands.control.restart_harness_process", return_value={"pid": 2}),
         ):
             handled = handle_control_command(args, ctx)
@@ -1373,7 +1373,7 @@ class ControlPlaneSplitTests(unittest.TestCase):
         def _sa_watch_run_once():
             nonlocal sa_watch_call_count
             sa_watch_call_count += 1
-            return {"decision": {"action": "none"}}
+            return {"report": "no action needed"}
 
         with (
             patch.object(ctx.sa_watch, "run_once", side_effect=_sa_watch_run_once),
@@ -1395,7 +1395,7 @@ class SAWatchServiceTests(unittest.TestCase):
         self.control_plane.turn_on()
 
     def test_prompt_includes_fixed_action_contract(self) -> None:
-        executor = FakeExecutor('{"action":"record_escalation","reason":"Ambiguous repeated timeout.","confidence":0.8,"target_lane":"worker","escalate":true}')
+        executor = FakeExecutor("Diagnosed timeout. Restarted the worker process and verified forward progress resumed.")
         service = SAWatchService(
             self.store,
             self.control_plane,
@@ -1410,15 +1410,10 @@ class SAWatchServiceTests(unittest.TestCase):
         self.assertTrue(executor.prompts)
         prompt = executor.prompts[0]
         self.assertIn("You are sa-watch", prompt)
-        self.assertIn('"repair_harness"', prompt)
-        self.assertIn('"freeze_system"', prompt)
-        self.assertIn('"resume_worker"', prompt)
-        self.assertIn('"restart_stack"', prompt)
-        self.assertIn('"repair_workflow_state"', prompt)
         self.assertIn("Doing nothing is not an option", prompt)
         self.assertIn("You are the escalation", prompt)
 
-    def test_sa_watch_records_escalation_for_objective_stall_when_model_declines_intervention(self) -> None:
+    def test_sa_watch_returns_report_for_objective_stall(self) -> None:
         project = Project(id=new_id("project"), name="watch-project", description="watch")
         self.store.create_project(project)
         objective = Objective(
@@ -1447,33 +1442,21 @@ class SAWatchServiceTests(unittest.TestCase):
                 "codex",
                 {
                     "codex": FakeExecutor(
-                        '{"action":"record_escalation","reason":"Repeated timeout after deterministic retries exhausted.","confidence":0.91,"target_lane":"worker","escalate":true}'
+                        "Diagnosed repeated timeout after deterministic retries exhausted. Restarted worker lane."
                     )
                 },
             ),
             self.workspace_root,
             interval_seconds=0,
-            repair_runner=lambda task, run, repo_root: SAWatchRepairResult(
-                status="failed",
-                run_id=run.id,
-                run_dir=self.workspace_root / "control" / "sa_watch_repairs" / run.id,
-                summary="not needed for signal preference test",
-                changed_files=[],
-                validation={},
-                diagnostics={},
-            ),
         )
         self.control_plane.mark_degraded("timeout")
 
         result = service.observe({"type": "sleeping"})
 
         self.assertIsNotNone(result)
-        actions = self.store.list_control_recovery_actions()
-        self.assertEqual("escalate", actions[0].action_type)
-        created = [task for task in self.store.list_tasks(project.id) if task.external_ref_type == "sa_watch"]
-        self.assertEqual(0, len(created))
+        self.assertTrue(len(result["report"]) > 0)
 
-    def test_sa_watch_records_escalation_when_model_only_escalates_repeated_failure(self) -> None:
+    def test_sa_watch_returns_report_for_repeated_failure(self) -> None:
         project = Project(id=new_id("project"), name="watch-project", description="watch")
         self.store.create_project(project)
         objective = Objective(
@@ -1508,9 +1491,7 @@ class SAWatchServiceTests(unittest.TestCase):
                 "codex",
                 {
                     "codex": FakeExecutor(
-                        '{"action":"record_escalation","reason":"Repeated timeout but structural cause not confidently proven.","confidence":0.61,"target_lane":"worker","target_task_id":"'
-                        + failing_task.id
-                        + '","escalate":true}'
+                        "Repeated timeout but structural cause not confidently proven. Resumed worker lane to retry."
                     )
                 },
             ),
@@ -1521,10 +1502,9 @@ class SAWatchServiceTests(unittest.TestCase):
         result = service.observe({"type": "sleeping"})
 
         self.assertIsNotNone(result)
-        created = self.store.get_task_by_external_ref("sa_watch", f"{failing_task.id}:timeout")
-        self.assertIsNone(created)
+        self.assertTrue(len(result["report"]) > 0)
         actions = self.store.list_control_recovery_actions()
-        self.assertEqual("escalate", actions[0].action_type)
+        self.assertEqual("recover", actions[0].action_type)
 
     def test_sa_watch_ignores_repeated_artifact_contract_failures(self) -> None:
         project = Project(id=new_id("project"), name="watch-project", description="watch")
@@ -1675,7 +1655,7 @@ class SAWatchServiceTests(unittest.TestCase):
         service = SAWatchService(
             self.store,
             self.control_plane,
-            LLMRouter("codex", {"codex": FakeExecutor('{"action":"none","reason":"noop","confidence":0.5,"target_lane":null,"target_task_id":null,"task_title":null,"task_objective":null,"escalate":false}')}),
+            LLMRouter("codex", {"codex": FakeExecutor("No action needed. System is healthy.")}),
             self.workspace_root,
             interval_seconds=0,
         )
@@ -1686,7 +1666,7 @@ class SAWatchServiceTests(unittest.TestCase):
         self.assertIn(" ", packet["time_context"]["now_local"])
         self.assertNotIn("+00:00", packet["recent_events"][0]["created_at"])
 
-    def test_sa_watch_keeps_lane_paused_when_model_response_is_unusable(self) -> None:
+    def test_sa_watch_returns_report_even_with_empty_model_response(self) -> None:
         project = Project(id=new_id("project"), name="watch-project", description="watch")
         self.store.create_project(project)
         objective = Objective(
@@ -1717,7 +1697,7 @@ class SAWatchServiceTests(unittest.TestCase):
                 "codex",
                 {
                     "codex": FakeExecutor(
-                        '{"action":"record_escalation","reason":"","confidence":0.0,"target_lane":"worker","escalate":false}'
+                        "No actionable diagnosis found. System remains in current state."
                     )
                 },
             ),
@@ -1728,13 +1708,10 @@ class SAWatchServiceTests(unittest.TestCase):
         result = service.observe({"type": "sleeping"})
 
         self.assertIsNotNone(result)
-        self.assertEqual("model_response_unusable", result["decision"]["action"])
-        worker_lane = self.store.get_control_lane_state("worker")
-        self.assertEqual("paused", worker_lane.state.value if worker_lane else None)
-        actions = self.store.list_control_recovery_actions(target_type="system", target_id="system")
-        self.assertEqual("model_response_unusable", actions[0].action_type)
+        self.assertIn("report", result)
+        self.assertTrue(len(result["report"]) > 0)
 
-    def test_sa_watch_uses_model_action_without_structural_task_short_circuit(self) -> None:
+    def test_sa_watch_returns_report_with_active_structural_task(self) -> None:
         project = Project(id=new_id("project"), name="watch-project", description="watch")
         self.store.create_project(project)
         objective = Objective(
@@ -1765,7 +1742,7 @@ class SAWatchServiceTests(unittest.TestCase):
                 "codex",
                 {
                     "codex": FakeExecutor(
-                        '{"action":"restart_stack","reason":"bad decision that should not be used","confidence":1.0,"target_lane":"worker","escalate":false}'
+                        "Stack is wedged. Restarted harness process and verified forward progress resumed."
                     )
                 },
             ),
@@ -1776,8 +1753,8 @@ class SAWatchServiceTests(unittest.TestCase):
         result = service.observe({"type": "sleeping"})
 
         self.assertIsNotNone(result)
-        self.assertEqual("restart_stack", result["decision"]["action"])
-        self.assertEqual("stack_restart_requested", result["effects"][0]["kind"])
+        self.assertIn("report", result)
+        self.assertTrue(len(result["report"]) > 0)
 
     def test_sa_watch_loop_prints_generic_observation(self) -> None:
         root = Path(self.temp_dir.name)
@@ -1811,9 +1788,9 @@ class SAWatchServiceTests(unittest.TestCase):
             control_watch=active_control_watch,
             sa_watch=SimpleNamespace(
                 run_once=lambda: {
-                    "decision": {"action": "none", "reason": "structural_fix_in_progress"},
+                    "report": "Structural fix in progress. Monitoring for completion.",
+                    "status": {},
                     "packet": {"continuity_signals": []},
-                    "effects": [{"kind": "observed", "reason": "structural_fix_in_progress"}],
                 }
             ),
         )
@@ -1827,10 +1804,10 @@ class SAWatchServiceTests(unittest.TestCase):
 
         self.assertTrue(handled)
         printed = "\n".join(call.args[0] for call in print_mock.call_args_list if call.args)
-        self.assertIn("decision: observe only; signals: none; reason: structural_fix_in_progress", printed)
-        self.assertIn("observed only; no code/workflow change made; reason=structural_fix_in_progress", printed)
+        self.assertIn("sa-watch: recover", printed)
+        self.assertIn("Structural fix in progress", printed)
 
-    def test_sa_watch_records_failed_direct_repair_without_resuming_worker_lane(self) -> None:
+    def test_sa_watch_returns_report_for_repeated_timeout(self) -> None:
         project = Project(id=new_id("project"), name="watch-project", description="watch")
         self.store.create_project(project)
         objective = Objective(
@@ -1869,52 +1846,21 @@ class SAWatchServiceTests(unittest.TestCase):
                 "codex",
                 {
                     "codex": FakeExecutor(
-                        json.dumps(
-                            {
-                                "action": "repair_harness",
-                                "reason": "Repeated timeout indicates the validation path needs a structural fix.",
-                                "confidence": 0.92,
-                                "target_lane": "worker",
-                                "target_task_id": failing_task.id,
-                                "task_title": "Prevent recurring validation timeout in worker path",
-                                "task_objective": "Make a real code change that prevents the repeated validation timeout and prove it with tests.",
-                                "escalate": False,
-                            }
-                        )
+                        "Repeated timeout indicates the validation path needs a structural fix. Applied code change to control_runtime.py."
                     )
                 },
             ),
             self.workspace_root,
             interval_seconds=0,
-            repair_runner=lambda task, run, repo_root: SAWatchRepairResult(
-                status="failed",
-                run_id=run.id,
-                run_dir=self.workspace_root / "control" / "sa_watch_repairs" / run.id,
-                summary="validation still failing",
-                changed_files=["src/accruvia_harness/control_runtime.py"],
-                validation={"compile_check": {"ok": False}, "test_check": {"ok": False}},
-                diagnostics={"failure_message": "validation still failing"},
-            ),
         )
 
         result = service.observe({"type": "sleeping"})
 
         self.assertIsNotNone(result)
-        lane = self.store.get_control_lane_state("worker")
-        self.assertEqual("paused", lane.state.value if lane else None)
-        status = self.store.get_control_system_state()
-        self.assertEqual("degraded", status.global_state.value)
-        self.assertIsNone(self.store.get_task_by_external_ref("sa_watch", f"{failing_task.id}:timeout"))
-        repair_records = self.store.list_context_records(objective_id=objective.id, record_type="sa_watch_repair")
-        self.assertEqual(1, len(repair_records))
-        repair_tasks = [task for task in self.store.list_tasks(project.id) if task.strategy == "sa_watch_direct_repair"]
-        self.assertEqual(1, len(repair_tasks))
-        self.assertEqual(TaskStatus.FAILED, repair_tasks[0].status)
-        repair_runs = self.store.list_runs(repair_tasks[0].id)
-        self.assertEqual(1, len(repair_runs))
-        self.assertEqual(RunStatus.FAILED, repair_runs[0].status)
+        self.assertIn("report", result)
+        self.assertTrue(len(result["report"]) > 0)
 
-    def test_sa_watch_can_repair_obsolete_workflow_state_directly(self) -> None:
+    def test_sa_watch_returns_report_for_obsolete_workflow_state(self) -> None:
         project = Project(id=new_id("project"), name="watch-project", description="watch")
         self.store.create_project(project)
         objective = Objective(
@@ -1939,7 +1885,6 @@ class SAWatchServiceTests(unittest.TestCase):
             max_attempts=1,
         )
         self.store.update_task_status(legacy_task.id, TaskStatus.FAILED)
-        restarted: list[dict[str, object]] = []
         service = SAWatchService(
             self.store,
             self.control_plane,
@@ -1947,40 +1892,22 @@ class SAWatchServiceTests(unittest.TestCase):
                 "codex",
                 {
                     "codex": FakeExecutor(
-                        json.dumps(
-                            {
-                                "action": "repair_workflow_state",
-                                "reason": "The objective is pinned by obsolete legacy sa-watch recovery state.",
-                                "confidence": 0.93,
-                                "target_lane": "worker",
-                                "escalate": False,
-                            }
-                        )
+                        "The objective is pinned by obsolete legacy sa-watch recovery state. Cleared stale tasks and reset objective to PLANNING."
                     )
                 },
             ),
             self.workspace_root,
             interval_seconds=0,
-            restart_stack=lambda payload: restarted.append(payload) or self.control_plane.status(),
         )
         self.control_plane.mark_degraded("objective_stalled")
 
         result = service.observe({"type": "sleeping"})
 
         self.assertIsNotNone(result)
-        self.assertEqual("repair_workflow_state", result["decision"]["action"])
-        updated_task = self.store.get_task(legacy_task.id)
-        self.assertIsNotNone(updated_task)
-        metadata = updated_task.external_ref_metadata if updated_task is not None else {}
-        self.assertEqual("ignore_obsolete", metadata["workflow_state_disposition"]["kind"])
-        self.assertEqual("waive_obsolete", metadata["failed_task_disposition"]["kind"])
-        objective_after = self.store.get_objective(objective.id)
-        self.assertEqual(ObjectiveStatus.PLANNING, objective_after.status if objective_after else None)
-        repair_records = self.store.list_context_records(objective_id=objective.id, record_type="sa_watch_workflow_state_repair")
-        self.assertEqual(1, len(repair_records))
-        self.assertEqual(1, len(restarted))
+        self.assertIn("report", result)
+        self.assertTrue(len(result["report"]) > 0)
 
-    def test_sa_watch_can_resume_worker_lane_to_restore_continuity(self) -> None:
+    def test_sa_watch_returns_report_for_paused_worker(self) -> None:
         project = Project(id=new_id("project"), name="resume-project", description="watch")
         self.store.create_project(project)
         objective = Objective(
@@ -2011,15 +1938,7 @@ class SAWatchServiceTests(unittest.TestCase):
                 "codex",
                 {
                     "codex": FakeExecutor(
-                        json.dumps(
-                            {
-                                "action": "resume_worker",
-                                "reason": "Worker is paused even though runnable work is queued and no structural repair is active.",
-                                "confidence": 0.89,
-                                "target_lane": "worker",
-                                "escalate": False,
-                            }
-                        )
+                        "Worker is paused even though runnable work is queued. Resumed worker lane and cleared degraded state."
                     )
                 },
             ),
@@ -2030,15 +1949,10 @@ class SAWatchServiceTests(unittest.TestCase):
         result = service.observe({"type": "sleeping"})
 
         self.assertIsNotNone(result)
-        lane = self.store.get_control_lane_state("worker")
-        self.assertEqual("running", lane.state.value if lane else None)
-        status = self.store.get_control_system_state()
-        self.assertEqual("healthy", status.global_state.value)
-        actions = self.store.list_control_recovery_actions(target_type="lane", target_id="worker")
-        self.assertEqual("resume", actions[0].action_type)
+        self.assertIn("report", result)
+        self.assertTrue(len(result["report"]) > 0)
 
-    def test_sa_watch_can_request_stack_restart(self) -> None:
-        restarted: list[dict[str, object]] = []
+    def test_sa_watch_returns_report_for_wedged_workflow(self) -> None:
         service = SAWatchService(
             self.store,
             self.control_plane,
@@ -2046,30 +1960,19 @@ class SAWatchServiceTests(unittest.TestCase):
                 "codex",
                 {
                     "codex": FakeExecutor(
-                        json.dumps(
-                            {
-                                "action": "restart_stack",
-                                "reason": "The workflow appears wedged and should be restarted onto the latest code.",
-                                "confidence": 0.82,
-                                "target_lane": "harness",
-                                "escalate": False,
-                            }
-                        )
+                        "The workflow appears wedged. Restarted onto the latest code and verified forward progress."
                     )
                 },
             ),
             self.workspace_root,
             interval_seconds=0,
-            restart_stack=lambda payload: restarted.append(payload) or self.control_plane.status(),
         )
 
         result = service.observe({"type": "sleeping"})
 
         self.assertIsNotNone(result)
-        self.assertEqual(1, len(restarted))
-        self.assertEqual("sa_watch_requested_restart", restarted[0]["reason"])
-        actions = self.store.list_control_recovery_actions(target_type="system", target_id="system")
-        self.assertEqual("restart", actions[0].action_type)
+        self.assertIn("report", result)
+        self.assertTrue(len(result["report"]) > 0)
 
     def test_sa_watch_loop_idles_when_control_plane_or_harness_inactive(self) -> None:
         root = Path(self.temp_dir.name)
@@ -2095,7 +1998,7 @@ class SAWatchServiceTests(unittest.TestCase):
             store=inactive_store,
             control_plane=inactive_control_plane,
             control_watch=inactive_control_watch,
-            sa_watch=SimpleNamespace(run_once=lambda: {"decision": {"action": "none", "reason": "noop"}}),
+            sa_watch=SimpleNamespace(run_once=lambda: {"report": "no action needed"}),
         )
         args = Namespace(command="sa-watch-loop", interval_seconds=0.0, max_iterations=1)
 
@@ -2132,7 +2035,7 @@ class SAWatchServiceTests(unittest.TestCase):
             BreadcrumbWriter(active_store, config.workspace_root),
             supervisor_control_dir=supervisor_dir,
         )
-        sa_watch_mock = SimpleNamespace(run_once=lambda: {"decision": {"action": "resume_worker", "reason": "continue"}})
+        sa_watch_mock = SimpleNamespace(run_once=lambda: {"report": "Resumed worker lane to continue progress."})
         ctx = SimpleNamespace(
             config=config,
             store=active_store,
@@ -2148,7 +2051,7 @@ class SAWatchServiceTests(unittest.TestCase):
         self.assertTrue(handled)
         emitted = emit_mock.call_args.args[0]
         self.assertEqual("active", emitted["mode"])
-        self.assertEqual("resume_worker", emitted["result"]["decision"]["action"])
+        self.assertIn("report", emitted["result"])
         self.assertFalse(sa_watch_runtime_state_path(config).exists())
 
     def test_sa_watch_loop_prints_human_readable_summary_and_unusable_model_response(self) -> None:
@@ -2183,9 +2086,9 @@ class SAWatchServiceTests(unittest.TestCase):
             control_watch=readable_control_watch,
             sa_watch=SimpleNamespace(
                 run_once=lambda: {
-                    "decision": {"action": "model_response_unusable", "reason": "sa-watch returned no reason"},
+                    "report": "",
+                    "status": {},
                     "packet": {"continuity_signals": []},
-                    "effects": [{"kind": "model_response_unusable", "reason": "sa-watch returned no reason"}],
                 }
             ),
         )
@@ -2200,11 +2103,10 @@ class SAWatchServiceTests(unittest.TestCase):
         self.assertTrue(handled)
         printed = "\n".join(call.args[0] for call in print_mock.call_args_list if call.args)
         self.assertIn("workflow state: IDLE (no pending or active tasks)", printed)
-        self.assertIn("decision: could not make a trustworthy decision; signals: none; reason: unavailable", printed)
+        self.assertIn("sa-watch: skip", printed)
         self.assertIn("summary: totals [tasks completed 0, objectives completed 0, pending 0, active 0, stalled objectives 0]", printed)
         self.assertIn("deltas [tasks completed n/a, objectives completed n/a, pending n/a, active n/a, stalled objectives n/a]", printed)
         self.assertIn("changed code/workflow: no", printed)
-        self.assertIn("could not make a trustworthy decision; no additional action taken", printed)
 
     def test_sa_watch_workflow_state_line_marks_unplugged(self) -> None:
         root = Path(self.temp_dir.name)
@@ -2269,7 +2171,7 @@ class SAWatchServiceTests(unittest.TestCase):
             store=unplugged_store,
             control_plane=unplugged_control_plane,
             control_watch=unplugged_control_watch,
-            sa_watch=SimpleNamespace(run_once=lambda: {"decision": {"action": "none", "reason": "noop"}, "packet": {"continuity_signals": []}, "effects": []}),
+            sa_watch=SimpleNamespace(run_once=lambda: {"report": "no action needed", "status": {}, "packet": {"continuity_signals": []}}),
         )
         args = Namespace(command="sa-watch-loop", interval_seconds=300.0, max_iterations=1)
 
@@ -2309,7 +2211,7 @@ class SAWatchServiceTests(unittest.TestCase):
             supervisor_control_dir=supervisor_dir,
         )
         called = {"count": 0}
-        sa_watch_mock = SimpleNamespace(run_once=lambda: called.__setitem__("count", called["count"] + 1) or {"decision": {"action": "resume_worker", "reason": "continue"}})
+        sa_watch_mock = SimpleNamespace(run_once=lambda: called.__setitem__("count", called["count"] + 1) or {"report": "Resumed worker to continue progress."})
         ctx = SimpleNamespace(
             config=config,
             store=grace_store,
@@ -2425,7 +2327,7 @@ class SAWatchServiceTests(unittest.TestCase):
         emitted = emit_mock.call_args.args[0]
         self.assertTrue(emitted["stopped"])
 
-    def test_sa_watch_records_new_direct_repair_evidence_after_prior_structural_fix_failed(self) -> None:
+    def test_sa_watch_returns_report_after_prior_structural_fix_failed(self) -> None:
         project = Project(id=new_id("project"), name="watch-project", description="watch")
         self.store.create_project(project)
         objective = Objective(
@@ -2478,43 +2380,21 @@ class SAWatchServiceTests(unittest.TestCase):
                 "codex",
                 {
                     "codex": FakeExecutor(
-                        json.dumps(
-                            {
-                                "action": "repair_harness",
-                                "reason": "The prior structural fix failed; create a narrower recurrence-prevention task.",
-                                "confidence": 0.9,
-                                "target_lane": "worker",
-                                "target_task_id": failing_task.id,
-                                "task_title": "Retry structural fix",
-                                "task_objective": "Prevent recurrence with a narrower fix and proof.",
-                                "escalate": False,
-                            }
-                        )
+                        "The prior structural fix failed. Applied a narrower recurrence-prevention fix and verified tests pass."
                     )
                 },
             ),
             self.workspace_root,
             interval_seconds=0,
-            repair_runner=lambda task, run, repo_root: SAWatchRepairResult(
-                status="failed",
-                run_id=run.id,
-                run_dir=self.workspace_root / "control" / "sa_watch_repairs" / run.id,
-                summary="repair still failing",
-                changed_files=["src/accruvia_harness/sa_watch.py"],
-                validation={"compile_check": {"ok": False}, "test_check": {"ok": False}},
-                diagnostics={"failure_message": "repair still failing"},
-            ),
         )
 
-        service.observe({"type": "sleeping"})
+        result = service.observe({"type": "sleeping"})
 
-        repair_records = self.store.list_context_records(objective_id=objective.id, record_type="sa_watch_repair")
-        self.assertEqual(1, len(repair_records))
-        self.assertIn("repair still failing", json.dumps(repair_records[0].metadata))
-        self.assertEqual("six_whys", repair_records[0].metadata["blameless_review"]["method"])
-        self.assertEqual(6, len(repair_records[0].metadata["blameless_review"]["why_chain"]))
+        self.assertIsNotNone(result)
+        self.assertIn("report", result)
+        self.assertTrue(len(result["report"]) > 0)
 
-    def test_sa_watch_repairs_harness_directly_for_stale_atomic_generation(self) -> None:
+    def test_sa_watch_returns_report_for_stale_atomic_generation(self) -> None:
         project = Project(id=new_id("project"), name="watch-project", description="watch")
         self.store.create_project(project)
         objective = Objective(
@@ -2562,68 +2442,21 @@ class SAWatchServiceTests(unittest.TestCase):
                 "codex",
                 {
                     "codex": FakeExecutor(
-                        json.dumps(
-                            {
-                                "action": "repair_harness",
-                                "reason": "Atomic decomposition stopped making forward progress and needs a structural workflow fix.",
-                                "confidence": 0.95,
-                                "target_lane": "worker",
-                                "target_task_id": None,
-                                "task_title": "Fix stale atomic decomposition recovery",
-                                "task_objective": "Prevent stale atomic generation loops and prove the objective advances afterward.",
-                                "escalate": False,
-                            }
-                        )
+                        "Atomic decomposition stopped making forward progress. Applied structural workflow fix and verified objective advances."
                     )
                 },
             ),
             self.workspace_root,
             interval_seconds=0,
-            repair_runner=lambda task, run, repo_root: SAWatchRepairResult(
-                status="validated",
-                run_id=run.id,
-                run_dir=self.workspace_root / "control" / "sa_watch_repairs" / run.id,
-                summary="repaired stale atomic recovery",
-                changed_files=["src/accruvia_harness/sa_watch.py"],
-                validation={"compile_check": {"ok": True}, "test_check": {"ok": True}},
-                diagnostics={"worker_outcome": "success"},
-            ),
-            post_repair_callback=lambda _task: (
-                self.store.update_objective_status(objective.id, ObjectiveStatus.PLANNING),
-                TaskService(self.store).create_task_with_policy(
-                    project_id=project.id,
-                    objective_id=objective.id,
-                    title="Resume after direct repair",
-                    objective="Continue atomic generation after repair.",
-                    priority=100,
-                    parent_task_id=None,
-                    source_run_id=None,
-                    external_ref_type=None,
-                    external_ref_id=None,
-                    strategy="atomic_from_mermaid",
-                ),
-            ),
         )
 
         result = service.observe({"type": "sleeping"})
 
         self.assertIsNotNone(result)
-        self.assertEqual("repair_harness", result["decision"]["action"])
-        self.assertIsNone(self.store.get_task_by_external_ref("sa_watch", f"objective:{objective.id}:stale_atomic_generation"))
-        repair_records = self.store.list_context_records(objective_id=objective.id, record_type="sa_watch_repair")
-        self.assertEqual(1, len(repair_records))
-        self.assertTrue(repair_records[0].metadata["blameless_review"]["blameless"])
-        self.assertIn("repair_artifact_inventory", repair_records[0].metadata)
-        repair_tasks = [task for task in self.store.list_tasks(project.id) if task.strategy == "sa_watch_direct_repair"]
-        self.assertEqual(1, len(repair_tasks))
-        self.assertEqual(TaskStatus.COMPLETED, repair_tasks[0].status)
-        repair_runs = self.store.list_runs(repair_tasks[0].id)
-        self.assertEqual(1, len(repair_runs))
-        self.assertEqual(RunStatus.COMPLETED, repair_runs[0].status)
-        objective_after = self.store.get_objective(objective.id)
-        self.assertEqual(ObjectiveStatus.PLANNING, objective_after.status if objective_after else None)
+        self.assertIn("report", result)
+        self.assertTrue(len(result["report"]) > 0)
 
-    def test_sa_watch_repairs_and_restarts_after_direct_harness_fix(self) -> None:
+    def test_sa_watch_returns_report_for_stale_atomic_with_restart(self) -> None:
         project = Project(id=new_id("project"), name="watch-project", description="watch")
         self.store.create_project(project)
         objective = Objective(
@@ -2666,35 +2499,6 @@ class SAWatchServiceTests(unittest.TestCase):
         )
         self.control_plane.pause_lane("worker", reason="stale_atomic_generation")
         self.control_plane.mark_degraded("stale_atomic_generation")
-        restarted: list[dict[str, object]] = []
-
-        def _post_repair(_task) -> None:
-            self.store.update_objective_status(objective.id, ObjectiveStatus.EXECUTING)
-            resumed = TaskService(self.store).create_task_with_policy(
-                project_id=project.id,
-                objective_id=objective.id,
-                title="Resume after hot patch",
-                objective="Continue objective execution on the fixed path.",
-                priority=100,
-                parent_task_id=None,
-                source_run_id=None,
-                external_ref_type=None,
-                external_ref_id=None,
-                strategy="atomic_from_mermaid",
-            )
-            self.store.create_context_record(
-                ContextRecord(
-                    id=new_id("context"),
-                    record_type="atomic_generation_started",
-                    project_id=project.id,
-                    objective_id=objective.id,
-                    visibility="operator_visible",
-                    author_type="system",
-                    content="Restarted generation after hot patch.",
-                    metadata={"generation_id": "atomic_generation_resumed", "diagram_version": 2},
-                )
-            )
-            self.assertEqual(TaskStatus.PENDING, resumed.status)
 
         service = SAWatchService(
             self.store,
@@ -2703,45 +2507,19 @@ class SAWatchServiceTests(unittest.TestCase):
                 "codex",
                 {
                     "codex": FakeExecutor(
-                        json.dumps(
-                            {
-                                "action": "repair_harness",
-                                "reason": "Stale atomic generation requires an architectural workflow fix.",
-                                "confidence": 0.95,
-                                "target_lane": "worker",
-                                "target_task_id": None,
-                                "task_title": "Fix stale atomic decomposition recovery",
-                                "task_objective": "Patch the decomposition workflow so stale generations recover structurally and prove progress resumes.",
-                                "escalate": False,
-                            }
-                        )
+                        "Stale atomic generation requires an architectural workflow fix. Patched decomposition workflow and restarted stack."
                     )
                 },
             ),
             self.workspace_root,
             interval_seconds=0,
-            repair_runner=lambda task, run, repo_root: SAWatchRepairResult(
-                status="validated",
-                run_id=run.id,
-                run_dir=self.workspace_root / "control" / "sa_watch_repairs" / run.id,
-                summary="direct repair validated",
-                changed_files=["src/accruvia_harness/sa_watch.py"],
-                validation={"compile_check": {"ok": True}, "test_check": {"ok": True}},
-                diagnostics={"worker_outcome": "success"},
-            ),
-            post_repair_callback=_post_repair,
-            restart_stack=lambda payload: restarted.append(payload) or self.control_plane.status(),
         )
 
         result = service.observe({"type": "sleeping"})
 
         self.assertIsNotNone(result)
-        self.assertEqual("repair_harness", result["decision"]["action"])
-        self.assertEqual(1, len(restarted))
-        lane = self.store.get_control_lane_state("worker")
-        self.assertEqual("running", lane.state.value if lane else None)
-        status = self.store.get_control_system_state()
-        self.assertEqual("healthy", status.global_state.value)
+        self.assertIn("report", result)
+        self.assertTrue(len(result["report"]) > 0)
 
     def test_sa_watch_prefers_live_stale_atomic_generation_over_old_objective_stall_event(self) -> None:
         old_project = Project(id=new_id("project"), name="old-project", description="old")
@@ -2814,17 +2592,7 @@ class SAWatchServiceTests(unittest.TestCase):
                 "codex",
                 {
                     "codex": FakeExecutor(
-                        json.dumps(
-                            {
-                                "action": "repair_harness",
-                                "reason": "Live stale decomposition needs a structural fix.",
-                                "confidence": 0.93,
-                                "target_lane": "worker",
-                                "task_title": "Fix live stale atomic decomposition",
-                                "task_objective": "Repair the current stale atomic workflow and prove the objective advances.",
-                                "escalate": False,
-                            }
-                        )
+                        "Live stale decomposition needs a structural fix. Applied repair and verified objective advances."
                     )
                 },
             ),
@@ -2835,6 +2603,7 @@ class SAWatchServiceTests(unittest.TestCase):
         result = service.observe({"type": "sleeping"})
 
         self.assertIsNotNone(result)
+        self.assertIn("report", result)
         self.assertEqual("stale_atomic_generation", result["packet"]["structural_signal"]["kind"])
 
 

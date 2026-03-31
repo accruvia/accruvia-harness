@@ -109,10 +109,10 @@ class SAWatchService:
         if self.llm_router is None or not getattr(self.llm_router, "executors", {}):
             return self._record_skip("llm_router_unavailable", packet)
         try:
-            decision = self._invoke(packet)
+            report = self._invoke(packet)
         except (LLMExecutionError, ValueError, json.JSONDecodeError) as exc:
             return self._record_skip(f"llm_execution_failed:{exc}", packet)
-        return self._apply(decision, packet)
+        return self._apply(report, packet)
 
     def _build_packet(self) -> dict[str, object]:
         status = self.control_plane.status()
@@ -187,38 +187,22 @@ class SAWatchService:
             "Your job is to diagnose WHY from the evidence below, then fix the root cause. "
             "You have full access to the harness codebase, database, logs, and runtime artifacts. "
             "Read whatever you need. Change whatever you need. There are no scope limits.\n\n"
-            "You must produce durable artifacts that prove what you did:\n"
-            "- A diagnosis explaining what broke and why\n"
-            "- The changes you made (code, workflow state, database records, config)\n"
-            "- Evidence that your fix restored forward progress or a clear explanation of what remains blocked\n\n"
-            "Common root causes to investigate:\n"
-            "- Circuit breakers that fired and were never cleared (escalation events, budget blocks, lane pauses)\n"
-            "- Objectives stuck in paused/stalled status with pending tasks that cannot dispatch\n"
-            "- Tasks looping in the same state because the underlying defect was never addressed\n"
-            "- Workflow records that are inconsistent (finished runs not reconciled, orphaned leases)\n"
-            "- Architectural defects in the harness code that cause repeated failures\n\n"
-            "Do not observe. Do not escalate to a human. You are the escalation.\n"
+            "Do not observe. Do not escalate to a human. You are the escalation. "
             "Analyze the artifacts and logs, then make changes that address the root cause.\n\n"
-            "After analysis, return a JSON object describing your action:\n"
-            "{\n"
-            '  "action": "resume_worker | restart_stack | freeze_system | repair_workflow_state | repair_harness",\n'
-            '  "reason": "diagnosis of the root cause tied to specific evidence",\n'
-            '  "confidence": 0.0,\n'
-            '  "target_lane": "worker|harness|null",\n'
-            '  "target_task_id": "task id or null",\n'
-            '  "task_title": "short title of the repair when action=repair_harness",\n'
-            '  "task_objective": "what to fix and how to verify it worked when action=repair_harness"\n'
-            "}\n\n"
+            "Write a report as durable artifacts:\n"
+            "1. Diagnosis: what broke and why, tied to specific evidence\n"
+            "2. Actions taken: every change you made (code edits, database fixes, state resets, config changes)\n"
+            "3. Result: proof that forward progress resumed, or what remains blocked and your next step\n\n"
             "Current system state:\n"
             f"{json.dumps(packet, indent=2, sort_keys=True)}\n"
         )
 
-    def _invoke(self, packet: dict[str, object]) -> SAWatchDecision:
+    def _invoke(self, packet: dict[str, object]) -> str:
         task = Task(
             id=new_id("task"),
             project_id="system",
-            title="sa-watch intervention review",
-            objective="Review degraded control-plane state and pick one bounded intervention.",
+            title="sa-watch recovery",
+            objective="Diagnose stuck system and fix root cause.",
             status=TaskStatus.ACTIVE,
             strategy="sa_watch",
         )
@@ -227,104 +211,24 @@ class SAWatchService:
             task_id=task.id,
             status=RunStatus.PLANNING,
             attempt=1,
-            summary="sa-watch review",
+            summary="sa-watch recovery",
         )
         run_dir = self.workspace_root / "control" / "sa_watch" / run.id
         result, _backend = self.llm_router.execute(
             LLMInvocation(task=task, run=run, prompt=self._build_prompt(packet), run_dir=run_dir)
         )
-        parsed = self._parse_decision(result.response_text)
-        return SAWatchDecision(
-            action=str(parsed.get("action") or "record_escalation"),
-            reason=str(parsed.get("reason") or "sa-watch returned no reason"),
-            confidence=float(parsed.get("confidence") or 0.0),
-            target_lane=str(parsed.get("target_lane")) if parsed.get("target_lane") is not None else None,
-            escalate=bool(parsed.get("escalate")),
-            task_title=str(parsed.get("task_title") or "") or None,
-            task_objective=str(parsed.get("task_objective") or "") or None,
-            target_task_id=str(parsed.get("target_task_id") or "") or None,
-        )
+        report = result.response_text.strip()
+        report_path = run_dir / "sa_watch_report.txt"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(report, encoding="utf-8")
+        return report
 
-    def _parse_decision(self, response_text: str) -> dict[str, Any]:
-        stripped = response_text.strip()
-        if stripped.startswith("{"):
-            return json.loads(stripped)
-        match = _JSON_BLOCK_RE.search(stripped)
-        if match:
-            return json.loads(match.group(1))
-        raise ValueError("sa-watch response did not contain a JSON object")
-
-    def _apply(self, decision: SAWatchDecision, packet: dict[str, object]) -> dict[str, object]:
-        action = decision.action
-        effects: list[dict[str, object]] = []
-        if not self._usable_reason(decision.reason):
-            status = self.control_plane.status()
-            self._record_action("model_response_unusable", "system", "system", decision.reason, "recorded")
-            effects.append({"kind": "model_response_unusable", "reason": decision.reason})
-            return {
-                "decision": {
-                    "action": "model_response_unusable",
-                    "reason": decision.reason,
-                    "confidence": decision.confidence,
-                    "target_lane": decision.target_lane,
-                    "target_task_id": decision.target_task_id,
-                    "task_title": decision.task_title,
-                    "escalate": False,
-                },
-                "status": status,
-                "packet": packet,
-                "effects": effects,
-            }
-        if action == "resume_worker":
-            status = self.control_plane.resume_lane("worker", reason=f"sa_watch:{decision.reason}")
-            status = self.control_plane.mark_healthy(reason="sa_watch_resumed_worker")
-            self._record_action("resume", "lane", "worker", decision.reason, "applied")
-            effects.append({"kind": "lane_resumed", "lane": "worker", "reason": decision.reason})
-        elif action == "restart_stack":
-            status = self._restart_stack(decision)
-            effects.append({"kind": "stack_restart_requested", "reason": decision.reason})
-        elif action == "freeze_system":
-            status = self.control_plane.freeze(f"sa_watch:{decision.reason}")
-            self._record_action("freeze", "system", "system", decision.reason, "applied")
-            effects.append({"kind": "system_frozen", "reason": decision.reason})
-        elif action == "repair_harness":
-            status, repair_effects = self._repair_harness(decision, packet)
-            effects.extend(repair_effects)
-        elif action == "repair_workflow_state":
-            status, workflow_effects = self._repair_workflow_state(decision, packet)
-            effects.extend(workflow_effects)
-        elif action in {"record_escalation", "none"}:
-            status = self.control_plane.status()
-            self._record_action(
-                "escalate" if action == "record_escalation" or decision.escalate else "observe",
-                "system",
-                "system",
-                decision.reason,
-                "recorded",
-            )
-            effects.append(
-                {
-                    "kind": "noted_concern" if action == "record_escalation" or decision.escalate else "observed",
-                    "reason": decision.reason,
-                }
-            )
-        else:
-            status = self.control_plane.status()
-            self._record_action("invalid_action", "system", "system", f"{action}:{decision.reason}", "ignored")
-            effects.append({"kind": "invalid_action", "action": action, "reason": decision.reason})
+    def _apply(self, report: str, packet: dict[str, object]) -> dict[str, object]:
+        self._record_action("recover", "system", "system", report[:500], "applied")
         return {
-            "decision": {
-                "action": decision.action,
-                "reason": decision.reason,
-                "confidence": decision.confidence,
-                "target_lane": decision.target_lane,
-                "target_task_id": decision.target_task_id,
-                "task_title": decision.task_title,
-                "escalate": decision.escalate,
-            },
-            "status": status,
+            "report": report,
+            "status": self.control_plane.status(),
             "packet": packet,
-            "effects": effects,
         }
 
     def _record_skip(self, reason: str, packet: dict[str, object]) -> dict[str, object]:
