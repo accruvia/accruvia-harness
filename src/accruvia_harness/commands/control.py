@@ -4,7 +4,7 @@ from datetime import datetime
 import signal
 import time
 
-from ..domain import ControlRecoveryAction, new_id
+from ..domain import ControlRecoveryAction, ObjectiveStatus, new_id
 from .common import (
     CLIContext,
     clear_sa_watch_runtime_state,
@@ -80,25 +80,27 @@ def handle_control_command(args, ctx: CLIContext) -> bool:
                     freeze_on_stall=not args.no_freeze_on_stall,
                 )
                 if bool(latest.get("stuck")):
+                    resumed_objectives = _resume_stalled_objectives(ctx, latest)
                     sa_watch_result = ctx.sa_watch.run_once()
                     sa_watch_action = str((sa_watch_result.get("decision") or {}).get("action") or "none") if isinstance(sa_watch_result, dict) else "none"
                     needs_restart = sa_watch_action not in {"none", "record_escalation", "skip", "model_response_unusable"}
                     ctx.store.create_control_recovery_action(
                         ControlRecoveryAction(
                             id=new_id("recovery"),
-                            action_type="restart" if needs_restart else "observe",
+                            action_type="restart" if needs_restart else ("resume" if resumed_objectives else "observe"),
                             target_type="system",
                             target_id="system",
                             reason="stuck_detected",
-                            result="applied" if needs_restart else "recorded",
+                            result="applied" if (needs_restart or resumed_objectives) else "recorded",
                         )
                     )
                     if needs_restart:
                         restart_harness_process(ctx.config, force=True)
                     latest = {
-                        "mode": "recovered" if needs_restart else "observed",
+                        "mode": "recovered" if needs_restart else ("resumed" if resumed_objectives else "observed"),
                         "stuck_evaluation": latest,
                         "sa_watch": sa_watch_result,
+                        "resumed_objectives": resumed_objectives,
                     }
                 restart_request = read_stack_restart_request(ctx.config)
                 if restart_request is not None:
@@ -277,6 +279,38 @@ def handle_control_command(args, ctx: CLIContext) -> bool:
         emit(latest)
         return True
     return False
+
+
+def _resume_stalled_objectives(ctx: CLIContext, stuck_evaluation: dict) -> list[str]:
+    """Resume objectives stuck due to no_progress escalation or paused status.
+    Clears the blocking escalation events and sets paused objectives back to
+    executing.  Returns list of resumed objective IDs."""
+    resumed: list[str] = []
+
+    # 1. Clear no_progress escalation events that gate-block objectives.
+    no_progress_reason = "Three completed coding runs did not advance the objective to a mergeable state."
+    cleared_objective_ids: set[str] = set()
+    for event in ctx.store.list_control_events(event_type="human_escalation_required", limit=200):
+        payload = dict(event.payload or {})
+        if str(payload.get("reason") or "") != no_progress_reason:
+            continue
+        objective_id = str(payload.get("objective_id") or "")
+        with ctx.store.connect() as conn:
+            conn.execute("DELETE FROM control_events WHERE id = ?", (event.id,))
+        if objective_id:
+            cleared_objective_ids.add(objective_id)
+
+    for objective_id in cleared_objective_ids:
+        resumed.append(objective_id)
+
+    # 2. Resume any objectives with status=paused.
+    for objective in ctx.store.list_objectives():
+        if objective.status == ObjectiveStatus.PAUSED:
+            ctx.store.update_objective_status(objective.id, ObjectiveStatus.EXECUTING)
+            if objective.id not in cleared_objective_ids:
+                resumed.append(objective.id)
+
+    return resumed
 
 
 def _sa_watch_is_active(ctx: CLIContext) -> bool:
