@@ -24,6 +24,7 @@ from accruvia_harness.skills import (
     PromotionReviewSkill,
     ScopeSkill,
     SelfReviewSkill,
+    SummarizeRunSkill,
     SkillRegistry,
     SkillResult,
     ValidateSkill,
@@ -635,13 +636,13 @@ class CommitSkillTests(unittest.TestCase):
 
 
 class SkillRegistryTests(unittest.TestCase):
-    def test_default_registry_has_all_eleven(self) -> None:
+    def test_default_registry_has_all_twelve(self) -> None:
         registry = build_default_registry()
-        self.assertEqual(11, len(registry))
+        self.assertEqual(12, len(registry))
         expected = {
             "scope", "implement", "self_review", "validate", "diagnose",
             "promotion_review", "promotion_apply", "post_merge_check", "follow_on",
-            "benchmark", "commit",
+            "benchmark", "commit", "summarize_run",
         }
         self.assertEqual(expected, set(registry.names()))
 
@@ -830,6 +831,92 @@ class WorkOrchestratorRelatedFilesTests(unittest.TestCase):
             result = _load_related_files(ws, "Edit a.py and b.py", max_total_bytes=15000)
             total = sum(len(v) for v in result.values())
             self.assertLessEqual(total, 15000)
+
+
+class SummarizeRunSkillTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.skill = SummarizeRunSkill()
+
+    def _write_artifacts(self, run_dir: Path, skip: list[str] | None = None) -> None:
+        skip = skip or []
+        artifacts = {
+            "scope_output.json": {
+                "files_to_touch": ["src/app.py", "tests/test_app.py"],
+                "approach": "Add caching layer",
+                "risks": ["cache invalidation"],
+                "estimated_complexity": "medium",
+            },
+            "implementation_output.json": {
+                "edits": [{"path": "src/app.py", "old_string": "x", "new_string": "y"}],
+                "new_files": [],
+                "deleted_files": [],
+                "rationale": "Added TTL-based caching",
+            },
+            "apply_changes_summary.json": {
+                "edits_applied": 1,
+                "new_files_created": 0,
+                "rejected": [],
+            },
+            "self_review_output.json": {
+                "ship_ready": True,
+                "issues": [],
+            },
+            "validation_output.json": {
+                "overall": "pass",
+                "results": [{"name": "pytest", "status": "pass"}],
+            },
+            "diagnosis_output.json": {
+                "root_cause": "",
+                "retry_hints": [],
+            },
+        }
+        for name, data in artifacts.items():
+            if name not in skip:
+                (run_dir / name).write_text(json.dumps(data), encoding="utf-8")
+
+    def test_all_artifacts_present(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            self._write_artifacts(run_dir)
+            r = self.skill.invoke_deterministic(run_dir=run_dir, task_title="Add cache")
+            self.assertTrue(r.success)
+            self.assertEqual("Add cache", r.output["task_title"])
+            self.assertEqual("Add caching layer", r.output["scope_approach"])
+            self.assertEqual(1, r.output["edits_applied"])
+            self.assertEqual(0, r.output["new_files_created"])
+            self.assertTrue(r.output["ship_ready"])
+            self.assertEqual("pass", r.output["validation_overall"])
+            self.assertIn("## Task", r.output["summary_markdown"])
+            self.assertIn("## What changed", r.output["summary_markdown"])
+            self.assertIn("## Validation", r.output["summary_markdown"])
+            self.assertIn("## Review", r.output["summary_markdown"])
+            self.assertNotIn("missing_artifacts", r.output)
+            ok, errs = self.skill.validate_output(r.output)
+            self.assertTrue(ok, errs)
+
+    def test_missing_scope_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            self._write_artifacts(run_dir, skip=["scope_output.json"])
+            r = self.skill.invoke_deterministic(run_dir=run_dir, task_title="Fix bug")
+            self.assertTrue(r.success)
+            self.assertEqual("Fix bug", r.output["task_title"])
+            self.assertEqual("", r.output["scope_approach"])
+            self.assertIn("scope_output.json", r.output["missing_artifacts"])
+            ok, errs = self.skill.validate_output(r.output)
+            self.assertTrue(ok, errs)
+
+    def test_schema_validation_rejects_empty(self) -> None:
+        ok, errs = self.skill.validate_output({})
+        self.assertFalse(ok)
+        self.assertTrue(len(errs) > 0)
+        # Verify all required fields are checked
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            self._write_artifacts(run_dir)
+            r = self.skill.invoke_deterministic(run_dir=run_dir, task_title="Test")
+            ok, errs = self.skill.validate_output(r.output)
+            self.assertTrue(ok, errs)
 
 
 if __name__ == "__main__":
