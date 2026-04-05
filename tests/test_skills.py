@@ -1007,5 +1007,62 @@ class SummarizeRunSkillTests(unittest.TestCase):
             self.assertTrue(ok, errs)
 
 
+class FindImportingTestsTests(unittest.TestCase):
+    """Tests for _find_importing_tests helper in work_orchestrator."""
+
+    def test_find_importing_tests_matches_import_statement(self) -> None:
+        """A test file importing a changed source module is discovered."""
+        from accruvia_harness.services.work_orchestrator import _find_importing_tests
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp)
+            (ws / "tests").mkdir()
+            (ws / "tests" / "test_engine.py").write_text(
+                "from accruvia_harness.skills.scope import something\ndef test_scope(): pass\n",
+                encoding="utf-8",
+            )
+            (ws / "tests" / "test_unrelated.py").write_text(
+                "def test_other(): pass\n",
+                encoding="utf-8",
+            )
+
+            fake_collect = (
+                "tests/test_engine.py::test_scope\n"
+                "tests/test_unrelated.py::test_other\n"
+            )
+            mock_result = MagicMock(returncode=0, stdout=fake_collect)
+            with patch("accruvia_harness.services.work_orchestrator.subprocess.run",
+                       return_value=mock_result):
+                result = _find_importing_tests(
+                    ws, ["src/accruvia_harness/skills/scope.py"]
+                )
+
+            self.assertEqual(["tests/test_engine.py"], result)
+
+    def test_find_importing_tests_caps_at_max(self) -> None:
+        """Results are capped at max_additional."""
+        from accruvia_harness.services.work_orchestrator import _find_importing_tests
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp)
+            (ws / "tests").mkdir()
+            collect_lines: list[str] = []
+            for i in range(5):
+                (ws / "tests" / f"test_{i}.py").write_text(
+                    f"import accruvia_harness.core\ndef test_{i}(): pass\n",
+                    encoding="utf-8",
+                )
+                collect_lines.append(f"tests/test_{i}.py::test_{i}")
+            fake_collect = "\n".join(collect_lines) + "\n"
+            mock_result = MagicMock(returncode=0, stdout=fake_collect)
+            with patch("accruvia_harness.services.work_orchestrator.subprocess.run",
+                       return_value=mock_result):
+                result = _find_importing_tests(
+                    ws, ["src/accruvia_harness/core.py"], max_additional=2
+                )
+
+            self.assertEqual(2, len(result))
+
+
 if __name__ == "__main__":
     unittest.main()

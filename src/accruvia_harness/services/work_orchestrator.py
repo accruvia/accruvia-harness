@@ -392,6 +392,7 @@ class SkillsWorkOrchestrator:
             profile=profile,
             validation_mode=task.validation_mode,
             changed_files=written_files,
+            workspace=workspace,
         )
         validate_result = validate_skill.invoke_deterministic(
             workspace_root=workspace,
@@ -569,11 +570,69 @@ def _is_test_path(path: str) -> bool:
     )
 
 
+def _find_importing_tests(workspace: Path, changed_source_files: list[str], max_additional: int = 10) -> list[str]:
+    """Find test files that import any of the changed source modules.
+
+    Runs pytest --collect-only to discover test files, then searches them
+    for import statements matching changed source modules.
+    """
+    if not changed_source_files or not workspace.exists():
+        return []
+    module_names: list[str] = []
+    for src_path in changed_source_files:
+        norm = src_path.replace("\\", "/")
+        if norm.startswith("src/"):
+            norm = norm[4:]
+        if norm.endswith(".py"):
+            norm = norm[:-3]
+        if norm.endswith("/__init__"):
+            norm = norm[:-9]
+        module_name = norm.replace("/", ".")
+        if module_name:
+            module_names.append(module_name)
+    if not module_names:
+        return []
+    run_kwargs = dict(capture_output=True, encoding="utf-8", errors="replace", timeout=60)
+    try:
+        result = subprocess.run(
+            ["python", "-m", "pytest", "--collect-only", "-q"],
+            cwd=workspace,
+            **run_kwargs,  # type: ignore[arg-type]
+        )
+        output = result.stdout or ""
+    except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
+        return []
+    test_files: set[str] = set()
+    for line in output.splitlines():
+        line = line.strip()
+        if "::" in line:
+            test_file = line.split("::")[0]
+            if test_file.endswith(".py"):
+                test_files.add(test_file.replace("\\", "/"))
+    matched: list[str] = []
+    for test_file in sorted(test_files):
+        test_path = workspace / test_file
+        if not test_path.is_file():
+            continue
+        try:
+            content = test_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for mod in module_names:
+            if f"import {mod}" in content or f"from {mod}" in content:
+                matched.append(test_file)
+                break
+        if len(matched) >= max_additional:
+            break
+    return matched
+
+
 def _resolve_validate_commands(
     *,
     profile: str,
     validation_mode: str | None,
     changed_files: list[str],
+    workspace: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Build the validation command list for the work orchestrator.
 
@@ -587,6 +646,18 @@ def _resolve_validate_commands(
     if profile != "python":
         return default_commands
     test_files = [p for p in changed_files if _is_test_path(p) and p.endswith(".py")]
+    if workspace is not None:
+        source_files = [
+            p for p in changed_files
+            if p.endswith(".py") and not _is_test_path(p)
+        ]
+        if source_files:
+            importing_tests = _find_importing_tests(workspace, source_files)
+            seen = set(test_files)
+            for t in importing_tests:
+                if t not in seen:
+                    test_files.append(t)
+                    seen.add(t)
     if not test_files:
         return default_commands
     # Quote each test file path and run pytest against just those.
