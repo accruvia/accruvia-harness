@@ -22,6 +22,7 @@ from ..domain import Run, Task, new_id
 from ..llm import LLMRouter
 from ..policy import WorkResult
 from ..skills import (
+    CommitSkill,
     DiagnoseSkill,
     ImplementSkill,
     ScopeSkill,
@@ -175,6 +176,7 @@ class SkillsWorkOrchestrator:
         self_review_skill: SelfReviewSkill = self.skill_registry.get("self_review")  # type: ignore[assignment]
         validate_skill: ValidateSkill = self.skill_registry.get("validate")  # type: ignore[assignment]
         diagnose_skill: DiagnoseSkill = self.skill_registry.get("diagnose")  # type: ignore[assignment]
+        commit_skill: CommitSkill = self.skill_registry.get("commit")  # type: ignore[assignment]
 
         repo_context = _collect_repo_context(workspace)
 
@@ -450,21 +452,51 @@ class SkillsWorkOrchestrator:
                     "changed_files": written,
                 },
             )
+        # STAGE 6: /commit â€” persist changes in git
+        deleted_files = implement_result.output.get("deleted_files") or []
+        commit_paths = list(written) + [p for p in deleted_files if p not in written]
+        rationale = implement_result.output.get("rationale") or ""
+        commit_message = (
+            f"Task: {task.title}\n\n"
+            f"{rationale[:500]}\n\n"
+            f"Authored by skills pipeline: {run.id}"
+        )
+        commit_result = commit_skill.invoke_deterministic(
+            workspace=workspace,
+            paths=commit_paths,
+            message=commit_message,
+            author_name="Accruvia Harness",
+            author_email="harness@accruvia.local",
+        )
+        artifacts.append(
+            _write_artifact(
+                run_dir, "commit_output",
+                {"success": commit_result.success, "errors": commit_result.errors, "output": commit_result.output},
+                "Git commit of validated changes",
+            )
+        )
+        final_diagnostics: dict[str, Any] = {
+            "stage": "complete",
+            "worker_outcome": "candidate",
+            "worker_backend": "skills",
+            "skip_external_validation": True,
+            "validation_profile": profile,
+            "changed_files": written,
+            "compile_check": {"passed": _stage_passed(validate_result.output, "compile") or _stage_passed(validate_result.output, "build") or overall == "skipped"},
+            "test_check": {"passed": _stage_passed(validate_result.output, "tests") or _stage_passed(validate_result.output, "test") or overall == "skipped"},
+            "test_files": [p for p in written if "test" in p.lower()],
+        }
+        if commit_result.success:
+            final_diagnostics["commit_sha"] = commit_result.output.get("commit_sha") or ""
+        else:
+            final_diagnostics["commit_error"] = (
+                "; ".join(commit_result.errors) if commit_result.errors else "commit failed"
+            )
         return WorkResult(
             summary=implement_result.output.get("rationale") or "Task implemented and validated.",
             artifacts=_to_artifact_tuples(artifacts),
             outcome="success",
-            diagnostics={
-                "stage": "complete",
-                "worker_outcome": "candidate",
-                "worker_backend": "skills",
-                "skip_external_validation": True,
-                "validation_profile": profile,
-                "changed_files": written,
-                "compile_check": {"passed": _stage_passed(validate_result.output, "compile") or _stage_passed(validate_result.output, "build") or overall == "skipped"},
-                "test_check": {"passed": _stage_passed(validate_result.output, "tests") or _stage_passed(validate_result.output, "test") or overall == "skipped"},
-                "test_files": [p for p in written if "test" in p.lower()],
-            },
+            diagnostics=final_diagnostics,
         )
 
 
