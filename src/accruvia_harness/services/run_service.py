@@ -230,6 +230,16 @@ class RunService:
             previous_evaluation=previous_evaluations[-1] if previous_evaluations else None,
             previous_decision=previous_decisions[-1].action if previous_decisions else None,
         )
+        # Pull retry_hints from the previous evaluation's diagnostics so the
+        # skills pipeline can narrow /scope with prior context.
+        retry_hints: dict[str, object] = {}
+        if previous_evaluations:
+            prev_details = previous_evaluations[-1].details or {}
+            prev_diagnostics = prev_details.get("diagnostics") or {}
+            if isinstance(prev_diagnostics, dict):
+                hints = prev_diagnostics.get("retry_hints")
+                if isinstance(hints, dict):
+                    retry_hints = hints
         run = Run(
             id=new_id("run"),
             task_id=task.id,
@@ -405,9 +415,9 @@ class RunService:
                     validation_profile=task.validation_profile,
                     worker_backend=type(worker).__name__,
                 ):
-                    work = worker.work(task, run, self.workspace_root)
+                    work = worker.work(task, run, self.workspace_root, retry_hints=retry_hints)
             else:
-                work = worker.work(task, run, self.workspace_root)
+                work = worker.work(task, run, self.workspace_root, retry_hints=retry_hints)
         finally:
             if callable(set_progress_callback):
                 set_progress_callback(None)

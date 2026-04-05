@@ -47,19 +47,30 @@ class SkillsWorker:
     def set_progress_callback(self, callback) -> None:
         self._progress_callback = callback
 
-    def work(self, task: Task, run: Run, workspace_root: Path) -> WorkResult:
+    def work(
+        self,
+        task: Task,
+        run: Run,
+        workspace_root: Path,
+        retry_hints: dict | None = None,
+    ) -> WorkResult:
         workspace_root = Path(workspace_root)
         run_dir = workspace_root / "runs" / run.id
         run_dir.mkdir(parents=True, exist_ok=True)
         project_workspace = _prepared_project_workspace(run_dir)
 
-        # Lift retry feedback out of diagnostics if the prior run attached any.
-        retry_feedback = ""
-        prior_scope = None
-        diagnostics = getattr(run, "retry_hints", None) or {}
-        if isinstance(diagnostics, dict):
-            retry_feedback = str(diagnostics.get("review_feedback") or diagnostics.get("retry_feedback") or "")
-            prior_scope = diagnostics.get("prior_scope")
+        # retry_hints carries prior-run context from run_service. Fall back to
+        # legacy dynamic attribute for any caller that hasn't migrated.
+        hints = retry_hints if isinstance(retry_hints, dict) else {}
+        if not hints:
+            legacy = getattr(run, "retry_hints", None)
+            if isinstance(legacy, dict):
+                hints = legacy
+        retry_feedback = str(
+            hints.get("review_feedback") or hints.get("retry_feedback")
+            or hints.get("scope_adjustment") or ""
+        )
+        prior_scope = hints.get("prior_scope")
 
         if self._progress_callback is not None:
             self._progress_callback(

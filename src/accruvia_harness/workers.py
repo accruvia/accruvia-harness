@@ -21,7 +21,13 @@ STRUCTURAL_FIX_STALE_PROGRESS_SECONDS = 10 * 60
 
 
 class WorkerBackend(Protocol):
-    def work(self, task: Task, run: Run, workspace_root: Path) -> WorkResult: ...
+    def work(
+        self,
+        task: Task,
+        run: Run,
+        workspace_root: Path,
+        retry_hints: dict[str, object] | None = None,
+    ) -> WorkResult: ...
 
 
 class WorkerExecutionError(RuntimeError):
@@ -131,7 +137,7 @@ class LocalArtifactWorker:
     def __init__(self, adapter_registry: AdapterRegistry | None = None) -> None:
         self.adapter_registry = adapter_registry or build_adapter_registry()
 
-    def work(self, task: Task, run: Run, workspace_root: Path) -> WorkResult:
+    def work(self, task: Task, run: Run, workspace_root: Path, retry_hints: dict | None = None) -> WorkResult:
         run_dir = workspace_root / "runs" / run.id
         run_dir.mkdir(parents=True, exist_ok=True)
         project_workspace = _prepared_project_workspace(run_dir)
@@ -268,7 +274,7 @@ class CommandWorker:
             return self.stale_after_seconds
         return min(self.stale_after_seconds, float(STRUCTURAL_FIX_STALE_PROGRESS_SECONDS))
 
-    def work(self, task: Task, run: Run, workspace_root: Path) -> WorkResult:
+    def work(self, task: Task, run: Run, workspace_root: Path, retry_hints: dict | None = None) -> WorkResult:
         run_dir = (workspace_root / "runs" / run.id).resolve()
         run_dir.mkdir(parents=True, exist_ok=True)
         project_workspace = _prepared_project_workspace(run_dir).resolve()
@@ -643,7 +649,7 @@ class LLMTaskWorker:
         self.telemetry = telemetry
         self.routing_hook = routing_hook
 
-    def work(self, task: Task, run: Run, workspace_root: Path) -> WorkResult:
+    def work(self, task: Task, run: Run, workspace_root: Path, retry_hints: dict | None = None) -> WorkResult:
         run_dir = workspace_root / "runs" / run.id
         run_dir.mkdir(parents=True, exist_ok=True)
         project_workspace = _prepared_project_workspace(run_dir)
