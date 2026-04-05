@@ -237,8 +237,8 @@ def execute_merge(
     if rc.returncode != 0:
         return MergeResult(merged=False, stderr=f"target branch not found: {target_branch}")
 
-    # Verify clean working tree
-    rc = _git(["status", "--porcelain"], repo_root)
+    # Verify clean working tree (ignore untracked files like .accruvia-harness/)
+    rc = _git(["status", "--porcelain", "--untracked-files=no"], repo_root)
     if rc.returncode == 0 and rc.stdout.strip():
         return MergeResult(merged=False, stderr="working tree is dirty")
 
