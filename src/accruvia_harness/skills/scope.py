@@ -43,6 +43,7 @@ class ScopeSkill:
         repo_context = str(inputs.get("repo_context") or "").strip()
         prior_scope = inputs.get("prior_scope")
         retry_feedback = str(inputs.get("retry_feedback") or "").strip()
+        related_file_contents = inputs.get("related_file_contents") or {}
 
         scope_constraints = []
         if allowed:
@@ -68,6 +69,14 @@ class ScopeSkill:
             if retry_feedback:
                 prior_block += f"Retry feedback: {retry_feedback}\n"
 
+        related_block = ""
+        if related_file_contents:
+            parts = ["Related files (reference):"]
+            for path, content in related_file_contents.items():
+                truncated = content[:3000]
+                parts.append(f"--- {path} ---\n{truncated}")
+            related_block = "\n".join(parts)
+
         return "\n\n".join(
             filter(
                 None,
@@ -82,6 +91,7 @@ class ScopeSkill:
                     "\n\n".join(scope_constraints) if scope_constraints else "",
                     "Repository context (summary of relevant files, current state):\n"
                     + (repo_context or "(none provided)"),
+                    related_block,
                     prior_block,
                     "Return strict JSON with keys:\n"
                     "  files_to_touch (list of relative file paths the implementer will edit/create)\n"
