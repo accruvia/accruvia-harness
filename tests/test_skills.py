@@ -132,27 +132,125 @@ class ImplementSkillTests(unittest.TestCase):
     def setUp(self) -> None:
         self.skill = ImplementSkill()
 
-    def test_scope_enforcement_in_apply(self) -> None:
+    def test_edit_applies_unique_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src").mkdir()
+            (root / "src" / "a.py").write_text("def greet():\n    return 'hi'\n")
+            result = SkillResult(
+                skill_name="implement", success=True,
+                output={
+                    "edits": [
+                        {"path": "src/a.py", "old_string": "return 'hi'", "new_string": "return 'hello'"},
+                    ],
+                    "new_files": [],
+                    "deleted_files": [],
+                    "rationale": "friendlier greeting",
+                },
+            )
+            summary = apply_changes(result, workspace_root=root, allowed_files=["src/a.py"])
+            self.assertEqual(1, summary["edits_applied"])
+            self.assertEqual([], summary["rejected"])
+            self.assertIn("return 'hello'", (root / "src" / "a.py").read_text())
+
+    def test_edit_rejects_non_unique_old_string(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "src").mkdir()
+            (root / "src" / "a.py").write_text("return None\nreturn None\n")
+            result = SkillResult(
+                skill_name="implement", success=True,
+                output={
+                    "edits": [
+                        {"path": "src/a.py", "old_string": "return None", "new_string": "return True"},
+                    ],
+                    "new_files": [], "deleted_files": [], "rationale": "x",
+                },
+            )
+            summary = apply_changes(result, workspace_root=root, allowed_files=["src/a.py"])
+            self.assertEqual(0, summary["edits_applied"])
+            self.assertEqual(1, len(summary["rejected"]))
+            self.assertIn("old_string_not_unique", summary["rejected"][0]["reason"])
+            # File untouched
+            self.assertEqual("return None\nreturn None\n", (root / "src" / "a.py").read_text())
+
+    def test_edit_rejects_missing_old_string(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "a.py").write_text("nothing here")
+            result = SkillResult(
+                skill_name="implement", success=True,
+                output={
+                    "edits": [{"path": "a.py", "old_string": "missing", "new_string": "x"}],
+                    "new_files": [], "deleted_files": [], "rationale": "x",
+                },
+            )
+            summary = apply_changes(result, workspace_root=root, allowed_files=["a.py"])
+            self.assertEqual(0, summary["edits_applied"])
+            self.assertEqual("old_string_not_found", summary["rejected"][0]["reason"])
+
+    def test_edit_rejects_missing_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             result = SkillResult(
                 skill_name="implement", success=True,
                 output={
-                    "changed_files": [
-                        {"path": "src/a.py", "content": "ok"},
-                        {"path": "src/forbidden.py", "content": "bad"},
-                    ],
-                    "deleted_files": [],
+                    "edits": [{"path": "missing.py", "old_string": "x", "new_string": "y"}],
+                    "new_files": [], "deleted_files": [], "rationale": "x",
                 },
             )
-            summary = apply_changes(
-                result,
-                workspace_root=root,
-                allowed_files=["src/a.py"],
+            summary = apply_changes(result, workspace_root=root, allowed_files=["missing.py"])
+            self.assertEqual("edit_target_missing", summary["rejected"][0]["reason"])
+
+    def test_new_file_creates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = SkillResult(
+                skill_name="implement", success=True,
+                output={
+                    "edits": [],
+                    "new_files": [{"path": "src/new.py", "content": "x = 1"}],
+                    "deleted_files": [], "rationale": "new module",
+                },
             )
-            self.assertIn("src/a.py", summary["written"])
+            summary = apply_changes(result, workspace_root=root, allowed_files=["src/new.py"])
+            self.assertEqual(1, summary["new_files_created"])
+            self.assertEqual("x = 1", (root / "src" / "new.py").read_text())
+
+    def test_new_file_rejected_when_already_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "a.py").write_text("old")
+            result = SkillResult(
+                skill_name="implement", success=True,
+                output={
+                    "edits": [],
+                    "new_files": [{"path": "a.py", "content": "new"}],
+                    "deleted_files": [], "rationale": "x",
+                },
+            )
+            summary = apply_changes(result, workspace_root=root, allowed_files=["a.py"])
+            self.assertEqual(0, summary["new_files_created"])
+            self.assertEqual("new_file_already_exists", summary["rejected"][0]["reason"])
+            self.assertEqual("old", (root / "a.py").read_text())
+
+    def test_scope_enforcement_rejects_out_of_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = SkillResult(
+                skill_name="implement", success=True,
+                output={
+                    "edits": [],
+                    "new_files": [
+                        {"path": "src/ok.py", "content": "yes"},
+                        {"path": "src/forbidden.py", "content": "no"},
+                    ],
+                    "deleted_files": [], "rationale": "x",
+                },
+            )
+            summary = apply_changes(result, workspace_root=root, allowed_files=["src/ok.py"])
+            self.assertIn("src/ok.py", summary["written"])
             self.assertEqual(1, len(summary["rejected"]))
-            self.assertTrue((root / "src" / "a.py").exists())
             self.assertFalse((root / "src" / "forbidden.py").exists())
 
     def test_path_escape_rejected(self) -> None:
@@ -161,13 +259,42 @@ class ImplementSkillTests(unittest.TestCase):
             result = SkillResult(
                 skill_name="implement", success=True,
                 output={
-                    "changed_files": [{"path": "../etc/passwd", "content": "bad"}],
-                    "deleted_files": [],
+                    "edits": [],
+                    "new_files": [{"path": "../etc/passwd", "content": "bad"}],
+                    "deleted_files": [], "rationale": "x",
                 },
             )
             summary = apply_changes(result, workspace_root=root, allowed_files=[])
             self.assertEqual([], summary["written"])
             self.assertTrue(len(summary["rejected"]) >= 1)
+
+    def test_validate_requires_at_least_one_operation(self) -> None:
+        parsed = self.skill.parse_response(json.dumps({
+            "edits": [], "new_files": [], "deleted_files": [], "rationale": "x",
+        }))
+        ok, errs = self.skill.validate_output(parsed)
+        self.assertFalse(ok)
+        self.assertTrue(any("at least one of" in e for e in errs))
+
+    def test_validate_rejects_no_op_edit(self) -> None:
+        parsed = self.skill.parse_response(json.dumps({
+            "edits": [{"path": "a.py", "old_string": "same", "new_string": "same"}],
+            "rationale": "x",
+        }))
+        ok, errs = self.skill.validate_output(parsed)
+        self.assertFalse(ok)
+        self.assertTrue(any("must differ" in e for e in errs))
+
+    def test_prompt_partitions_existing_and_new_files(self) -> None:
+        p = self.skill.build_prompt({
+            "title": "t", "objective": "o", "approach": "a",
+            "files_to_touch": ["src/old.py", "src/new.py"],
+            "file_contents": {"src/old.py": "existing"},
+        })
+        self.assertIn("Existing files", p)
+        self.assertIn("New files", p)
+        self.assertIn("src/old.py", p)
+        self.assertIn("src/new.py", p)
 
 
 class SelfReviewSkillTests(unittest.TestCase):
