@@ -13,6 +13,7 @@ of run_service (analyzer, decider, promotion) continues to work unchanged.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -184,6 +185,31 @@ def _load_related_files(
     return contents
 
 
+def _search_codebase(
+    workspace: Path, queries: list[str], max_results_per_query: int = 10
+) -> dict[str, list[str]]:
+    """Run grep for each query in the workspace and return matching lines."""
+    if not queries or not workspace.exists():
+        return {}
+    results: dict[str, list[str]] = {}
+    run_kwargs = dict(capture_output=True, encoding="utf-8", errors="replace", timeout=30)
+    for query in queries:
+        if not query.strip():
+            continue
+        try:
+            proc = subprocess.run(
+                ["grep", "-rnF", "--include=*.py", query, "."],
+                cwd=workspace,
+                **run_kwargs,  # type: ignore[arg-type]
+            )
+            lines = (proc.stdout or "").splitlines()[:max_results_per_query]
+            if lines:
+                results[query] = lines
+        except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
+            continue
+    return results
+
+
 class SkillsWorkOrchestrator:
     """Runs scope/implement/self-review/validate over a single task + run."""
 
@@ -224,6 +250,13 @@ class SkillsWorkOrchestrator:
         repo_context = _collect_repo_context(workspace)
         related_file_contents = _load_related_files(workspace, task.objective)
 
+        # Extract search queries from objective for codebase grep
+        _query_matches = re.findall(
+            r'"([^"]+)"|([A-Z][a-z]+(?:[A-Z][a-z]+)+)', task.objective
+        )
+        _search_queries = [m[0] or m[1] for m in _query_matches if m[0] or m[1]]
+        codebase_search_results = _search_codebase(workspace, _search_queries)
+
         # STAGE 1: /scope
         scope_result = invoke_skill(
             scope_skill,
@@ -237,6 +270,7 @@ class SkillsWorkOrchestrator:
                     "forbidden_paths": (task.scope or {}).get("forbidden_paths") or [],
                     "repo_context": repo_context,
                     "related_file_contents": related_file_contents,
+                    "codebase_search_results": codebase_search_results,
                     "prior_scope": prior_scope,
                     "retry_feedback": retry_feedback,
                 },
