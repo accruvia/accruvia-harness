@@ -631,6 +631,10 @@ class RunService:
                     payload={"status": task_status.value, "run_id": run.id},
                 )
             )
+        # Auto-merge promoted skills-pipeline runs and verify post-merge health.
+        if decision_result.action == DecisionAction.PROMOTE and work.diagnostics and work.diagnostics.get("worker_backend") == "skills":
+            self._try_auto_merge_and_verify(task, run, work, progress)
+
         # Emit structured failure diagnostic on any non-success outcome.
         if applied_task_status != TaskStatus.COMPLETED:
             diagnostics = work.diagnostics or {}
@@ -837,6 +841,144 @@ class RunService:
                     entity_id=task.id,
                     event_type="attempt_metadata_recorded",
                     payload=metadata,
+                )
+            )
+
+    def _try_auto_merge_and_verify(self, task, run, work, progress) -> None:
+        """After a PROMOTE decision from the skills pipeline, auto-merge the
+        worktree branch to the target branch if the merge gate approves.
+        Then run post-merge-check; revert if main is unhealthy.
+
+        This enables fully autonomous operation via process-queue: no human
+        needs to merge manually after a successful skills run.
+        """
+        from pathlib import Path
+
+        from ..merge_gate import MergePolicy, auto_merge_run
+
+        try:
+            decision, result = auto_merge_run(
+                self.store, run.id, Path("."),
+                policy=MergePolicy(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.store.create_event(
+                Event(
+                    id=new_id("event"),
+                    entity_type="run",
+                    entity_id=run.id,
+                    event_type="auto_merge_error",
+                    payload={"error": str(exc)},
+                )
+            )
+            return
+
+        if not decision.auto_merge:
+            self.store.create_event(
+                Event(
+                    id=new_id("event"),
+                    entity_type="run",
+                    entity_id=run.id,
+                    event_type="auto_merge_blocked",
+                    payload={"reason": decision.reason, "concerns": decision.concerns},
+                )
+            )
+            progress({
+                "type": "auto_merge_blocked",
+                "task_id": task.id,
+                "run_id": run.id,
+                "reason": decision.reason,
+                "concerns": decision.concerns,
+            })
+            return
+
+        if result is None or not result.merged:
+            self.store.create_event(
+                Event(
+                    id=new_id("event"),
+                    entity_type="run",
+                    entity_id=run.id,
+                    event_type="auto_merge_failed",
+                    payload={
+                        "stderr": getattr(result, "stderr", "") if result else "",
+                        "conflicts": getattr(result, "conflicts", []) if result else [],
+                    },
+                )
+            )
+            return
+
+        # Merge succeeded — record event.
+        self.store.create_event(
+            Event(
+                id=new_id("event"),
+                entity_type="run",
+                entity_id=run.id,
+                event_type="auto_merged",
+                payload={
+                    "commit_sha": result.commit_sha,
+                    "branch": decision.branch_name,
+                    "changed_files": decision.changed_files,
+                },
+            )
+        )
+        progress({
+            "type": "auto_merged",
+            "task_id": task.id,
+            "run_id": run.id,
+            "commit_sha": result.commit_sha,
+        })
+
+        # Post-merge health check. If main is broken, revert.
+        try:
+            from ..skills.post_merge_check import PostMergeCheckSkill
+
+            pmc = PostMergeCheckSkill()
+            pmc_run_dir = self.workspace_root / "runs" / run.id / "post_merge_check"
+            profile = task.validation_profile or "python"
+            pmc_result = pmc.invoke_deterministic(
+                workspace=Path("."),
+                validation_profile=profile,
+                run_dir=pmc_run_dir,
+            )
+            if not pmc_result.output.get("main_healthy", True):
+                # Revert the merge commit.
+                import subprocess
+
+                revert = subprocess.run(
+                    ["git", "revert", "--no-edit", "HEAD"],
+                    cwd=Path("."),
+                    capture_output=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=60,
+                )
+                self.store.create_event(
+                    Event(
+                        id=new_id("event"),
+                        entity_type="run",
+                        entity_id=run.id,
+                        event_type="post_merge_revert",
+                        payload={
+                            "reverted_sha": result.commit_sha,
+                            "revert_exit_code": revert.returncode,
+                            "failed_stage": pmc_result.output.get("failed_stage", ""),
+                        },
+                    )
+                )
+                progress({
+                    "type": "post_merge_revert",
+                    "task_id": task.id,
+                    "run_id": run.id,
+                    "reverted_sha": result.commit_sha,
+                })
+        except Exception as exc:  # noqa: BLE001
+            self.store.create_event(
+                Event(
+                    id=new_id("event"),
+                    entity_type="run",
+                    entity_id=run.id,
+                    event_type="post_merge_check_error",
+                    payload={"error": str(exc)},
                 )
             )
 
