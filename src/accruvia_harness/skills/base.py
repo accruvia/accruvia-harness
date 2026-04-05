@@ -95,21 +95,49 @@ class Skill(Protocol):
         ...
 
 
+def _unwrap_cli_envelope(text: str) -> str:
+    """If text is a CLI envelope (e.g. claude --output-format json), extract
+    the inner `result` field. Otherwise return text unchanged.
+    """
+    stripped = text.strip()
+    if not stripped.startswith("{"):
+        return text
+    try:
+        payload = json.loads(stripped)
+    except (json.JSONDecodeError, ValueError):
+        return text
+    if (
+        isinstance(payload, dict)
+        and "result" in payload
+        and "usage" in payload
+        and isinstance(payload.get("result"), str)
+    ):
+        return payload["result"]
+    return text
+
+
 def extract_json_payload(response_text: str) -> dict[str, Any] | None:
     """Best-effort JSON extraction from an LLM response.
 
     Tries in order:
-    1. Whole response as JSON
-    2. First ```json fenced block
-    3. First {...} balanced block
+    1. Unwrap CLI envelope (claude/codex --output-format json) if present
+    2. Whole response as JSON
+    3. First ```json fenced block
+    4. First {...} balanced block
+
+    When a CLI envelope is detected, the inner `result` string is extracted
+    first; then the same detection runs on the unwrapped content. This keeps
+    skills tolerant of both raw LLM text and wrapped CLI output.
     """
-    text = response_text.strip()
+    text = _unwrap_cli_envelope(response_text).strip()
     if not text:
         return None
 
     try:
         parsed = json.loads(text)
         if isinstance(parsed, dict):
+            # Don't return the envelope itself if someone passed raw envelope bytes
+            # after unwrap we shouldn't see {result, usage} again.
             return parsed
     except (json.JSONDecodeError, ValueError):
         pass

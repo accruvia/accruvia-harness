@@ -54,18 +54,41 @@ def _to_artifact_tuples(artifacts: list[OrchestratorArtifact]) -> list[tuple[str
 
 
 def _git_diff(workspace: Path) -> str:
-    """Return unified diff of unstaged changes. Empty string if not a git repo."""
+    """Return unified diff of unstaged changes, *including* new untracked files.
+
+    Uses `git add -N` (intent-to-add) on untracked files so `git diff` shows
+    them. Without this, /self-review can't see newly created files and will
+    infer they're missing — a false negative.
+
+    Forces UTF-8 decoding with replacement because LLM-generated content often
+    contains em-dashes, curly quotes, etc. that crash Windows cp1252 default.
+    """
+    run_kwargs = dict(capture_output=True, encoding="utf-8", errors="replace", timeout=30)
     try:
+        # Mark untracked files as intent-to-add so they show up in the diff.
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=workspace,
+            **run_kwargs,  # type: ignore[arg-type]
+        )
+        if status.returncode == 0:
+            new_paths: list[str] = []
+            for line in (status.stdout or "").splitlines():
+                if line.startswith("?? "):
+                    new_paths.append(line[3:].strip())
+            if new_paths:
+                subprocess.run(
+                    ["git", "add", "-N", "--", *new_paths],
+                    cwd=workspace,
+                    **run_kwargs,  # type: ignore[arg-type]
+                )
         result = subprocess.run(
             ["git", "diff", "--no-color"],
             cwd=workspace,
-            capture_output=True,
-            text=True,
-            timeout=30,
+            **run_kwargs,  # type: ignore[arg-type]
         )
         if result.returncode == 0:
             return result.stdout or ""
-        # Fall through on non-git repos
         return ""
     except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
         return ""
@@ -317,7 +340,12 @@ class SkillsWorkOrchestrator:
 
         # STAGE 4: /validate (deterministic)
         profile = task.validation_profile or "generic"
-        commands = commands_for_profile(profile)
+        written_files = apply_summary.get("written") or []
+        commands = _resolve_validate_commands(
+            profile=profile,
+            validation_mode=task.validation_mode,
+            changed_files=written_files,
+        )
         validate_result = validate_skill.invoke_deterministic(
             workspace_root=workspace,
             commands=commands,
@@ -363,6 +391,30 @@ class SkillsWorkOrchestrator:
 
         # Compose final WorkResult
         written = apply_summary.get("written") or []
+        test_files = [p for p in written if _is_test_path(p)]
+        # Synthesize a consolidated report artifact so tasks that require
+        # `report` see a satisfied artifact. Aggregates all skill outputs.
+        artifacts.append(
+            _write_artifact(
+                run_dir, "report",
+                {
+                    "worker_backend": "skills",
+                    "worker_outcome": "candidate" if overall != "fail" and ship_ready else "failed",
+                    "validation_profile": profile,
+                    "changed_files": written,
+                    "test_files": test_files,
+                    "compile_check": {"passed": _stage_passed(validate_result.output, "compile") or _stage_passed(validate_result.output, "build") or overall == "skipped"},
+                    "test_check": {"passed": _stage_passed(validate_result.output, "tests") or _stage_passed(validate_result.output, "test") or overall == "skipped"},
+                    "ship_ready": ship_ready,
+                    "overall_validation": overall,
+                    "scope": scope,
+                    "implementation_rationale": implement_result.output.get("rationale", ""),
+                    "self_review_summary": self_review_result.output.get("summary", "") if self_review_result.success else "",
+                    "diagnosis": diagnosis,
+                },
+                "Skills-pipeline consolidated report",
+            )
+        )
         if overall == "fail":
             return WorkResult(
                 summary=f"Validation failed: {diagnosis.get('root_cause', 'see evidence') if diagnosis else 'see evidence'}",
@@ -421,3 +473,46 @@ def _stage_passed(validation_output: dict[str, Any], stage_name: str) -> bool:
         if str(entry.get("name")) == stage_name and str(entry.get("status")) == "pass":
             return True
     return False
+
+
+def _is_test_path(path: str) -> bool:
+    norm = path.replace("\\", "/")
+    basename = norm.rsplit("/", 1)[-1]
+    return (
+        norm.startswith("tests/")
+        or "/tests/" in norm
+        or basename.startswith("test_")
+        or basename.endswith("_test.py")
+    )
+
+
+def _resolve_validate_commands(
+    *,
+    profile: str,
+    validation_mode: str | None,
+    changed_files: list[str],
+) -> list[dict[str, Any]]:
+    """Build the validation command list for the work orchestrator.
+
+    - validation_mode=lightweight_operator => no commands (UX/DX tweaks)
+    - python profile with changed test files => pytest scoped to those files
+    - otherwise => profile defaults from commands_for_profile
+    """
+    if (validation_mode or "").strip() == "lightweight_operator":
+        return []
+    default_commands = commands_for_profile(profile)
+    if profile != "python":
+        return default_commands
+    test_files = [p for p in changed_files if _is_test_path(p) and p.endswith(".py")]
+    if not test_files:
+        return default_commands
+    # Quote each test file path and run pytest against just those.
+    quoted = " ".join(f'"{path}"' for path in test_files)
+    return [
+        {"name": "compile", "cmd": "python -m compileall -q .", "timeout": 120},
+        {
+            "name": "tests",
+            "cmd": f"python -m pytest -q --no-header -x {quoted}",
+            "timeout": 600,
+        },
+    ]

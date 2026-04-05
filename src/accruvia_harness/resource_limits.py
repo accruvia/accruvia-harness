@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import os
-import resource
 from dataclasses import dataclass
+
+try:  # resource is POSIX-only; Windows workers run without rlimit enforcement.
+    import resource as _resource  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover - Windows path
+    _resource = None
 
 
 LARGE_HEAP_BACKENDS = frozenset({"codex", "claude"})
@@ -46,21 +50,28 @@ class ResourceLimitPolicy:
     cpu_time_limit_seconds: int
 
     def preexec_fn(self):
+        if _resource is None:
+            # Windows (or any platform without POSIX `resource`): rlimit
+            # enforcement is a no-op. subprocess.Popen's preexec_fn is not
+            # supported on Windows anyway, so callers must guard with
+            # start_new_session / creationflags themselves.
+            return None
         memory_bytes = self.memory_limit_mb * 1024 * 1024 if self.memory_limit_mb is not None else None
         cpu_seconds = self.cpu_time_limit_seconds
+        res = _resource
 
         def _apply() -> None:
             if memory_bytes is not None:
                 try:
-                    resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
+                    res.setrlimit(res.RLIMIT_AS, (memory_bytes, memory_bytes))
                 except (ValueError, OSError):
                     pass
                 try:
-                    resource.setrlimit(resource.RLIMIT_DATA, (memory_bytes, memory_bytes))
+                    res.setrlimit(res.RLIMIT_DATA, (memory_bytes, memory_bytes))
                 except (ValueError, OSError):
                     pass
             try:
-                resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
+                res.setrlimit(res.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
             except (ValueError, OSError):
                 pass
             os.setsid()

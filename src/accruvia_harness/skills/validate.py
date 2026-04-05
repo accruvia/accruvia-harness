@@ -123,7 +123,8 @@ class ValidateSkill:
                     shell=True,
                     cwd=cwd,
                     capture_output=True,
-                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=timeout,
                 )
                 exit_code = completed.returncode

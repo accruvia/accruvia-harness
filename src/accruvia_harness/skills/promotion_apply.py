@@ -20,7 +20,8 @@ def _git(args: list[str], cwd: Path, timeout: int = 60) -> tuple[int, str, str]:
             ["git", *args],
             cwd=cwd,
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
         )
         return result.returncode, result.stdout or "", result.stderr or ""
