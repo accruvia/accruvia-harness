@@ -130,6 +130,22 @@ class ScopeSkillTests(unittest.TestCase):
         ok, _ = self.skill.validate_output(parsed)
         self.assertFalse(ok)
 
+    def test_prompt_includes_related_files(self) -> None:
+        p = self.skill.build_prompt({
+            "title": "Fix utils", "objective": "patch utils.py", "strategy": "s",
+            "repo_context": "listing",
+            "related_file_contents": {
+                "src/utils.py": "def helper():\n    pass\n",
+                "docs/guide.md": "Z" * 4000,
+            },
+        })
+        self.assertIn("Related files (reference):", p)
+        self.assertIn("src/utils.py", p)
+        self.assertIn("def helper():", p)
+        # Content should be truncated to 3000 chars
+        self.assertIn("Z" * 3000, p)
+        self.assertNotIn("Z" * 3001, p)
+
 
 class ImplementSkillTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -779,6 +795,41 @@ class WorkOrchestratorDiagnosticsTests(unittest.TestCase):
         result, _ = self._run_to_validation_failure({}, diagnose_success=False)
         self.assertEqual("failed", result.outcome)
         self.assertNotIn("retry_hints", result.diagnostics)
+
+
+class WorkOrchestratorRelatedFilesTests(unittest.TestCase):
+    def test_load_related_files_matches_by_substring(self) -> None:
+        from accruvia_harness.services.work_orchestrator import _load_related_files
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp)
+            (ws / "src").mkdir()
+            (ws / "src" / "utils.py").write_text("def helper(): pass")
+            (ws / "src" / "main.py").write_text("import utils")
+            (ws / "docs").mkdir()
+            (ws / "docs" / "guide.md").write_text("# Guide")
+            (ws / "src" / "unrelated.py").write_text("x = 1")
+
+            # Objective mentions src/utils.py and docs/guide.md
+            result = _load_related_files(ws, "Fix src/utils.py and update docs/guide.md")
+            self.assertIn("src/utils.py", result)
+            self.assertIn("docs/guide.md", result)
+            self.assertNotIn("src/main.py", result)
+            self.assertNotIn("src/unrelated.py", result)
+            self.assertEqual("def helper(): pass", result["src/utils.py"])
+            self.assertEqual("# Guide", result["docs/guide.md"])
+
+    def test_load_related_files_respects_caps(self) -> None:
+        from accruvia_harness.services.work_orchestrator import _load_related_files
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp)
+            (ws / "a.py").write_text("x" * 10000)
+            (ws / "b.py").write_text("y" * 10000)
+
+            result = _load_related_files(ws, "Edit a.py and b.py", max_total_bytes=15000)
+            total = sum(len(v) for v in result.values())
+            self.assertLessEqual(total, 15000)
 
 
 if __name__ == "__main__":

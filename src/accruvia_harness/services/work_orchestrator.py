@@ -141,6 +141,49 @@ def _load_file_contents(workspace: Path, paths: list[str], max_per_file: int = 8
     return contents
 
 
+def _load_related_files(
+    workspace: Path, objective: str, max_files: int = 5, max_total_bytes: int = 15000
+) -> dict[str, str]:
+    """Load contents of .py/.md files whose relative path appears in the objective."""
+    if not workspace.exists() or not objective.strip():
+        return {}
+    objective_lower = objective.lower()
+    candidates: list[Path] = []
+    try:
+        for path in sorted(workspace.rglob("*")):
+            if not path.is_file():
+                continue
+            if path.suffix not in (".py", ".md"):
+                continue
+            rel = path.relative_to(workspace).as_posix()
+            if any(part.startswith(".") for part in rel.split("/")):
+                continue
+            if any(skip in rel for skip in ("node_modules/", "__pycache__/", "dist/", "build/")):
+                continue
+            if rel.lower() in objective_lower:
+                candidates.append(path)
+                if len(candidates) >= max_files:
+                    break
+    except OSError:
+        return {}
+    contents: dict[str, str] = {}
+    total = 0
+    for path in candidates:
+        rel = path.relative_to(workspace).as_posix()
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if total + len(text) > max_total_bytes:
+            remaining = max_total_bytes - total
+            if remaining <= 0:
+                break
+            text = text[:remaining]
+        contents[rel] = text
+        total += len(text)
+    return contents
+
+
 class SkillsWorkOrchestrator:
     """Runs scope/implement/self-review/validate over a single task + run."""
 
@@ -179,6 +222,7 @@ class SkillsWorkOrchestrator:
         commit_skill: CommitSkill = self.skill_registry.get("commit")  # type: ignore[assignment]
 
         repo_context = _collect_repo_context(workspace)
+        related_file_contents = _load_related_files(workspace, task.objective)
 
         # STAGE 1: /scope
         scope_result = invoke_skill(
@@ -192,6 +236,7 @@ class SkillsWorkOrchestrator:
                     "allowed_paths": (task.scope or {}).get("allowed_paths") or [],
                     "forbidden_paths": (task.scope or {}).get("forbidden_paths") or [],
                     "repo_context": repo_context,
+                    "related_file_contents": related_file_contents,
                     "prior_scope": prior_scope,
                     "retry_feedback": retry_feedback,
                 },
