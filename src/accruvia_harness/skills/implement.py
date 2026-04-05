@@ -78,7 +78,7 @@ class ImplementSkill:
 
         existing_block_parts = []
         for path, content in file_contents.items():
-            truncated = str(content)[:12000]
+            truncated = str(content)[:40000]
             existing_block_parts.append(
                 f"=== {path} ===\n{truncated}\n=== end {path} ==="
             )

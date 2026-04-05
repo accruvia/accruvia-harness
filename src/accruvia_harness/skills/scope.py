@@ -73,7 +73,7 @@ class ScopeSkill:
         if related_file_contents:
             parts = ["Related files (reference):"]
             for path, content in related_file_contents.items():
-                truncated = content[:3000]
+                truncated = content[:6000]
                 parts.append(f"--- {path} ---\n{truncated}")
             related_block = "\n".join(parts)
 
