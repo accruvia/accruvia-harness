@@ -6,6 +6,7 @@ import subprocess
 
 from ..domain import Event, PromotionRecord, PromotionStatus, RunStatus, new_id
 from ..llm import LLMInvocation, LLMRouter, parse_affirmation_response
+from ..skills import PromotionReviewSkill, SkillInvocation, invoke_skill
 from ..store import SQLiteHarnessStore
 from ..validation import PromotionValidator, PromotionValidatorRegistry, ValidationIssue, default_promotion_validators
 from .repository_promotion_service import RepositoryPromotionService
@@ -164,32 +165,41 @@ class PromotionService:
             raise ValueError(f"Promotion {promotion.id} is not pending affirmation")
         run = self._select_run(task_id, promotion.run_id)
         artifacts = self.store.list_artifacts(run.id)
-        invocation = LLMInvocation(
-            task=task,
-            run=run,
-            prompt=self._build_affirmation_prompt(task, promotion, artifacts),
-            run_dir=self._affirmation_run_dir(run.id),
+        # Structured promotion review via /promotion-review skill — replaces
+        # the old free-form prompt + heuristic affirmation parser.
+        review_skill = PromotionReviewSkill()
+        skill_inputs = self._build_review_inputs(task, promotion, artifacts)
+        skill_result = invoke_skill(
+            review_skill,
+            SkillInvocation(
+                skill_name=review_skill.name,
+                inputs=skill_inputs,
+                task=task,
+                run=run,
+                run_dir=self._affirmation_run_dir(run.id),
+            ),
+            self.llm_router,
+            telemetry=self.telemetry,
         )
-        if self.telemetry is not None:
-            with self.telemetry.timed(
-                "promotion_affirmation",
-                task_id=task.id,
-                run_id=run.id,
-                promotion_id=promotion.id,
-                validation_profile=task.validation_profile,
-            ):
-                result, routed_backend = self.llm_router.execute(invocation, telemetry=self.telemetry)
+        if not skill_result.success:
+            approved = False
+            rationale = f"promotion_review skill failed: {'; '.join(skill_result.errors)}"
+            concerns: list[dict[str, str]] = []
         else:
-            result, routed_backend = self.llm_router.execute(invocation, telemetry=self.telemetry)
-        approved, rationale = parse_affirmation_response(result.response_text)
+            approved = bool(skill_result.output.get("approved"))
+            rationale = str(skill_result.output.get("rationale") or "")
+            concerns = list(skill_result.output.get("concerns") or [])
+        routed_backend = skill_result.llm_backend or "unknown"
         details = {
             **promotion.details,
             "affirmation": {
                 "backend": routed_backend,
-                "response_path": str(result.response_path),
-                "prompt_path": str(result.prompt_path),
+                "response_path": skill_result.response_path or "",
+                "prompt_path": skill_result.prompt_path or "",
                 "rationale": rationale,
                 "approved": approved,
+                "concerns": concerns,
+                "skill": "promotion_review",
             },
         }
         follow_on_task_id: str | None = None
@@ -526,6 +536,51 @@ class PromotionService:
         if not promotions:
             raise ValueError(f"Task {task_id} has no promotion reviews")
         return promotions[-1]
+
+    def _build_review_inputs(
+        self, task, promotion: PromotionRecord, artifacts
+    ) -> dict[str, object]:
+        """Assemble typed inputs for the /promotion-review skill.
+
+        Diff is approximated from artifact contents when a real git diff is
+        not available. The skill is forgiving about this — it accepts any
+        'diff' text.
+        """
+        validator_summaries = promotion.details.get("validators", [])
+        changed_files: list[str] = []
+        scope_approach = ""
+        skill_report_text = ""
+        for artifact in artifacts:
+            try:
+                if artifact.kind == "scope_output":
+                    import json as _json
+                    payload = _json.loads(Path(artifact.path).read_text(encoding="utf-8"))
+                    output = payload.get("output") or {}
+                    scope_approach = str(output.get("approach") or "")
+                elif artifact.kind == "implementation_output":
+                    import json as _json
+                    payload = _json.loads(Path(artifact.path).read_text(encoding="utf-8"))
+                    output = payload.get("output") or {}
+                    for entry in output.get("changed_files") or []:
+                        if isinstance(entry, dict) and entry.get("path"):
+                            changed_files.append(str(entry["path"]))
+                elif artifact.kind == "report":
+                    import json as _json
+                    payload = _json.loads(Path(artifact.path).read_text(encoding="utf-8"))
+                    for item in payload.get("changed_files") or []:
+                        changed_files.append(str(item))
+            except (OSError, ValueError, KeyError):
+                continue
+        # Fall back to raw artifact contents as the "diff" context
+        skill_report_text = self._artifact_contents(artifacts)
+        return {
+            "title": task.title,
+            "objective": task.objective,
+            "diff": skill_report_text,
+            "validation_summary": str(validator_summaries),
+            "scope_approach": scope_approach,
+            "changed_files": list(dict.fromkeys(changed_files)),  # dedupe, preserve order
+        }
 
     def _build_affirmation_prompt(
         self, task, promotion: PromotionRecord, artifacts

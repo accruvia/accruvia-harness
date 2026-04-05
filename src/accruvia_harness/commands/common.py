@@ -858,9 +858,13 @@ def build_context(config: HarnessConfig) -> CLIContext:
     store = build_store(config)
     telemetry = build_telemetry(config)
     control_plane = ControlPlane(store)
-    failure_classifier = FailureClassifier()
     breadcrumb_writer = BreadcrumbWriter(store, config.workspace_root)
     engine = build_engine_from_config(config, store=store, telemetry=telemetry)
+    failure_classifier = FailureClassifier(
+        llm_router=engine.llm_router,
+        workspace_root=config.workspace_root,
+        telemetry=telemetry,
+    )
     query_service = HarnessQueryService(store, telemetry=telemetry)
     ctx = CLIContext(
         config=config,

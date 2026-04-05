@@ -891,6 +891,15 @@ def build_worker(backend: str, shell_command: str | None = None) -> WorkerBacken
 
 
 def build_worker_from_config(config: HarnessConfig, telemetry=None) -> WorkerBackend:
+    # Short-circuit skills backend — avoids importing unix-only resource module
+    if config.worker_backend == "skills":
+        from .skills_worker import SkillsWorker
+
+        return SkillsWorker(
+            llm_router=build_llm_router(config, telemetry=telemetry),
+            workspace_root=config.workspace_root,
+            telemetry=telemetry,
+        )
     from .resource_limits import ResourceLimitPolicy, resolve_memory_limit_mb
     from .routing_hook import RoutingHook
     from .timeout_policy import ExecutionTimeoutPolicy

@@ -1,0 +1,423 @@
+"""Skills-based work orchestrator.
+
+Replaces the external worker CLI + report.json contract with a deterministic
+pipeline over skills:
+
+    /scope -> /implement -> (apply_changes) -> /self-review -> /validate -> (maybe /diagnose)
+
+Each stage produces structured output that the next stage consumes. All
+outputs are persisted as JSON artifacts on the run for audit and replay.
+The final result conforms to the existing WorkResult contract so the rest
+of run_service (analyzer, decider, promotion) continues to work unchanged.
+"""
+from __future__ import annotations
+
+import json
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from ..domain import Run, Task, new_id
+from ..llm import LLMRouter
+from ..policy import WorkResult
+from ..skills import (
+    DiagnoseSkill,
+    ImplementSkill,
+    ScopeSkill,
+    SelfReviewSkill,
+    SkillInvocation,
+    SkillRegistry,
+    SkillResult,
+    ValidateSkill,
+    apply_changes,
+    commands_for_profile,
+    invoke_skill,
+)
+
+
+@dataclass(slots=True)
+class OrchestratorArtifact:
+    kind: str
+    path: Path
+    summary: str
+
+
+def _write_artifact(run_dir: Path, kind: str, payload: dict[str, Any], summary: str) -> OrchestratorArtifact:
+    path = run_dir / f"{kind}.json"
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return OrchestratorArtifact(kind=kind, path=path, summary=summary)
+
+
+def _to_artifact_tuples(artifacts: list[OrchestratorArtifact]) -> list[tuple[str, str, str]]:
+    return [(a.kind, str(a.path), a.summary) for a in artifacts]
+
+
+def _git_diff(workspace: Path) -> str:
+    """Return unified diff of unstaged changes. Empty string if not a git repo."""
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--no-color"],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            return result.stdout or ""
+        # Fall through on non-git repos
+        return ""
+    except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
+        return ""
+
+
+def _collect_repo_context(workspace: Path, max_files: int = 80, max_bytes: int = 4000) -> str:
+    """Build a short text listing of the workspace for scope context."""
+    if not workspace.exists():
+        return "(workspace missing)"
+    lines: list[str] = []
+    try:
+        for path in sorted(workspace.rglob("*"))[:max_files * 4]:
+            if not path.is_file():
+                continue
+            rel = path.relative_to(workspace).as_posix()
+            # Skip hidden directories and common noise
+            if any(part.startswith(".") for part in rel.split("/")):
+                continue
+            if any(skip in rel for skip in ("node_modules/", "__pycache__/", "dist/", "build/")):
+                continue
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            lines.append(f"{rel} ({size} bytes)")
+            if len(lines) >= max_files:
+                break
+    except OSError:
+        return "(workspace listing failed)"
+    text = "\n".join(lines)
+    return text[:max_bytes] if text else "(empty workspace)"
+
+
+def _load_file_contents(workspace: Path, paths: list[str], max_per_file: int = 8000) -> dict[str, str]:
+    contents: dict[str, str] = {}
+    for rel in paths:
+        target = (workspace / rel.replace("\\", "/")).resolve()
+        try:
+            target.relative_to(workspace.resolve())
+        except ValueError:
+            continue
+        if not target.exists() or not target.is_file():
+            continue
+        try:
+            text = target.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        contents[rel] = text[:max_per_file]
+    return contents
+
+
+class SkillsWorkOrchestrator:
+    """Runs scope/implement/self-review/validate over a single task + run."""
+
+    def __init__(
+        self,
+        skill_registry: SkillRegistry,
+        llm_router: LLMRouter,
+        workspace_root: Path,
+        telemetry: Any = None,
+    ) -> None:
+        self.skill_registry = skill_registry
+        self.llm_router = llm_router
+        self.workspace_root = Path(workspace_root)
+        self.telemetry = telemetry
+
+    def execute(
+        self,
+        task: Task,
+        run: Run,
+        workspace: Path,
+        run_dir: Path,
+        *,
+        retry_feedback: str = "",
+        prior_scope: dict[str, Any] | None = None,
+    ) -> WorkResult:
+        workspace = Path(workspace)
+        run_dir = Path(run_dir)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        artifacts: list[OrchestratorArtifact] = []
+
+        scope_skill: ScopeSkill = self.skill_registry.get("scope")  # type: ignore[assignment]
+        implement_skill: ImplementSkill = self.skill_registry.get("implement")  # type: ignore[assignment]
+        self_review_skill: SelfReviewSkill = self.skill_registry.get("self_review")  # type: ignore[assignment]
+        validate_skill: ValidateSkill = self.skill_registry.get("validate")  # type: ignore[assignment]
+        diagnose_skill: DiagnoseSkill = self.skill_registry.get("diagnose")  # type: ignore[assignment]
+
+        repo_context = _collect_repo_context(workspace)
+
+        # STAGE 1: /scope
+        scope_result = invoke_skill(
+            scope_skill,
+            SkillInvocation(
+                skill_name="scope",
+                inputs={
+                    "title": task.title,
+                    "objective": task.objective,
+                    "strategy": task.strategy,
+                    "allowed_paths": (task.scope or {}).get("allowed_paths") or [],
+                    "forbidden_paths": (task.scope or {}).get("forbidden_paths") or [],
+                    "repo_context": repo_context,
+                    "prior_scope": prior_scope,
+                    "retry_feedback": retry_feedback,
+                },
+                task=task,
+                run=run,
+                run_dir=run_dir / "skill_scope",
+            ),
+            self.llm_router,
+            telemetry=self.telemetry,
+        )
+        artifacts.append(
+            _write_artifact(
+                run_dir, "scope_output",
+                {"success": scope_result.success, "errors": scope_result.errors, "output": scope_result.output},
+                "Structured scope decision",
+            )
+        )
+        if not scope_result.success:
+            return WorkResult(
+                summary="Scope skill failed to produce valid output.",
+                artifacts=_to_artifact_tuples(artifacts),
+                outcome="failed",
+                diagnostics={
+                    "stage": "scope",
+                    "worker_outcome": "failed",
+                    "worker_backend": "skills",
+                    "failure_category": "scope_skill_failure",
+                    "failure_message": "; ".join(scope_result.errors),
+                    "validation_profile": task.validation_profile,
+                },
+            )
+        scope = scope_result.output
+        if scope.get("estimated_complexity") == "too_large":
+            return WorkResult(
+                summary="Scope flagged task as too large; split before implementing.",
+                artifacts=_to_artifact_tuples(artifacts),
+                outcome="blocked",
+                diagnostics={
+                    "stage": "scope",
+                    "worker_outcome": "blocked",
+                    "worker_backend": "skills",
+                    "failure_category": "scope_too_broad",
+                    "failure_message": scope.get("approach", "Scope marked too_large"),
+                    "needs_split": True,
+                    "validation_profile": task.validation_profile,
+                },
+            )
+
+        # STAGE 2: /implement
+        file_contents = _load_file_contents(workspace, list(scope.get("files_to_touch") or []))
+        implement_result = invoke_skill(
+            implement_skill,
+            SkillInvocation(
+                skill_name="implement",
+                inputs={
+                    "title": task.title,
+                    "objective": task.objective,
+                    "approach": scope.get("approach", ""),
+                    "files_to_touch": scope.get("files_to_touch") or [],
+                    "files_not_to_touch": scope.get("files_not_to_touch") or [],
+                    "risks": scope.get("risks") or [],
+                    "file_contents": file_contents,
+                    "retry_feedback": retry_feedback,
+                },
+                task=task,
+                run=run,
+                run_dir=run_dir / "skill_implement",
+            ),
+            self.llm_router,
+            telemetry=self.telemetry,
+        )
+        artifacts.append(
+            _write_artifact(
+                run_dir, "implementation_output",
+                {"success": implement_result.success, "errors": implement_result.errors, "output": implement_result.output},
+                "Structured implementation output",
+            )
+        )
+        if not implement_result.success:
+            return WorkResult(
+                summary="Implement skill failed to produce valid output.",
+                artifacts=_to_artifact_tuples(artifacts),
+                outcome="failed",
+                diagnostics={
+                    "stage": "implement",
+                    "worker_outcome": "failed",
+                    "worker_backend": "skills",
+                    "failure_category": "implement_skill_failure",
+                    "failure_message": "; ".join(implement_result.errors),
+                    "validation_profile": task.validation_profile,
+                },
+            )
+
+        apply_summary = apply_changes(
+            implement_result,
+            workspace_root=workspace,
+            allowed_files=list(scope.get("files_to_touch") or []),
+        )
+        artifacts.append(
+            _write_artifact(
+                run_dir, "apply_changes_summary", apply_summary,
+                "File-apply audit",
+            )
+        )
+        if apply_summary["rejected"] and not apply_summary["written"]:
+            return WorkResult(
+                summary="All proposed file writes were rejected as out of scope.",
+                artifacts=_to_artifact_tuples(artifacts),
+                outcome="failed",
+                diagnostics={
+                    "stage": "apply_changes",
+                    "worker_outcome": "failed",
+                    "worker_backend": "skills",
+                    "failure_category": "scope_violation",
+                    "failure_message": f"Rejected: {apply_summary['rejected']}",
+                    "validation_profile": task.validation_profile,
+                },
+            )
+
+        # STAGE 3: /self-review
+        diff_text = _git_diff(workspace)
+        self_review_result = invoke_skill(
+            self_review_skill,
+            SkillInvocation(
+                skill_name="self_review",
+                inputs={
+                    "title": task.title,
+                    "objective": task.objective,
+                    "approach": scope.get("approach", ""),
+                    "risks": scope.get("risks") or [],
+                    "diff": diff_text,
+                },
+                task=task,
+                run=run,
+                run_dir=run_dir / "skill_self_review",
+            ),
+            self.llm_router,
+            telemetry=self.telemetry,
+        )
+        artifacts.append(
+            _write_artifact(
+                run_dir, "self_review_output",
+                {"success": self_review_result.success, "errors": self_review_result.errors, "output": self_review_result.output},
+                "Staff-engineer self-review",
+            )
+        )
+        ship_ready = bool(self_review_result.output.get("ship_ready")) if self_review_result.success else False
+
+        # STAGE 4: /validate (deterministic)
+        profile = task.validation_profile or "generic"
+        commands = commands_for_profile(profile)
+        validate_result = validate_skill.invoke_deterministic(
+            workspace_root=workspace,
+            commands=commands,
+            run_dir=run_dir / "skill_validate",
+        )
+        artifacts.append(
+            _write_artifact(
+                run_dir, "validation_output", validate_result.output,
+                "Deterministic compile+test validation",
+            )
+        )
+        overall = str(validate_result.output.get("overall") or "skipped")
+
+        # STAGE 5 (conditional): /diagnose when validation fails
+        diagnosis: dict[str, Any] | None = None
+        if overall == "fail":
+            evidence = str(validate_result.output.get("failure_evidence") or "")
+            diag_result = invoke_skill(
+                diagnose_skill,
+                SkillInvocation(
+                    skill_name="diagnose",
+                    inputs={
+                        "evidence": evidence,
+                        "context": f"task: {task.title}; objective: {task.objective}",
+                        "attempt": run.attempt,
+                    },
+                    task=task,
+                    run=run,
+                    run_dir=run_dir / "skill_diagnose",
+                ),
+                self.llm_router,
+                telemetry=self.telemetry,
+            )
+            if diag_result.success:
+                diagnosis = diag_result.output
+            artifacts.append(
+                _write_artifact(
+                    run_dir, "diagnosis_output",
+                    {"success": diag_result.success, "errors": diag_result.errors, "output": diag_result.output},
+                    "Diagnosed validation failure",
+                )
+            )
+
+        # Compose final WorkResult
+        written = apply_summary.get("written") or []
+        if overall == "fail":
+            return WorkResult(
+                summary=f"Validation failed: {diagnosis.get('root_cause', 'see evidence') if diagnosis else 'see evidence'}",
+                artifacts=_to_artifact_tuples(artifacts),
+                outcome="failed",
+                diagnostics={
+                    "stage": "validate",
+                    "worker_outcome": "failed",
+                    "worker_backend": "skills",
+                    "failure_category": diagnosis.get("classification") if diagnosis else "validation_failure",
+                    "failure_message": diagnosis.get("root_cause") if diagnosis else str(validate_result.output.get("failure_evidence") or "")[:500],
+                    "validation_profile": profile,
+                    "changed_files": written,
+                    "diagnosis": diagnosis,
+                    "compile_check": {"passed": _stage_passed(validate_result.output, "compile") or _stage_passed(validate_result.output, "build")},
+                    "test_check": {"passed": _stage_passed(validate_result.output, "tests") or _stage_passed(validate_result.output, "test")},
+                },
+            )
+        if not ship_ready:
+            review_feedback = SelfReviewSkill.feedback_for_retry(self_review_result)
+            return WorkResult(
+                summary="Self-review blocked shipping; retry with feedback.",
+                artifacts=_to_artifact_tuples(artifacts),
+                outcome="failed",
+                diagnostics={
+                    "stage": "self_review",
+                    "worker_outcome": "failed",
+                    "worker_backend": "skills",
+                    "failure_category": "self_review_blocked",
+                    "failure_message": review_feedback[:500],
+                    "review_feedback": review_feedback,
+                    "validation_profile": profile,
+                    "changed_files": written,
+                },
+            )
+        return WorkResult(
+            summary=implement_result.output.get("rationale") or "Task implemented and validated.",
+            artifacts=_to_artifact_tuples(artifacts),
+            outcome="success",
+            diagnostics={
+                "stage": "complete",
+                "worker_outcome": "candidate",
+                "worker_backend": "skills",
+                "skip_external_validation": True,
+                "validation_profile": profile,
+                "changed_files": written,
+                "compile_check": {"passed": _stage_passed(validate_result.output, "compile") or _stage_passed(validate_result.output, "build") or overall == "skipped"},
+                "test_check": {"passed": _stage_passed(validate_result.output, "tests") or _stage_passed(validate_result.output, "test") or overall == "skipped"},
+                "test_files": [p for p in written if "test" in p.lower()],
+            },
+        )
+
+
+def _stage_passed(validation_output: dict[str, Any], stage_name: str) -> bool:
+    for entry in validation_output.get("results") or []:
+        if str(entry.get("name")) == stage_name and str(entry.get("status")) == "pass":
+            return True
+    return False

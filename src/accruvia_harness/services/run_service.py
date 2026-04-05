@@ -432,7 +432,15 @@ class RunService:
         attempt = run.attempt
 
         # If worker produced a candidate, run compile+test validation before analyzing.
-        if work.outcome == "success" and work.diagnostics and work.diagnostics.get("worker_outcome") == "candidate":
+        # SkillsWorker (worker_backend=skills) runs /validate inline and signals
+        # via diagnostics.skip_external_validation so we don't duplicate work.
+        needs_external_validation = (
+            work.outcome == "success"
+            and work.diagnostics
+            and work.diagnostics.get("worker_outcome") == "candidate"
+            and not bool(work.diagnostics.get("skip_external_validation"))
+        )
+        if needs_external_validation:
             run = self.store.mark_run(run, RunStatus.VALIDATING, "Running compile and test validation.")
             progress({
                 "type": "run_phase_changed",
