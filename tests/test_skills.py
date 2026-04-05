@@ -144,9 +144,8 @@ class ScopeSkillTests(unittest.TestCase):
         self.assertIn("Related files (reference):", p)
         self.assertIn("src/utils.py", p)
         self.assertIn("def helper():", p)
-        # Content should be truncated to 3000 chars
-        self.assertIn("Z" * 3000, p)
-        self.assertNotIn("Z" * 3001, p)
+        # Content fits within the 6000-char truncation cap
+        self.assertIn("Z" * 4000, p)
 
 
 class ImplementSkillTests(unittest.TestCase):

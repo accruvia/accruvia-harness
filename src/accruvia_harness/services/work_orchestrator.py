@@ -123,7 +123,7 @@ def _collect_repo_context(workspace: Path, max_files: int = 80, max_bytes: int =
     return text[:max_bytes] if text else "(empty workspace)"
 
 
-def _load_file_contents(workspace: Path, paths: list[str], max_per_file: int = 8000) -> dict[str, str]:
+def _load_file_contents(workspace: Path, paths: list[str], max_per_file: int = 40000) -> dict[str, str]:
     contents: dict[str, str] = {}
     for rel in paths:
         target = (workspace / rel.replace("\\", "/")).resolve()
