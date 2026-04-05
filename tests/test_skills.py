@@ -25,6 +25,7 @@ from accruvia_harness.skills import (
     ScopeSkill,
     SelfReviewSkill,
     SummarizeRunSkill,
+    TestHealthSkill,
     SkillRegistry,
     SkillResult,
     ValidateSkill,
@@ -636,13 +637,13 @@ class CommitSkillTests(unittest.TestCase):
 
 
 class SkillRegistryTests(unittest.TestCase):
-    def test_default_registry_has_all_twelve(self) -> None:
+    def test_default_registry_has_all_thirteen(self) -> None:
         registry = build_default_registry()
-        self.assertEqual(12, len(registry))
+        self.assertEqual(13, len(registry))
         expected = {
             "scope", "implement", "self_review", "validate", "diagnose",
             "promotion_review", "promotion_apply", "post_merge_check", "follow_on",
-            "benchmark", "commit", "summarize_run",
+            "benchmark", "commit", "summarize_run", "test_health",
         }
         self.assertEqual(expected, set(registry.names()))
 
@@ -796,6 +797,94 @@ class WorkOrchestratorDiagnosticsTests(unittest.TestCase):
         result, _ = self._run_to_validation_failure({}, diagnose_success=False)
         self.assertEqual("failed", result.outcome)
         self.assertNotIn("retry_hints", result.diagnostics)
+
+
+class TestHealthSkillTests(unittest.TestCase):
+    """Tests for the /test-health deterministic skill."""
+
+    def test_output_schema_validation(self) -> None:
+        """invoke_deterministic output passes validate_output."""
+        skill = TestHealthSkill()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Create a minimal test file so pytest --collect-only finds something
+            (root / "test_example.py").write_text(
+                "def test_one(): pass\ndef test_two(): pass\n",
+                encoding="utf-8",
+            )
+            r = skill.invoke_deterministic(
+                workspace_root=root,
+                validation_profile="python",
+                run_dir=root / "_health",
+            )
+            self.assertTrue(r.success, r.errors)
+            out = r.output
+            # All 7 required keys present
+            for key in (
+                "profile", "total_tests", "total_runtime_seconds",
+                "slowest", "duplicates", "parallelism_safe", "recommendations",
+            ):
+                self.assertIn(key, out, f"missing key: {key}")
+            self.assertIsInstance(out["profile"], str)
+            self.assertIsInstance(out["total_tests"], int)
+            self.assertIsInstance(out["total_runtime_seconds"], (int, float))
+            self.assertIsInstance(out["slowest"], list)
+            self.assertIsInstance(out["duplicates"], list)
+            self.assertIsInstance(out["parallelism_safe"], bool)
+            self.assertIsInstance(out["recommendations"], list)
+            self.assertLessEqual(len(out["slowest"]), 5)
+            ok, errs = skill.validate_output(out)
+            self.assertTrue(ok, errs)
+
+    def test_empty_profile_returns_empty_recommendations(self) -> None:
+        """lightweight_operator has no commands â€” recommendations is empty."""
+        skill = TestHealthSkill()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            r = skill.invoke_deterministic(
+                workspace_root=root,
+                validation_profile="lightweight_operator",
+                run_dir=root / "_health_empty",
+            )
+            self.assertTrue(r.success)
+            self.assertEqual([], r.output["recommendations"])
+            self.assertEqual(0, r.output["total_tests"])
+            self.assertEqual([], r.output["slowest"])
+
+    def test_parallelism_safe_detects_tempfile_and_chdir(self) -> None:
+        """A test file that imports tempfile AND uses chdir triggers parallelism_safe=False."""
+        skill = TestHealthSkill()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Synthetic test file with both tempfile and chdir
+            (root / "test_unsafe.py").write_text(
+                "import tempfile\nimport os\nos.chdir('/tmp')\ndef test_a(): pass\n",
+                encoding="utf-8",
+            )
+            r = skill.invoke_deterministic(
+                workspace_root=root,
+                validation_profile="python",
+                run_dir=root / "_health_unsafe",
+            )
+            self.assertTrue(r.success)
+            self.assertFalse(r.output["parallelism_safe"])
+
+    def test_parallelism_safe_true_without_chdir(self) -> None:
+        """A test file with tempfile but no chdir is still safe."""
+        skill = TestHealthSkill()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "test_safe.py").write_text(
+                "import tempfile\ndef test_a(): pass\n",
+                encoding="utf-8",
+            )
+            r = skill.invoke_deterministic(
+                workspace_root=root,
+                validation_profile="python",
+                run_dir=root / "_health_safe",
+            )
+            self.assertTrue(r.success)
+            self.assertTrue(r.output["parallelism_safe"])
 
 
 class WorkOrchestratorRelatedFilesTests(unittest.TestCase):
