@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from accruvia_harness.skills import (
     BenchmarkSkill,
@@ -32,6 +33,8 @@ from accruvia_harness.skills import (
     extract_json_payload,
     validate_against_schema,
 )
+from accruvia_harness.domain import Run, RunStatus, Task, new_id
+from accruvia_harness.services.work_orchestrator import SkillsWorkOrchestrator
 
 
 class SchemaValidationTests(unittest.TestCase):
@@ -678,6 +681,104 @@ class CommitWiringTests(unittest.TestCase):
                 capture_output=True, encoding="utf-8",
             )
             self.assertIn("Wire commit", log.stdout)
+
+
+class WorkOrchestratorDiagnosticsTests(unittest.TestCase):
+    """Tests that retry_hints propagates through WorkResult diagnostics."""
+
+    def _run_to_validation_failure(self, diagnose_output, diagnose_success=True):
+        """Drive the orchestrator to a validation-fail path and return the WorkResult."""
+        registry = SkillRegistry()
+        registry.register(ScopeSkill())
+        registry.register(ImplementSkill())
+        registry.register(SelfReviewSkill())
+        registry.register(ValidateSkill())
+        registry.register(DiagnoseSkill())
+        registry.register(CommitSkill())
+
+        scope_output = {
+            "files_to_touch": ["a.py"],
+            "approach": "fix a",
+            "risks": [],
+            "estimated_complexity": "small",
+        }
+
+        def fake_invoke(skill, invocation, router, **kw):
+            name = invocation.skill_name
+            if name == "scope":
+                return SkillResult(skill_name="scope", success=True, output=scope_output)
+            if name == "implement":
+                return SkillResult(skill_name="implement", success=True, output={
+                    "edits": [], "new_files": [{"path": "a.py", "content": "x=1"}],
+                    "deleted_files": [], "rationale": "impl",
+                })
+            if name == "self_review":
+                return SkillResult(skill_name="self_review", success=True, output={
+                    "issues": [], "ship_ready": True, "summary": "ok",
+                })
+            if name == "diagnose":
+                return SkillResult(
+                    skill_name="diagnose", success=diagnose_success, output=diagnose_output,
+                )
+            return SkillResult(skill_name=name, success=False, errors=["unexpected"])
+
+        validate_mock = MagicMock()
+        validate_mock.invoke_deterministic.return_value = SkillResult(
+            skill_name="validate", success=True, output={
+                "overall": "fail",
+                "failure_evidence": "ImportError",
+                "results": [{"name": "compile", "status": "fail", "output": "err"}],
+            },
+        )
+        registry._skills["validate"] = validate_mock
+
+        orchestrator = SkillsWorkOrchestrator(
+            skill_registry=registry,
+            llm_router=MagicMock(),
+            workspace_root=Path("/fake"),
+        )
+        task = Task(
+            id=new_id("task"), project_id="proj", title="Test",
+            objective="test obj", validation_profile="python",
+        )
+        run = Run(
+            id=new_id("run"), task_id=task.id, status=RunStatus.WORKING,
+            attempt=1, summary="",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp)
+            rd = Path(tmp) / "run_dir"
+            with patch("accruvia_harness.services.work_orchestrator.invoke_skill", side_effect=fake_invoke), \
+                 patch("accruvia_harness.services.work_orchestrator.apply_changes", return_value={
+                     "written": ["a.py"], "rejected": [], "edits_applied": 0, "new_files_created": 1,
+                 }), \
+                 patch("accruvia_harness.services.work_orchestrator._git_diff", return_value=""), \
+                 patch("accruvia_harness.services.work_orchestrator._collect_repo_context", return_value="ctx"), \
+                 patch("accruvia_harness.services.work_orchestrator._load_file_contents", return_value={}):
+                result = orchestrator.execute(task, run, ws, rd)
+        return result, scope_output
+
+    def test_retry_hints_populated_when_diagnosis_has_scope_adjustment(self) -> None:
+        diagnosis_output = {
+            "classification": "code_defect",
+            "confidence": 0.9,
+            "retry_recommended": True,
+            "cooldown_seconds": 0,
+            "root_cause": "missing import",
+            "scope_adjustment": "Add utils.py to files_to_touch",
+        }
+        result, scope_output = self._run_to_validation_failure(diagnosis_output)
+        self.assertEqual("failed", result.outcome)
+        self.assertIn("retry_hints", result.diagnostics)
+        hints = result.diagnostics["retry_hints"]
+        self.assertEqual("Add utils.py to files_to_touch", hints["review_feedback"])
+        self.assertEqual(scope_output, hints["prior_scope"])
+
+    def test_retry_hints_absent_when_no_diagnosis(self) -> None:
+        result, _ = self._run_to_validation_failure({}, diagnose_success=False)
+        self.assertEqual("failed", result.outcome)
+        self.assertNotIn("retry_hints", result.diagnostics)
 
 
 if __name__ == "__main__":

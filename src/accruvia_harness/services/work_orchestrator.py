@@ -418,22 +418,28 @@ class SkillsWorkOrchestrator:
             )
         )
         if overall == "fail":
+            fail_diagnostics: dict[str, Any] = {
+                "stage": "validate",
+                "worker_outcome": "failed",
+                "worker_backend": "skills",
+                "failure_category": diagnosis.get("classification") if diagnosis else "validation_failure",
+                "failure_message": diagnosis.get("root_cause") if diagnosis else str(validate_result.output.get("failure_evidence") or "")[:500],
+                "validation_profile": profile,
+                "changed_files": written,
+                "diagnosis": diagnosis,
+                "compile_check": {"passed": _stage_passed(validate_result.output, "compile") or _stage_passed(validate_result.output, "build")},
+                "test_check": {"passed": _stage_passed(validate_result.output, "tests") or _stage_passed(validate_result.output, "test")},
+            }
+            if diagnosis and diagnosis.get("scope_adjustment"):
+                fail_diagnostics["retry_hints"] = {
+                    "review_feedback": diagnosis["scope_adjustment"],
+                    "prior_scope": scope,
+                }
             return WorkResult(
                 summary=f"Validation failed: {diagnosis.get('root_cause', 'see evidence') if diagnosis else 'see evidence'}",
                 artifacts=_to_artifact_tuples(artifacts),
                 outcome="failed",
-                diagnostics={
-                    "stage": "validate",
-                    "worker_outcome": "failed",
-                    "worker_backend": "skills",
-                    "failure_category": diagnosis.get("classification") if diagnosis else "validation_failure",
-                    "failure_message": diagnosis.get("root_cause") if diagnosis else str(validate_result.output.get("failure_evidence") or "")[:500],
-                    "validation_profile": profile,
-                    "changed_files": written,
-                    "diagnosis": diagnosis,
-                    "compile_check": {"passed": _stage_passed(validate_result.output, "compile") or _stage_passed(validate_result.output, "build")},
-                    "test_check": {"passed": _stage_passed(validate_result.output, "tests") or _stage_passed(validate_result.output, "test")},
-                },
+                diagnostics=fail_diagnostics,
             )
         if not ship_ready:
             review_feedback = SelfReviewSkill.feedback_for_retry(self_review_result)
