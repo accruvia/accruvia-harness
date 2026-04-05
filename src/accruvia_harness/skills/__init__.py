@@ -28,6 +28,7 @@ from .promotion_review import PromotionReviewSkill
 from .registry import SkillRegistry
 from .scope import ScopeSkill
 from .self_review import SelfReviewSkill
+from .summarize_run import SummarizeRunSkill
 from .validate import ValidateSkill, commands_for_profile
 
 
@@ -45,6 +46,7 @@ def build_default_registry() -> SkillRegistry:
     registry.register(FollowOnSkill())
     registry.register(BenchmarkSkill())
     registry.register(CommitSkill())
+    registry.register(SummarizeRunSkill())
     return registry
 
 
@@ -59,6 +61,7 @@ __all__ = [
     "ScopeSkill",
     "ImplementSkill",
     "SelfReviewSkill",
+    "SummarizeRunSkill",
     "ValidateSkill",
     "DiagnoseSkill",
     "PromotionReviewSkill",
