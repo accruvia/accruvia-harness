@@ -271,5 +271,22 @@ class AutoMergeRunTests(unittest.TestCase):
         self.assertIsNone(r)
 
 
+class CLIAutoMergeTests(unittest.TestCase):
+    def test_parse_auto_merge_run_positional(self):
+        from accruvia_harness.cli_parser import build_parser
+        parser = build_parser()
+        args = parser.parse_args(["auto-merge-run", "run_abc"])
+        self.assertEqual(args.command, "auto-merge-run")
+        self.assertEqual(args.run_id, "run_abc")
+        self.assertEqual(args.target_branch, "main")
+        self.assertFalse(args.dry_run)
+
+    def test_parse_auto_merge_run_dry_run_flag(self):
+        from accruvia_harness.cli_parser import build_parser
+        parser = build_parser()
+        args = parser.parse_args(["auto-merge-run", "run_xyz", "--dry-run"])
+        self.assertTrue(args.dry_run)
+
+
 if __name__ == "__main__":
     unittest.main()
