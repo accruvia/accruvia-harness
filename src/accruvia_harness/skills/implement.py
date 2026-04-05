@@ -205,7 +205,10 @@ class ImplementSkill:
 
 
 def _normalize_rel(path: str) -> str:
-    return path.replace("\\", "/").lstrip("./")
+    normalized = path.replace("\\", "/")
+    if normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized
 
 
 def _resolve_in_workspace(workspace_root: Path, rel_path: str) -> Path | None:
