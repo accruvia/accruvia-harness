@@ -638,5 +638,47 @@ class SkillRegistryTests(unittest.TestCase):
             registry.get("ghost")
 
 
+class CommitWiringTests(unittest.TestCase):
+    """Tests for CommitSkill integration with the orchestrator pipeline."""
+
+    def test_commit_in_default_registry(self) -> None:
+        """CommitSkill must be registered under 'commit' in the default registry."""
+        registry = build_default_registry()
+        self.assertIn("commit", registry.names())
+        self.assertIsInstance(registry.get("commit"), CommitSkill)
+
+    def test_invoke_deterministic_end_to_end(self) -> None:
+        """Create temp git repo, write a file, commit via CommitSkill, verify commit_sha."""
+        skill = CommitSkill()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q", "-b", "main", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.email", "t@t.com"], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.name", "t"], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "commit.gpgsign", "false"], check=True)
+            # Initial commit so HEAD exists
+            (root / "init.txt").write_text("init")
+            subprocess.run(["git", "-C", str(root), "add", "init.txt"], check=True)
+            subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "init"], check=True)
+            # Write a new file to commit via the skill
+            (root / "feature.py").write_text("x = 1\n")
+            r = skill.invoke_deterministic(
+                workspace=root,
+                paths=["feature.py"],
+                message="Task: Wire commit\n\nTest rationale\n\nAuthored by skills pipeline: run_test",
+                author_name="Accruvia Harness",
+                author_email="harness@accruvia.local",
+            )
+            self.assertTrue(r.success, r.errors)
+            self.assertTrue(r.output["committed"])
+            self.assertTrue(len(r.output["commit_sha"]) >= 7)
+            # Verify the commit message subject contains the task title
+            log = subprocess.run(
+                ["git", "-C", str(root), "log", "-1", "--format=%s"],
+                capture_output=True, encoding="utf-8",
+            )
+            self.assertIn("Wire commit", log.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
