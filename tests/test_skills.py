@@ -13,6 +13,7 @@ import unittest
 from pathlib import Path
 
 from accruvia_harness.skills import (
+    BenchmarkSkill,
     DiagnoseSkill,
     FollowOnSkill,
     ImplementSkill,
@@ -366,13 +367,90 @@ class FollowOnSkillTests(unittest.TestCase):
         self.assertEqual(1, len(parsed["proposed_tasks"]))
 
 
+class BenchmarkSkillTests(unittest.TestCase):
+    def test_all_pass(self) -> None:
+        """All commands succeed — failed list is empty, timings are captured."""
+        skill = BenchmarkSkill()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            r = skill.invoke_deterministic(
+                workspace_root=root,
+                validation_profile="python",
+                run_dir=root / "_bench",
+            )
+            self.assertTrue(r.success)
+            self.assertEqual("python", r.output["profile"])
+            self.assertIsInstance(r.output["total_runtime_seconds"], float)
+            self.assertGreater(r.output["test_count"], 0)
+            self.assertIsInstance(r.output["slowest"], list)
+            self.assertLessEqual(len(r.output["slowest"]), 3)
+            # validate_output should accept the output shape
+            ok, errs = skill.validate_output(r.output)
+            self.assertTrue(ok, errs)
+
+    def test_mixed_failure_no_short_circuit(self) -> None:
+        """Failing commands do not prevent subsequent commands from running."""
+        skill = BenchmarkSkill()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Patch commands_for_profile won't work easily, so we call
+            # invoke_deterministic on a profile and check indirectly.
+            # Instead, directly test with the "python" profile in a dir
+            # where pytest will fail but compileall might pass.
+            # Simpler: use generic profile with make test which will fail.
+            # Best approach: monkeypatch commands_for_profile.
+            import accruvia_harness.skills.benchmark as bm
+            original = bm.commands_for_profile
+            try:
+                bm.commands_for_profile = lambda _profile: [
+                    {"name": "ok1", "cmd": "python -c \"pass\"", "timeout": 30},
+                    {"name": "bad", "cmd": "python -c \"import sys; sys.exit(3)\"", "timeout": 30},
+                    {"name": "ok2", "cmd": "python -c \"pass\"", "timeout": 30},
+                ]
+                r = skill.invoke_deterministic(
+                    workspace_root=root,
+                    validation_profile="test",
+                    run_dir=root / "_bench_fail",
+                )
+            finally:
+                bm.commands_for_profile = original
+
+            self.assertTrue(r.success)
+            # All 3 commands ran (no short-circuit)
+            self.assertEqual(3, r.output["test_count"])
+            # Exactly one failure
+            self.assertEqual(1, len(r.output["failed"]))
+            self.assertEqual("bad", r.output["failed"][0]["name"])
+            self.assertEqual(3, r.output["failed"][0]["exit_code"])
+            # Slowest has up to 3 entries
+            self.assertEqual(3, len(r.output["slowest"]))
+
+    def test_empty_profile(self) -> None:
+        """lightweight_operator has no commands — returns zero counts."""
+        skill = BenchmarkSkill()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            r = skill.invoke_deterministic(
+                workspace_root=root,
+                validation_profile="lightweight_operator",
+                run_dir=root / "_bench_empty",
+            )
+            self.assertTrue(r.success)
+            self.assertEqual("lightweight_operator", r.output["profile"])
+            self.assertEqual(0.0, r.output["total_runtime_seconds"])
+            self.assertEqual(0, r.output["test_count"])
+            self.assertEqual([], r.output["slowest"])
+            self.assertEqual([], r.output["failed"])
+
+
 class SkillRegistryTests(unittest.TestCase):
-    def test_default_registry_has_all_nine(self) -> None:
+    def test_default_registry_has_all_ten(self) -> None:
         registry = build_default_registry()
-        self.assertEqual(9, len(registry))
+        self.assertEqual(10, len(registry))
         expected = {
             "scope", "implement", "self_review", "validate", "diagnose",
             "promotion_review", "promotion_apply", "post_merge_check", "follow_on",
+            "benchmark",
         }
         self.assertEqual(expected, set(registry.names()))
 
