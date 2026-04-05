@@ -17,6 +17,7 @@ from .base import (
     make_skill_context,
     validate_against_schema,
 )
+from .benchmark import BenchmarkSkill
 from .diagnose import DiagnoseSkill
 from .follow_on import FollowOnSkill
 from .implement import ImplementSkill, apply_changes
@@ -41,10 +42,12 @@ def build_default_registry() -> SkillRegistry:
     registry.register(PromotionApplySkill())
     registry.register(PostMergeCheckSkill())
     registry.register(FollowOnSkill())
+    registry.register(BenchmarkSkill())
     return registry
 
 
 __all__ = [
+    "BenchmarkSkill",
     "Skill",
     "SkillError",
     "SkillInvocation",
