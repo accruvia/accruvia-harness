@@ -1452,4 +1452,22 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
         else:
             print(_smoke_test_text(payload))
         return True
+    if args.command == "auto-merge-run":
+        from ..merge_gate import auto_merge_run, MergePolicy
+        from pathlib import Path as _Path
+        policy = MergePolicy(target_branch=args.target_branch)
+        decision, result = auto_merge_run(store, args.run_id, _Path("."), policy=policy, dry_run=args.dry_run)
+        payload: dict[str, object] = {
+            "auto_merge": decision.auto_merge,
+            "reason": decision.reason,
+            "concerns": list(decision.concerns),
+            "branch_name": decision.branch_name,
+            "changed_files": len(decision.changed_files) if decision.changed_files else 0,
+        }
+        if result is not None:
+            payload["merged"] = result.merged
+            payload["commit_sha"] = result.commit_sha
+            payload["stderr"] = result.stderr
+        emit(payload)
+        return True
     return False

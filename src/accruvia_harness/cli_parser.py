@@ -107,6 +107,11 @@ def build_parser() -> argparse.ArgumentParser:
     run_once = subparsers.add_parser("run-once", help="Run one full harness cycle for a task.")
     run_once.add_argument("task_id")
 
+    auto_merge = subparsers.add_parser("auto-merge-run", help="Run the merge gate for a completed run.")
+    auto_merge.add_argument("run_id")
+    auto_merge.add_argument("--dry-run", action="store_true", help="Evaluate without executing the merge.")
+    auto_merge.add_argument("--target-branch", default="main", help="Target branch for the merge.")
+
     run_until_stable = subparsers.add_parser("run-until-stable", help="Run repeated cycles until a task is completed or failed.")
     run_until_stable.add_argument("task_id")
 
