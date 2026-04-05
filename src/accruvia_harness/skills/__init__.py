@@ -18,6 +18,7 @@ from .base import (
     validate_against_schema,
 )
 from .benchmark import BenchmarkSkill
+from .commit import CommitSkill
 from .diagnose import DiagnoseSkill
 from .follow_on import FollowOnSkill
 from .implement import ImplementSkill, apply_changes
@@ -43,11 +44,13 @@ def build_default_registry() -> SkillRegistry:
     registry.register(PostMergeCheckSkill())
     registry.register(FollowOnSkill())
     registry.register(BenchmarkSkill())
+    registry.register(CommitSkill())
     return registry
 
 
 __all__ = [
     "BenchmarkSkill",
+    "CommitSkill",
     "Skill",
     "SkillError",
     "SkillInvocation",

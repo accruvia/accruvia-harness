@@ -14,6 +14,7 @@ from pathlib import Path
 
 from accruvia_harness.skills import (
     BenchmarkSkill,
+    CommitSkill,
     DiagnoseSkill,
     FollowOnSkill,
     ImplementSkill,
@@ -443,14 +444,58 @@ class BenchmarkSkillTests(unittest.TestCase):
             self.assertEqual([], r.output["failed"])
 
 
+class CommitSkillTests(unittest.TestCase):
+    def test_happy_path_commit(self) -> None:
+        """Stage a file and commit it in a live temp git repo."""
+        skill = CommitSkill()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q", "-b", "main", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.email", "t@t.com"], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.name", "t"], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "commit.gpgsign", "false"], check=True)
+            (root / "a.txt").write_text("hello")
+            r = skill.invoke_deterministic(
+                workspace=root, paths=["a.txt"], message="add a",
+            )
+            self.assertTrue(r.success, r.errors)
+            self.assertTrue(r.output["committed"])
+            self.assertEqual(["a.txt"], r.output["staged"])
+            self.assertTrue(len(r.output["commit_sha"]) >= 7)
+
+    def test_empty_paths_noop(self) -> None:
+        """Empty paths list returns committed=False with success=True."""
+        skill = CommitSkill()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q", "-b", "main", str(root)], check=True)
+            r = skill.invoke_deterministic(
+                workspace=root, paths=[], message="noop",
+            )
+            self.assertTrue(r.success)
+            self.assertFalse(r.output["committed"])
+            self.assertEqual([], r.output["staged"])
+
+    def test_missing_git_dir(self) -> None:
+        """Non-git directory returns success=False."""
+        skill = CommitSkill()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            r = skill.invoke_deterministic(
+                workspace=root, paths=["a.txt"], message="fail",
+            )
+            self.assertFalse(r.success)
+            self.assertIn("workspace is not a git repository", r.errors)
+
+
 class SkillRegistryTests(unittest.TestCase):
-    def test_default_registry_has_all_ten(self) -> None:
+    def test_default_registry_has_all_eleven(self) -> None:
         registry = build_default_registry()
-        self.assertEqual(10, len(registry))
+        self.assertEqual(11, len(registry))
         expected = {
             "scope", "implement", "self_review", "validate", "diagnose",
             "promotion_review", "promotion_apply", "post_merge_check", "follow_on",
-            "benchmark",
+            "benchmark", "commit",
         }
         self.assertEqual(expected, set(registry.names()))
 
