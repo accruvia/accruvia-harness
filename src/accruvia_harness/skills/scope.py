@@ -77,6 +77,15 @@ class ScopeSkill:
                 parts.append(f"--- {path} ---\n{truncated}")
             related_block = "\n".join(parts)
 
+        codebase_search_results = inputs.get("codebase_search_results") or {}
+        search_block = ""
+        if codebase_search_results:
+            parts = ["Codebase search results:"]
+            for query, lines in codebase_search_results.items():
+                joined = "\n".join(lines)[:500]
+                parts.append(f"  {query}:\n{joined}")
+            search_block = "\n".join(parts)
+
         return "\n\n".join(
             filter(
                 None,
@@ -92,6 +101,7 @@ class ScopeSkill:
                     "Repository context (summary of relevant files, current state):\n"
                     + (repo_context or "(none provided)"),
                     related_block,
+                    search_block,
                     prior_block,
                     "Return strict JSON with keys:\n"
                     "  files_to_touch (list of relative file paths the implementer will edit/create)\n"

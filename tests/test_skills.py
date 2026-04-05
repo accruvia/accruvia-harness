@@ -147,6 +147,27 @@ class ScopeSkillTests(unittest.TestCase):
         # Content fits within the 6000-char truncation cap
         self.assertIn("Z" * 4000, p)
 
+    def test_search_codebase_finds_matches(self) -> None:
+        from accruvia_harness.services.work_orchestrator import _search_codebase
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp)
+            (ws / "models.py").write_text("class MyModel:\n    pass\n")
+            results = _search_codebase(ws, ["MyModel"])
+            self.assertIn("MyModel", results)
+            self.assertTrue(any("MyModel" in line for line in results["MyModel"]))
+
+    def test_scope_prompt_includes_search_results(self) -> None:
+        p = self.skill.build_prompt({
+            "title": "t", "objective": "o", "strategy": "s",
+            "repo_context": "ctx",
+            "codebase_search_results": {
+                "MyHelper": ["./src/utils.py:3:class MyHelper:"],
+            },
+        })
+        self.assertIn("Codebase search results:", p)
+        self.assertIn("MyHelper", p)
+
 
 class ImplementSkillTests(unittest.TestCase):
     def setUp(self) -> None:
