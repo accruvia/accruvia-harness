@@ -337,6 +337,52 @@ class ImplementSkillTests(unittest.TestCase):
         self.assertIn("src/old.py", p)
         self.assertIn("src/new.py", p)
 
+    def test_atomic_rollback_on_partial_failure(self) -> None:
+        """When one edit fails validation, no edits are applied (atomic rollback)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "a.py").write_text("def foo():\n    return 1\n")
+            (root / "b.py").write_text("def bar():\n    return 2\n")
+            result = SkillResult(
+                skill_name="implement", success=True,
+                output={
+                    "edits": [
+                        {"path": "a.py", "old_string": "return 1", "new_string": "return 10"},
+                        {"path": "b.py", "old_string": "DOES_NOT_EXIST", "new_string": "return 20"},
+                    ],
+                    "new_files": [], "deleted_files": [], "rationale": "atomic test",
+                },
+            )
+            summary = apply_changes(result, workspace_root=root, allowed_files=["a.py", "b.py"])
+            self.assertEqual(0, summary["edits_applied"])
+            # Neither file should be modified â€” atomic rollback
+            self.assertEqual("def foo():\n    return 1\n", (root / "a.py").read_text())
+            self.assertEqual("def bar():\n    return 2\n", (root / "b.py").read_text())
+
+    def test_multiple_edits_same_file(self) -> None:
+        """Multiple edits targeting distinct functions in the same file are all applied."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "module.py").write_text(
+                "def alpha():\n    return 'a'\n\ndef beta():\n    return 'b'\n"
+            )
+            result = SkillResult(
+                skill_name="implement", success=True,
+                output={
+                    "edits": [
+                        {"path": "module.py", "old_string": "return 'a'", "new_string": "return 'alpha'"},
+                        {"path": "module.py", "old_string": "return 'b'", "new_string": "return 'beta'"},
+                    ],
+                    "new_files": [], "deleted_files": [], "rationale": "rename returns",
+                },
+            )
+            summary = apply_changes(result, workspace_root=root, allowed_files=["module.py"])
+            self.assertEqual(2, summary["edits_applied"])
+            self.assertEqual([], summary["rejected"])
+            content = (root / "module.py").read_text()
+            self.assertIn("return 'alpha'", content)
+            self.assertIn("return 'beta'", content)
+
 
 class SelfReviewSkillTests(unittest.TestCase):
     def setUp(self) -> None:
