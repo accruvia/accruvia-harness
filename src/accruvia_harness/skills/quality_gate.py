@@ -93,8 +93,8 @@ def _check_type_hints(content: str, path: str) -> list[dict[str, str]]:
     for i, line in enumerate(content.splitlines()):
         stripped = line.strip()
         if stripped.startswith("def ") and not stripped.startswith("def _"):
-            # Check for -> before the colon
-            sig_end = stripped.find(":")
+            # Check for -> before the FINAL colon (not param-annotation colons)
+            sig_end = stripped.rfind(":")
             if sig_end > 0 and "->" not in stripped[:sig_end]:
                 name = stripped.split("(")[0].replace("def ", "")
                 issues.append({

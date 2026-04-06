@@ -702,6 +702,207 @@ class CommitSkillTests(unittest.TestCase):
             self.assertIn("workspace is not a git repository", r.errors)
 
 
+class TranslateIntentSkillTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from accruvia_harness.skills.translate_intent import TranslateIntentSkill
+        self.skill = TranslateIntentSkill()
+
+    def test_prompt_includes_intent_and_context(self) -> None:
+        p = self.skill.build_prompt({
+            "intent": "I want login to be faster",
+            "repo_context": "src/auth/ has login.py",
+            "project_description": "A web app",
+        })
+        self.assertIn("I want login to be faster", p)
+        self.assertIn("src/auth/", p)
+        self.assertIn("web app", p)
+
+    def test_valid_output_accepted(self) -> None:
+        parsed = self.skill.parse_response(json.dumps({
+            "technical_objective": "Add caching to login",
+            "acceptance_criteria": ["Login takes <1s on repeat visits"],
+            "suggested_files": ["src/auth/login.py"],
+            "validation_profile": "python",
+            "estimated_complexity": "small",
+            "risks_plain_language": ["Cache could serve stale data"],
+            "summary_for_requester": "We'll cache login so it's faster.",
+        }))
+        ok, errs = self.skill.validate_output(parsed)
+        self.assertTrue(ok, errs)
+
+    def test_empty_criteria_rejected(self) -> None:
+        parsed = self.skill.parse_response(json.dumps({
+            "technical_objective": "x",
+            "acceptance_criteria": [],
+            "suggested_files": ["a.py"],
+            "validation_profile": "python",
+            "estimated_complexity": "small",
+            "risks_plain_language": [],
+            "summary_for_requester": "y",
+        }))
+        ok, _ = self.skill.validate_output(parsed)
+        self.assertFalse(ok)
+
+    def test_invalid_complexity_rejected(self) -> None:
+        parsed = self.skill.parse_response(json.dumps({
+            "technical_objective": "x",
+            "acceptance_criteria": ["works"],
+            "suggested_files": ["a.py"],
+            "validation_profile": "python",
+            "estimated_complexity": "enormous",
+            "risks_plain_language": [],
+            "summary_for_requester": "y",
+        }))
+        ok, errs = self.skill.validate_output(parsed)
+        self.assertFalse(ok)
+        self.assertTrue(any("must be one of" in e for e in errs))
+
+
+class QualityGateSkillTests(unittest.TestCase):
+    def test_detects_hardcoded_secret(self) -> None:
+        from accruvia_harness.skills.quality_gate import _scan_secrets
+        findings = _scan_secrets('API_KEY = "sk-abc123def456789012345"', "config.py")
+        self.assertTrue(len(findings) >= 1)
+        self.assertEqual("config.py", findings[0]["file"])
+
+    def test_ignores_test_fixture_secrets(self) -> None:
+        from accruvia_harness.skills.quality_gate import _scan_secrets
+        findings = _scan_secrets('API_KEY = "fake_key_for_testing"', "test_config.py")
+        self.assertEqual(0, len(findings))
+
+    def test_detects_missing_docstring(self) -> None:
+        from accruvia_harness.skills.quality_gate import _check_docstrings
+        issues = _check_docstrings("def greet(name):\n    return name\n", "a.py")
+        self.assertEqual(1, len(issues))
+        self.assertEqual("greet", issues[0]["name"])
+
+    def test_private_functions_skip_docstring_check(self) -> None:
+        from accruvia_harness.skills.quality_gate import _check_docstrings
+        issues = _check_docstrings("def _internal():\n    pass\n", "a.py")
+        self.assertEqual(0, len(issues))
+
+    def test_detects_missing_return_type(self) -> None:
+        from accruvia_harness.skills.quality_gate import _check_type_hints
+        issues = _check_type_hints("def greet(name):\n    return name\n", "a.py")
+        self.assertEqual(1, len(issues))
+
+    def test_typed_function_passes(self) -> None:
+        from accruvia_harness.skills.quality_gate import _check_type_hints
+        issues = _check_type_hints("def greet(name: str) -> str:\n    return name\n", "a.py")
+        self.assertEqual(0, len(issues))
+
+    def test_invoke_deterministic_on_clean_files(self) -> None:
+        from accruvia_harness.skills.quality_gate import QualityGateSkill
+        skill = QualityGateSkill()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "good.py").write_text('def greet(name: str) -> str:\n    """Say hi."""\n    return name\n')
+            r = skill.invoke_deterministic(
+                workspace=root, changed_files=["good.py"], run_dir=root / "_qg",
+            )
+            self.assertTrue(r.success)
+            self.assertTrue(r.output["passed"])
+
+
+class VerifyAcceptanceSkillTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from accruvia_harness.skills.verify_acceptance import VerifyAcceptanceSkill
+        self.skill = VerifyAcceptanceSkill()
+
+    def test_prompt_includes_criteria(self) -> None:
+        p = self.skill.build_prompt({
+            "intent": "faster login",
+            "acceptance_criteria": ["Login under 1s", "No data loss"],
+            "changed_files": ["src/auth.py"],
+        })
+        self.assertIn("Login under 1s", p)
+        self.assertIn("No data loss", p)
+        self.assertIn("src/auth.py", p)
+
+    def test_valid_all_met_output(self) -> None:
+        parsed = self.skill.parse_response(json.dumps({
+            "criteria_results": [
+                {"criterion": "Login under 1s", "status": "met", "evidence": "Cache added"},
+            ],
+            "all_met": True,
+            "summary_for_requester": "Your login is now faster.",
+            "next_steps": ["Try logging in twice"],
+        }))
+        ok, errs = self.skill.validate_output(parsed)
+        self.assertTrue(ok, errs)
+        self.assertTrue(parsed["all_met"])
+
+    def test_not_met_forces_all_met_false(self) -> None:
+        parsed = self.skill.parse_response(json.dumps({
+            "criteria_results": [
+                {"criterion": "A", "status": "met", "evidence": "done"},
+                {"criterion": "B", "status": "not_met", "evidence": "missing"},
+            ],
+            "all_met": True,
+            "summary_for_requester": "Partially done.",
+        }))
+        ok, _ = self.skill.validate_output(parsed)
+        self.assertTrue(ok)
+        self.assertFalse(parsed["all_met"])
+
+    def test_empty_criteria_results_rejected(self) -> None:
+        parsed = self.skill.parse_response(json.dumps({
+            "criteria_results": [],
+            "all_met": False,
+            "summary_for_requester": "Nothing checked.",
+        }))
+        ok, _ = self.skill.validate_output(parsed)
+        self.assertFalse(ok)
+
+
+class ExplainFailureSkillTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from accruvia_harness.skills.explain_failure import ExplainFailureSkill
+        self.skill = ExplainFailureSkill()
+
+    def test_prompt_includes_intent_and_failure(self) -> None:
+        p = self.skill.build_prompt({
+            "intent": "Add a chart",
+            "failure_category": "validation_failure",
+            "failure_message": "pytest failed: assert False",
+            "stage": "validate",
+        })
+        self.assertIn("Add a chart", p)
+        self.assertIn("validation_failure", p)
+        self.assertIn("pytest failed", p)
+
+    def test_valid_output(self) -> None:
+        parsed = self.skill.parse_response(json.dumps({
+            "what_happened": "Tests failed.",
+            "why_it_matters": "Feature not built.",
+            "what_to_try": ["Try again", "Ask for less"],
+            "can_retry": True,
+        }))
+        ok, errs = self.skill.validate_output(parsed)
+        self.assertTrue(ok, errs)
+
+    def test_empty_what_to_try_rejected(self) -> None:
+        parsed = self.skill.parse_response(json.dumps({
+            "what_happened": "Broke.",
+            "why_it_matters": "Bad.",
+            "what_to_try": [],
+            "can_retry": False,
+        }))
+        ok, _ = self.skill.validate_output(parsed)
+        self.assertFalse(ok)
+
+    def test_fallback_rate_limit(self) -> None:
+        from accruvia_harness.skills.explain_failure import ExplainFailureSkill
+        fb = ExplainFailureSkill.fallback_explanation("provider_rate_limit")
+        self.assertIn("overloaded", fb["what_happened"].lower())
+        self.assertTrue(fb["can_retry"])
+
+    def test_fallback_unknown(self) -> None:
+        from accruvia_harness.skills.explain_failure import ExplainFailureSkill as EFS
+        fb = EFS.fallback_explanation("totally_unknown_category")
+        self.assertIn("unexpected", fb["what_happened"].lower())
+
+
 class SkillRegistryTests(unittest.TestCase):
     def test_default_registry_has_all_eighteen(self) -> None:
         registry = build_default_registry()
