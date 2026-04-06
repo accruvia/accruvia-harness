@@ -226,6 +226,17 @@ class SkillsWorkOrchestrator:
         self.llm_router = llm_router
         self.workspace_root = Path(workspace_root)
         self.telemetry = telemetry
+        self.progress_callback = None
+
+    def _emit(self, skill_name: str, status: str, detail: str = "") -> None:
+        """Emit a progress event so the CLI shows per-skill status."""
+        if self.progress_callback is not None:
+            self.progress_callback({
+                "type": "worker_phase",
+                "worker_phase": skill_name,
+                "status": status,
+                "detail": detail,
+            })
 
     def execute(
         self,
@@ -276,6 +287,7 @@ class SkillsWorkOrchestrator:
         codebase_search_results = _search_codebase(workspace, _search_queries)
 
         # STAGE 1: /scope
+        self._emit("scope", "running", "analyzing task and selecting files")
         scope_result = invoke_skill(
             scope_skill,
             SkillInvocation(
@@ -337,7 +349,9 @@ class SkillsWorkOrchestrator:
                 },
             )
 
+        self._emit("scope", "done", f"{len(scope.get('files_to_touch', []))} files, {scope.get('estimated_complexity', '?')} complexity")
         # STAGE 2: /implement
+        self._emit("implement", "running", "writing code edits")
         files_to_touch = list(scope.get("files_to_touch") or [])
         file_contents = _load_file_contents(workspace, files_to_touch)
         # Load reference files: imports from target files + related test files.
@@ -415,7 +429,9 @@ class SkillsWorkOrchestrator:
                 },
             )
 
+        self._emit("implement", "done", f"{apply_summary.get('edits_applied', 0)} edits, {apply_summary.get('new_files_created', 0)} new files")
         # STAGE 3: /self-review
+        self._emit("self_review", "running", "staff engineer reviewing diff")
         diff_text = _git_diff(workspace)
         self_review_result = invoke_skill(
             self_review_skill,
@@ -444,7 +460,9 @@ class SkillsWorkOrchestrator:
         )
         ship_ready = bool(self_review_result.output.get("ship_ready")) if self_review_result.success else False
 
+        self._emit("self_review", "done", "ship_ready" if ship_ready else "NOT ship_ready")
         # STAGE 4: /validate (deterministic)
+        self._emit("validate", "running", "compile + tests")
         profile = task.validation_profile or "generic"
         written_files = apply_summary.get("written") or []
         commands = _resolve_validate_commands(
@@ -466,6 +484,7 @@ class SkillsWorkOrchestrator:
         )
         overall = str(validate_result.output.get("overall") or "skipped")
 
+        self._emit("validate", "done" if overall != "fail" else "failed", overall)
         # STAGE 5 (conditional): /diagnose when validation fails
         diagnosis: dict[str, Any] | None = None
         if overall == "fail":
@@ -552,6 +571,7 @@ class SkillsWorkOrchestrator:
                 # Still failing — loop continues with fresh verbose diagnostics
 
         # STAGE 6: /quality-gate (deterministic, runs on every successful pipeline)
+        self._emit("quality_gate", "running", "lint, security, docs, types")
         quality_concerns: list[dict[str, str]] = []
         if overall != "fail":
             from ..skills.quality_gate import QualityGateSkill
@@ -639,6 +659,7 @@ class SkillsWorkOrchestrator:
                     "changed_files": written,
                 },
             )
+        self._emit("quality_gate", "done", qg_result.output.get("summary", "") if overall != "fail" else "skipped")
         # STAGE 6.5: Auto-append CHANGELOG entry before committing
         rationale = implement_result.output.get("rationale") or ""
         _append_changelog_entry(
@@ -660,6 +681,7 @@ class SkillsWorkOrchestrator:
             written_with_changelog = list(written)
 
         # STAGE 7: /commit — persist changes in git
+        self._emit("commit", "running", "staging + committing")
         deleted_files = implement_result.output.get("deleted_files") or []
         commit_paths = written_with_changelog + [p for p in deleted_files if p not in written_with_changelog]
         commit_message = (

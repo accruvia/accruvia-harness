@@ -330,6 +330,21 @@ def _emit_supervise_progress(event: dict[str, object]) -> None:
             flush=True,
         )
         return
+    if event_type == "worker_phase":
+        skill = str(event.get("worker_phase") or "")
+        status = str(event.get("status") or "")
+        detail = str(event.get("detail") or "")
+        icon = {"running": "...", "done": "ok", "failed": "FAIL"}.get(status, status)
+        suffix = f" ({detail})" if detail else ""
+        print(_timestamped(f"  /{skill} {icon}{suffix}"), flush=True)
+        return
+    if event_type == "auto_merged":
+        sha = str(event.get("commit_sha") or "")[:10]
+        print(_timestamped(f"  AUTO-MERGED to main ({sha})"), flush=True)
+        return
+    if event_type == "auto_merge_blocked":
+        print(_timestamped(f"  Merge blocked: {event.get('reason', '')}"), flush=True)
+        return
     if event_type == "worker_status":
         artifact_text = _worker_status_operator_text(event)
         queue_text = _queue_snapshot_operator_text(event)

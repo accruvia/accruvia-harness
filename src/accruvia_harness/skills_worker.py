@@ -82,6 +82,8 @@ class SkillsWorker:
                 }
             )
 
+        # Pass progress callback so orchestrator emits per-skill events
+        self._orchestrator.progress_callback = self._progress_callback
         result = self._orchestrator.execute(
             task=task,
             run=run,
