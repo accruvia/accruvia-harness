@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..cost_tracker import CostTracker
 from ..domain import Run, Task, new_id
 from ..llm import LLMRouter
 from ..policy import WorkResult
@@ -240,6 +241,21 @@ class SkillsWorkOrchestrator:
         run_dir = Path(run_dir)
         run_dir.mkdir(parents=True, exist_ok=True)
         artifacts: list[OrchestratorArtifact] = []
+
+        # Pre-flight budget check: block LLM-dependent tasks if daily spend exceeded
+        if task.validation_mode != "lightweight_operator":
+            cost_tracker = CostTracker()
+            within_budget, _remaining = cost_tracker.check_budget(task.project_id)
+            if not within_budget:
+                return WorkResult(
+                    summary="Daily LLM budget exceeded; task blocked.",
+                    artifacts=_to_artifact_tuples(artifacts),
+                    outcome="blocked",
+                    diagnostics={
+                        "failure_category": "budget_exhausted",
+                        "failure_message": "Daily LLM budget exceeded. Deterministic tasks can still run.",
+                    },
+                )
 
         scope_skill: ScopeSkill = self.skill_registry.get("scope")  # type: ignore[assignment]
         implement_skill: ImplementSkill = self.skill_registry.get("implement")  # type: ignore[assignment]
