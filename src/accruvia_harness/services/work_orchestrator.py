@@ -789,11 +789,17 @@ def _load_reference_contents(
     # Load up to budget
     result: dict[str, str] = {}
     total = 0
+    ws_resolved = workspace.resolve()
     for path in candidates[:max_ref_files]:
-        if not path.exists() or not path.is_file():
+        resolved = path.resolve() if not path.is_absolute() else path
+        if not resolved.exists() or not resolved.is_file():
             continue
         try:
-            text = path.read_text(encoding="utf-8", errors="ignore")
+            rel = resolved.relative_to(ws_resolved).as_posix()
+        except ValueError:
+            continue  # outside workspace
+        try:
+            text = resolved.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
         budget = min(max_bytes_per_file, max_total_bytes - total)
@@ -801,7 +807,6 @@ def _load_reference_contents(
             break
         text = text[:budget]
         total += len(text)
-        rel = path.relative_to(workspace.resolve()).as_posix()
         result[rel] = text
     return result
 
