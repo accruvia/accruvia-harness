@@ -20,6 +20,7 @@ from .base import (
 from .benchmark import BenchmarkSkill
 from .commit import CommitSkill
 from .diagnose import DiagnoseSkill
+from .fix_tests import FixTestsSkill
 from .follow_on import FollowOnSkill
 from .implement import ImplementSkill, apply_changes
 from .post_merge_check import PostMergeCheckSkill
@@ -41,6 +42,7 @@ def build_default_registry() -> SkillRegistry:
     registry.register(SelfReviewSkill())
     registry.register(ValidateSkill())
     registry.register(DiagnoseSkill())
+    registry.register(FixTestsSkill())
     registry.register(PromotionReviewSkill())
     registry.register(PromotionApplySkill())
     registry.register(PostMergeCheckSkill())
@@ -67,6 +69,7 @@ __all__ = [
     "TestHealthSkill",
     "ValidateSkill",
     "DiagnoseSkill",
+    "FixTestsSkill",
     "PromotionReviewSkill",
     "PromotionApplySkill",
     "PostMergeCheckSkill",

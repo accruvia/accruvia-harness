@@ -250,45 +250,64 @@ def apply_changes(
 
     workspace_root = Path(workspace_root).resolve()
 
-    # Apply edits
+    # --- Edits: two-pass atomic apply ---
+    # Pass 1: verify ALL anchors in memory before writing any file.
+    # If any edit fails, none are written — prevents partial-modification corruption.
+    edit_rejections: list[dict[str, str]] = []
+    verified_edits: list[tuple[Path, str]] = []  # (target, path_str)
+    file_cache: dict[str, str] = {}  # path_str -> in-memory content (cumulative)
+
     for entry in result.output.get("edits") or []:
         path_str = _normalize_rel(str(entry.get("path") or ""))
         if not path_str:
             continue
         if path_str not in allowed_set:
-            rejected.append({"path": path_str, "reason": "edit_out_of_scope"})
+            edit_rejections.append({"path": path_str, "reason": "edit_out_of_scope"})
             continue
         target = _resolve_in_workspace(workspace_root, path_str)
         if target is None:
-            rejected.append({"path": path_str, "reason": "path_escape"})
+            edit_rejections.append({"path": path_str, "reason": "path_escape"})
             continue
         if not target.exists() or not target.is_file():
-            rejected.append({"path": path_str, "reason": "edit_target_missing"})
+            edit_rejections.append({"path": path_str, "reason": "edit_target_missing"})
             continue
         old_string = str(entry.get("old_string") or "")
         new_string = str(entry.get("new_string") or "")
         if not old_string:
-            rejected.append({"path": path_str, "reason": "edit_empty_old_string"})
+            edit_rejections.append({"path": path_str, "reason": "edit_empty_old_string"})
             continue
-        try:
-            content = target.read_text(encoding="utf-8")
-        except OSError as exc:
-            rejected.append({"path": path_str, "reason": f"read_failed:{exc}"})
-            continue
+        if path_str not in file_cache:
+            try:
+                file_cache[path_str] = target.read_text(encoding="utf-8")
+            except OSError as exc:
+                edit_rejections.append({"path": path_str, "reason": f"read_failed:{exc}"})
+                continue
+        content = file_cache[path_str]
         match_count = content.count(old_string)
         if match_count == 0:
-            rejected.append({"path": path_str, "reason": "old_string_not_found"})
+            edit_rejections.append({"path": path_str, "reason": "old_string_not_found"})
             continue
         if match_count > 1:
-            rejected.append(
+            edit_rejections.append(
                 {"path": path_str, "reason": f"old_string_not_unique:{match_count}"}
             )
             continue
-        updated = content.replace(old_string, new_string, 1)
-        target.write_text(updated, encoding="utf-8")
-        if path_str not in written:
-            written.append(path_str)
-        edits_applied += 1
+        # Valid — update in-memory for subsequent same-file edits
+        file_cache[path_str] = content.replace(old_string, new_string, 1)
+        verified_edits.append((target, path_str))
+
+    if edit_rejections:
+        # Atomic: ANY failure rejects ALL edits. No files written.
+        rejected.extend(edit_rejections)
+    else:
+        # Pass 2: write all verified edits from the in-memory cache.
+        written_set: set[str] = set()
+        for target, path_str in verified_edits:
+            if path_str not in written_set:
+                target.write_text(file_cache[path_str], encoding="utf-8")
+                written.append(path_str)
+                written_set.add(path_str)
+            edits_applied += 1
 
     # Create new files
     for entry in result.output.get("new_files") or []:

@@ -36,6 +36,7 @@ from ..skills import (
     commands_for_profile,
     invoke_skill,
 )
+from ..skills.fix_tests import FixTestsSkill
 
 
 @dataclass(slots=True)
@@ -247,6 +248,7 @@ class SkillsWorkOrchestrator:
         diagnose_skill: DiagnoseSkill = self.skill_registry.get("diagnose")  # type: ignore[assignment]
         commit_skill: CommitSkill = self.skill_registry.get("commit")  # type: ignore[assignment]
 
+        fix_tests_skill = FixTestsSkill()
         repo_context = _collect_repo_context(workspace)
         related_file_contents = _load_related_files(workspace, task.objective)
 
@@ -471,6 +473,44 @@ class SkillsWorkOrchestrator:
                 )
             )
 
+        # STAGE 5.5 (conditional): /fix-tests when validation fails on test assertions
+        # If /diagnose says the CODE is correct but TESTS assert on old behavior,
+        # try to fix the test assertions and re-validate once.
+        if (
+            overall == "fail"
+            and diagnosis is not None
+            and diagnosis.get("classification") in {"code_defect", "test_infrastructure_failure"}
+            and _looks_like_test_assertion_failure(validate_result.output)
+        ):
+            fix_result = self._try_fix_tests(
+                task=task,
+                run=run,
+                run_dir=run_dir,
+                workspace=workspace,
+                diff_text=diff_text,
+                failure_evidence=str(validate_result.output.get("failure_evidence") or ""),
+                changed_test_files=[p for p in (apply_summary.get("written") or []) if _is_test_path(p)],
+                artifacts=artifacts,
+            )
+            if fix_result is not None:
+                # Re-validate after test fixes
+                revalidate = validate_skill.invoke_deterministic(
+                    workspace_root=workspace,
+                    commands=commands,
+                    run_dir=run_dir / "skill_validate_retry",
+                )
+                artifacts.append(
+                    _write_artifact(
+                        run_dir, "validation_retry_output", revalidate.output,
+                        "Re-validation after /fix-tests",
+                    )
+                )
+                retry_overall = str(revalidate.output.get("overall") or "fail")
+                if retry_overall != "fail":
+                    overall = retry_overall
+                    validate_result = revalidate
+                    diagnosis = None  # Clear: the fix worked
+
         # Compose final WorkResult
         written = apply_summary.get("written") or []
         test_files = [p for p in written if _is_test_path(p)]
@@ -584,6 +624,89 @@ class SkillsWorkOrchestrator:
             outcome="success",
             diagnostics=final_diagnostics,
         )
+
+
+    def _try_fix_tests(
+        self,
+        *,
+        task: Task,
+        run: Run,
+        run_dir: Path,
+        workspace: Path,
+        diff_text: str,
+        failure_evidence: str,
+        changed_test_files: list[str],
+        artifacts: list[OrchestratorArtifact],
+    ) -> SkillResult | None:
+        """Attempt to fix test assertions via /fix-tests skill.
+
+        Returns the skill result if fix was attempted, None if not applicable.
+        Applies edits to the workspace directly (reusing apply_changes).
+        """
+        if not changed_test_files:
+            return None
+        # Use the first failing test file for context
+        test_path = changed_test_files[0]
+        test_full = (workspace / test_path).resolve()
+        if not test_full.exists():
+            return None
+        try:
+            test_content = test_full.read_text(encoding="utf-8")[:40000]
+        except OSError:
+            return None
+
+        fix_result = invoke_skill(
+            FixTestsSkill(),
+            SkillInvocation(
+                skill_name="fix_tests",
+                inputs={
+                    "title": task.title,
+                    "objective": task.objective,
+                    "diff": diff_text[:8000],
+                    "failure_output": failure_evidence[:8000],
+                    "test_file_path": test_path,
+                    "test_file_content": test_content,
+                },
+                task=task,
+                run=run,
+                run_dir=run_dir / "skill_fix_tests",
+            ),
+            self.llm_router,
+            telemetry=self.telemetry,
+        )
+        artifacts.append(
+            _write_artifact(
+                run_dir, "fix_tests_output",
+                {"success": fix_result.success, "errors": fix_result.errors, "output": fix_result.output},
+                "Test assertion fixes from /fix-tests",
+            )
+        )
+        if not fix_result.success:
+            return fix_result
+        # Apply the test edits. Only the test file is allowed.
+        fix_apply = apply_changes(
+            fix_result,
+            workspace_root=workspace,
+            allowed_files=changed_test_files,
+        )
+        artifacts.append(
+            _write_artifact(
+                run_dir, "fix_tests_apply", fix_apply,
+                "Apply /fix-tests edits",
+            )
+        )
+        return fix_result
+
+
+def _looks_like_test_assertion_failure(validation_output: dict[str, Any]) -> bool:
+    """Heuristic: does the failure evidence look like a test assertion mismatch
+    rather than a compilation error or infrastructure issue?"""
+    evidence = str(validation_output.get("failure_evidence") or "").lower()
+    assertion_signals = ("assertionerror", "assert ", "failed", "expected", "!=", "assertequal", "asserttrue", "assertin")
+    infra_signals = ("modulenotfounderror", "importerror", "syntaxerror", "indentationerror")
+    has_assertion = any(sig in evidence for sig in assertion_signals)
+    has_infra = any(sig in evidence for sig in infra_signals)
+    return has_assertion and not has_infra
 
 
 def _stage_passed(validation_output: dict[str, Any], stage_name: str) -> bool:
