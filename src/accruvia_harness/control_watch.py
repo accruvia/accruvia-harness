@@ -85,6 +85,7 @@ class ControlWatchService:
         freeze_on_stall: bool = True,
     ) -> dict[str, object]:
         del api_url, stalled_objective_hours, freeze_on_stall
+        self._check_budget_recovery()
         evaluation = self._evaluate_stuck_state()
         matched_rules = list(evaluation["matched_rules"])
         if matched_rules:
@@ -96,6 +97,46 @@ class ControlWatchService:
         self._record_state_snapshots(evaluation)
         evaluation["status"] = self.control_plane.status()
         return evaluation
+
+    def _check_budget_recovery(self) -> None:
+        """If the worker lane is paused due to budget/credit exhaustion and the
+        budget has since recovered, automatically resume the lane.
+
+        Runs every control-loop tick (~60s). Cheap: one lane-state read + one
+        cost-tracker check. No LLM calls.
+        """
+        lane = self.store.get_control_lane_state("worker")
+        if lane is None or lane.state != ControlLaneStateValue.PAUSED:
+            return
+        reason = str(lane.reason or "").lower()
+        if "budget" not in reason and "credit" not in reason:
+            return
+        # Budget was the pause reason — check if it's recovered
+        try:
+            from .cost_tracker import CostTracker
+
+            tracker = CostTracker(self.store.db_path.parent)
+            # Check all projects; resume if ANY is within budget
+            for project in self.store.list_projects():
+                within_budget, _ = tracker.check_budget(project.id)
+                if within_budget:
+                    self.control_plane.resume_lane(
+                        "worker", reason="budget_recovered"
+                    )
+                    self.store.create_control_event(
+                        ControlEvent(
+                            id=new_id("control_event"),
+                            event_type="budget_recovered",
+                            entity_type="lane",
+                            entity_id="worker",
+                            producer="control-watch",
+                            payload={"project_id": project.id},
+                            idempotency_key=new_id("event_key"),
+                        )
+                    )
+                    return
+        except Exception:  # noqa: BLE001
+            pass  # cost_tracker unavailable — don't block the watch loop
 
     def _evaluate_stuck_state(self) -> dict[str, object]:
         now = datetime.now(UTC)
