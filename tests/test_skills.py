@@ -703,14 +703,15 @@ class CommitSkillTests(unittest.TestCase):
 
 
 class SkillRegistryTests(unittest.TestCase):
-    def test_default_registry_has_all_fourteen(self) -> None:
+    def test_default_registry_has_all_sixteen(self) -> None:
         registry = build_default_registry()
-        self.assertEqual(14, len(registry))
+        self.assertEqual(16, len(registry))
         expected = {
             "scope", "implement", "self_review", "validate", "diagnose",
             "fix_tests", "promotion_review", "promotion_apply",
             "post_merge_check", "follow_on", "benchmark", "commit",
-            "summarize_run", "test_health",
+            "summarize_run", "test_health", "translate_intent",
+            "quality_gate",
         }
         self.assertEqual(expected, set(registry.names()))
 

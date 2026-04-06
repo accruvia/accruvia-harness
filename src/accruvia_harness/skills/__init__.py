@@ -23,6 +23,7 @@ from .diagnose import DiagnoseSkill
 from .fix_tests import FixTestsSkill
 from .follow_on import FollowOnSkill
 from .implement import ImplementSkill, apply_changes
+from .quality_gate import QualityGateSkill
 from .post_merge_check import PostMergeCheckSkill
 from .promotion_apply import PromotionApplySkill
 from .promotion_review import PromotionReviewSkill
@@ -31,6 +32,7 @@ from .scope import ScopeSkill
 from .self_review import SelfReviewSkill
 from .summarize_run import SummarizeRunSkill
 from .test_health import TestHealthSkill
+from .translate_intent import TranslateIntentSkill
 from .validate import ValidateSkill, commands_for_profile
 
 
@@ -51,6 +53,8 @@ def build_default_registry() -> SkillRegistry:
     registry.register(CommitSkill())
     registry.register(SummarizeRunSkill())
     registry.register(TestHealthSkill())
+    registry.register(TranslateIntentSkill())
+    registry.register(QualityGateSkill())
     return registry
 
 
@@ -74,6 +78,8 @@ __all__ = [
     "PromotionApplySkill",
     "PostMergeCheckSkill",
     "FollowOnSkill",
+    "QualityGateSkill",
+    "TranslateIntentSkill",
     "apply_changes",
     "build_default_registry",
     "commands_for_profile",
