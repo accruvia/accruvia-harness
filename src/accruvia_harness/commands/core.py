@@ -1112,7 +1112,65 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
         ))
         emit({"task_created": serialize_dataclass(created)})
         run_result = engine.run_until_stable(created.id)
-        emit({"runs": [serialize_dataclass(r) for r in run_result], "task": serialize_dataclass(store.get_task(created.id))})
+        final_task = store.get_task(created.id)
+
+        # Human-readable output for non-developers
+        print("\n" + "=" * 60)
+        if final_task and final_task.status.value == "completed":
+            print("  Your request was completed successfully.")
+        else:
+            print("  Your request could not be completed.")
+            print(f"  Status: {final_task.status.value if final_task else 'unknown'}")
+        print("=" * 60)
+
+        # Run acceptance verification if we have criteria and the task completed
+        acceptance_criteria = output.get("acceptance_criteria") or []
+        if final_task and final_task.status.value == "completed" and acceptance_criteria and run_result:
+            from ..skills import VerifyAcceptanceSkill
+
+            last_run = run_result[-1]
+            artifacts_data = store.list_artifacts(last_run.id)
+            report_art = next((a for a in artifacts_data if a.kind == "report"), None)
+            report_data = {}
+            if report_art:
+                try:
+                    import json as _json
+                    report_data = _json.loads(Path(report_art.path).read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    pass
+
+            verify_skill = VerifyAcceptanceSkill()
+            verify_result = invoke_skill(
+                verify_skill,
+                SkillInvocation(skill_name="verify_acceptance", inputs={
+                    "intent": args.intent,
+                    "acceptance_criteria": acceptance_criteria,
+                    "diff": "",  # not available after run
+                    "changed_files": report_data.get("changed_files") or [],
+                    "test_results": str(report_data.get("test_check") or ""),
+                    "quality_summary": str(report_data.get("quality_concerns") or ""),
+                    "implementation_rationale": report_data.get("implementation_rationale") or "",
+                }, task=task, run=run, run_dir=config.workspace_root / "acceptance" / last_run.id),
+                engine.llm_router,
+                telemetry=ctx.telemetry,
+            )
+            if verify_result.success:
+                v = verify_result.output
+                print(f"\n  {v.get('summary_for_requester', '')}")
+                print("\n  Acceptance criteria:")
+                for cr in v.get("criteria_results") or []:
+                    icon = {"met": "+", "not_met": "X", "unclear": "?"}.get(cr.get("status"), "?")
+                    print(f"    [{icon}] {cr.get('criterion', '')}")
+                    if cr.get("evidence"):
+                        print(f"        {cr['evidence']}")
+                next_steps = v.get("next_steps") or []
+                if next_steps:
+                    print("\n  What to do next:")
+                    for step in next_steps:
+                        print(f"    - {step}")
+                print()
+
+        emit({"runs": [serialize_dataclass(r) for r in run_result], "task": serialize_dataclass(final_task)})
         return True
     if args.command == "run-until-stable":
         runs = engine.run_until_stable(args.task_id)
