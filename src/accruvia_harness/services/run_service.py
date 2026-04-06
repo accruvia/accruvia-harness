@@ -26,6 +26,15 @@ from ..workers import WorkerBackend
 from .workspace_policy import WorkspacePolicyEnforcer
 
 
+def _call_worker(worker, task, run, workspace_root, retry_hints):
+    """Call worker.work(), falling back to no retry_hints if the worker
+    doesn't support the kwarg (legacy test mocks, old backends)."""
+    try:
+        return worker.work(task, run, workspace_root, retry_hints=retry_hints)
+    except TypeError:
+        return worker.work(task, run, workspace_root)
+
+
 class RunService:
     def __init__(
         self,
@@ -415,9 +424,9 @@ class RunService:
                     validation_profile=task.validation_profile,
                     worker_backend=type(worker).__name__,
                 ):
-                    work = worker.work(task, run, self.workspace_root, retry_hints=retry_hints)
+                    work = _call_worker(worker, task, run, self.workspace_root, retry_hints)
             else:
-                work = worker.work(task, run, self.workspace_root, retry_hints=retry_hints)
+                work = _call_worker(worker, task, run, self.workspace_root, retry_hints)
         finally:
             if callable(set_progress_callback):
                 set_progress_callback(None)
