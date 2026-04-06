@@ -115,6 +115,16 @@ class ProjectTaskStoreMixin:
             ).fetchall()
         return [project_from_row(row) for row in rows]
 
+    def resolve_project(self, ref: str) -> Project | None:
+        """Look up a project by ID or by name (case-insensitive)."""
+        project = self.get_project(ref)
+        if project is not None:
+            return project
+        for p in self.list_projects():
+            if p.name.lower() == ref.lower():
+                return p
+        return None
+
     def get_project(self, project_id: str) -> Project | None:
         with self.connect() as connection:
             row = connection.execute(

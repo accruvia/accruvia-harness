@@ -961,7 +961,7 @@ def resolve_project_ref(ctx: CLIContext, ref: str | None) -> str | None:
         return project.id
     if ref.startswith("project_"):
         return ref
-    matches = [project for project in ctx.store.list_projects() if project.name == ref]
+    matches = [project for project in ctx.store.list_projects() if project.name.lower() == ref.lower()]
     if len(matches) == 1:
         return matches[0].id
     if len(matches) > 1:
