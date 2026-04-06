@@ -202,6 +202,24 @@ class PromotionService:
                 "skill": "promotion_review",
             },
         }
+        # Merge-gate convergence: if the skill approved, also check the merge
+        # gate policy so one governance path applies to all promotion flows.
+        if approved:
+            try:
+                from ..merge_gate import evaluate_run as _evaluate_merge
+
+                gate_decision = _evaluate_merge(self.store, run.id)
+                blocking_concerns = [
+                    c for c in gate_decision.concerns
+                    if c != "missing_report"  # report may not exist at affirmation time
+                ]
+                if blocking_concerns:
+                    approved = False
+                    rationale = f"Merge gate blocked: {', '.join(blocking_concerns)}"
+                details["affirmation"]["merge_gate_concerns"] = gate_decision.concerns
+            except Exception as exc:  # noqa: BLE001 - degraded-open
+                details["affirmation"]["merge_gate_error"] = str(exc)
+
         follow_on_task_id: str | None = None
         if approved:
             applyback = self._apply_approved_promotion(task, run)
