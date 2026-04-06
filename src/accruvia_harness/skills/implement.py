@@ -46,6 +46,7 @@ class ImplementSkill:
         files_not_to_touch = list(inputs.get("files_not_to_touch") or [])
         risks = list(inputs.get("risks") or [])
         file_contents = dict(inputs.get("file_contents") or {})
+        reference_contents = dict(inputs.get("reference_contents") or {})
         retry_feedback = str(inputs.get("retry_feedback") or "").strip()
 
         # Partition files_to_touch into existing (edit via edits) and new (via new_files).
@@ -84,6 +85,14 @@ class ImplementSkill:
             )
         existing_block = "\n\n".join(existing_block_parts) if existing_block_parts else ""
 
+        reference_block_parts = []
+        for path, content in reference_contents.items():
+            truncated = str(content)[:20000]
+            reference_block_parts.append(
+                f"=== REFERENCE (read-only): {path} ===\n{truncated}\n=== end {path} ==="
+            )
+        reference_block = "\n\n".join(reference_block_parts) if reference_block_parts else ""
+
         retry_block = ""
         if retry_feedback:
             retry_block = (
@@ -109,6 +118,11 @@ class ImplementSkill:
                     "Existing file contents (verbatim — reference these when composing "
                     "old_string anchors):\n\n" + existing_block
                     if existing_block
+                    else "",
+                    "Reference files (read-only, DO NOT edit these — use them to "
+                    "understand APIs, types, and test fixture patterns):\n\n"
+                    + reference_block
+                    if reference_block
                     else "",
                     "Return strict JSON with keys:\n"
                     "  edits (list of {path, old_string, new_string} objects for existing files)\n"

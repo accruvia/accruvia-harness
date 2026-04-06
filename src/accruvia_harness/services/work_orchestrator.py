@@ -322,7 +322,13 @@ class SkillsWorkOrchestrator:
             )
 
         # STAGE 2: /implement
-        file_contents = _load_file_contents(workspace, list(scope.get("files_to_touch") or []))
+        files_to_touch = list(scope.get("files_to_touch") or [])
+        file_contents = _load_file_contents(workspace, files_to_touch)
+        # Load reference files: imports from target files + related test files.
+        # This gives /implement the context it needs for integration edits.
+        reference_contents = _load_reference_contents(
+            workspace, files_to_touch, file_contents,
+        )
         implement_result = invoke_skill(
             implement_skill,
             SkillInvocation(
@@ -331,10 +337,11 @@ class SkillsWorkOrchestrator:
                     "title": task.title,
                     "objective": task.objective,
                     "approach": scope.get("approach", ""),
-                    "files_to_touch": scope.get("files_to_touch") or [],
+                    "files_to_touch": files_to_touch,
                     "files_not_to_touch": scope.get("files_not_to_touch") or [],
                     "risks": scope.get("risks") or [],
                     "file_contents": file_contents,
+                    "reference_contents": reference_contents,
                     "retry_feedback": retry_feedback,
                 },
                 task=task,
@@ -473,43 +480,60 @@ class SkillsWorkOrchestrator:
                 )
             )
 
-        # STAGE 5.5 (conditional): /fix-tests when validation fails on test assertions
-        # If /diagnose says the CODE is correct but TESTS assert on old behavior,
-        # try to fix the test assertions and re-validate once.
+        # STAGE 5.5 (conditional): iterative /fix-tests loop
+        # When validation fails on test assertions (not syntax/import errors),
+        # try up to 3 rounds of: get verbose failure → /fix-tests → re-validate.
+        _MAX_FIX_ROUNDS = 3
+        changed_test_files = [p for p in (apply_summary.get("written") or []) if _is_test_path(p)]
         if (
             overall == "fail"
             and diagnosis is not None
             and diagnosis.get("classification") in {"code_defect", "test_infrastructure_failure"}
             and _looks_like_test_assertion_failure(validate_result.output)
+            and changed_test_files
         ):
-            fix_result = self._try_fix_tests(
-                task=task,
-                run=run,
-                run_dir=run_dir,
-                workspace=workspace,
-                diff_text=diff_text,
-                failure_evidence=str(validate_result.output.get("failure_evidence") or ""),
-                changed_test_files=[p for p in (apply_summary.get("written") or []) if _is_test_path(p)],
-                artifacts=artifacts,
-            )
-            if fix_result is not None:
-                # Re-validate after test fixes
+            for fix_round in range(1, _MAX_FIX_ROUNDS + 1):
+                # Re-run validation with verbose output for better diagnostics
+                verbose_commands = _verbose_test_commands(commands)
+                verbose_result = validate_skill.invoke_deterministic(
+                    workspace_root=workspace,
+                    commands=verbose_commands,
+                    run_dir=run_dir / f"skill_validate_verbose_{fix_round}",
+                )
+                verbose_evidence = str(verbose_result.output.get("failure_evidence") or "")
+
+                fix_result = self._try_fix_tests(
+                    task=task,
+                    run=run,
+                    run_dir=run_dir,
+                    workspace=workspace,
+                    diff_text=diff_text,
+                    failure_evidence=verbose_evidence or str(validate_result.output.get("failure_evidence") or ""),
+                    changed_test_files=changed_test_files,
+                    artifacts=artifacts,
+                    round_number=fix_round,
+                )
+                if fix_result is None or not fix_result.success:
+                    break
+                # Re-validate after fixes
                 revalidate = validate_skill.invoke_deterministic(
                     workspace_root=workspace,
                     commands=commands,
-                    run_dir=run_dir / "skill_validate_retry",
+                    run_dir=run_dir / f"skill_validate_retry_{fix_round}",
                 )
                 artifacts.append(
                     _write_artifact(
-                        run_dir, "validation_retry_output", revalidate.output,
-                        "Re-validation after /fix-tests",
+                        run_dir, f"validation_retry_{fix_round}_output", revalidate.output,
+                        f"Re-validation after /fix-tests round {fix_round}",
                     )
                 )
                 retry_overall = str(revalidate.output.get("overall") or "fail")
                 if retry_overall != "fail":
                     overall = retry_overall
                     validate_result = revalidate
-                    diagnosis = None  # Clear: the fix worked
+                    diagnosis = None
+                    break
+                # Still failing — loop continues with fresh verbose diagnostics
 
         # Compose final WorkResult
         written = apply_summary.get("written") or []
@@ -637,6 +661,7 @@ class SkillsWorkOrchestrator:
         failure_evidence: str,
         changed_test_files: list[str],
         artifacts: list[OrchestratorArtifact],
+        round_number: int = 1,
     ) -> SkillResult | None:
         """Attempt to fix test assertions via /fix-tests skill.
 
@@ -669,16 +694,16 @@ class SkillsWorkOrchestrator:
                 },
                 task=task,
                 run=run,
-                run_dir=run_dir / "skill_fix_tests",
+                run_dir=run_dir / f"skill_fix_tests_{round_number}",
             ),
             self.llm_router,
             telemetry=self.telemetry,
         )
         artifacts.append(
             _write_artifact(
-                run_dir, "fix_tests_output",
+                run_dir, f"fix_tests_{round_number}_output",
                 {"success": fix_result.success, "errors": fix_result.errors, "output": fix_result.output},
-                "Test assertion fixes from /fix-tests",
+                f"Test assertion fixes from /fix-tests (round {round_number})",
             )
         )
         if not fix_result.success:
@@ -691,11 +716,110 @@ class SkillsWorkOrchestrator:
         )
         artifacts.append(
             _write_artifact(
-                run_dir, "fix_tests_apply", fix_apply,
-                "Apply /fix-tests edits",
+                run_dir, f"fix_tests_{round_number}_apply", fix_apply,
+                f"Apply /fix-tests edits (round {round_number})",
             )
         )
         return fix_result
+
+
+def _parse_imports(content: str) -> list[str]:
+    """Extract imported module paths from Python source. Returns dotted names."""
+    import re
+
+    modules: list[str] = []
+    for match in re.finditer(r"^\s*(?:from|import)\s+([\w.]+)", content, re.MULTILINE):
+        modules.append(match.group(1))
+    return modules
+
+
+def _module_to_path(module: str, workspace: Path) -> Path | None:
+    """Best-effort: convert dotted module to a file path under workspace."""
+    parts = module.replace(".", "/")
+    for prefix in ("src/", ""):
+        candidate = workspace / prefix / (parts + ".py")
+        if candidate.exists():
+            return candidate
+        candidate = workspace / prefix / parts / "__init__.py"
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _load_reference_contents(
+    workspace: Path,
+    files_to_touch: list[str],
+    file_contents: dict[str, str],
+    *,
+    max_ref_files: int = 8,
+    max_bytes_per_file: int = 20000,
+    max_total_bytes: int = 80000,
+) -> dict[str, str]:
+    """Load read-only reference files that /implement needs for integration context.
+
+    Includes:
+    1. Modules imported by files_to_touch (API signatures, domain types)
+    2. Test files that import files_to_touch (fixture patterns)
+    """
+    seen: set[str] = set(files_to_touch)
+    candidates: list[Path] = []
+
+    # Collect imports from each target file
+    for content in file_contents.values():
+        for module in _parse_imports(content):
+            path = _module_to_path(module, workspace)
+            if path is not None:
+                rel = path.relative_to(workspace.resolve()).as_posix()
+                if rel not in seen:
+                    seen.add(rel)
+                    candidates.append(path)
+
+    # Collect test files that import target modules
+    source_files = [
+        f for f in files_to_touch
+        if f.endswith(".py") and not _is_test_path(f)
+    ]
+    if source_files:
+        importing = _find_importing_tests(workspace, source_files, max_additional=5)
+        for test_rel in importing:
+            if test_rel not in seen:
+                seen.add(test_rel)
+                candidates.append((workspace / test_rel).resolve())
+
+    # Load up to budget
+    result: dict[str, str] = {}
+    total = 0
+    for path in candidates[:max_ref_files]:
+        if not path.exists() or not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        budget = min(max_bytes_per_file, max_total_bytes - total)
+        if budget <= 0:
+            break
+        text = text[:budget]
+        total += len(text)
+        rel = path.relative_to(workspace.resolve()).as_posix()
+        result[rel] = text
+    return result
+
+
+def _verbose_test_commands(commands: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Replace pytest flags with verbose equivalents for better diagnostics."""
+    result: list[dict[str, Any]] = []
+    for entry in commands:
+        cmd = str(entry.get("cmd") or "")
+        if "pytest" in cmd:
+            # Replace -q/--no-header/-x with -vv --tb=long for full tracebacks
+            verbose_cmd = cmd.replace("-q", "-vv").replace("--no-header", "--tb=long")
+            if "-vv" not in verbose_cmd:
+                verbose_cmd += " -vv --tb=long"
+            result.append({**entry, "cmd": verbose_cmd})
+        else:
+            result.append(entry)
+    return result
 
 
 def _looks_like_test_assertion_failure(validation_output: dict[str, Any]) -> bool:
