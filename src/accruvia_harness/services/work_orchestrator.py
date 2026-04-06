@@ -765,14 +765,19 @@ def _load_reference_contents(
     candidates: list[Path] = []
 
     # Collect imports from each target file
+    ws_abs = workspace.resolve()
     for content in file_contents.values():
         for module in _parse_imports(content):
             path = _module_to_path(module, workspace)
             if path is not None:
-                rel = path.relative_to(workspace.resolve()).as_posix()
+                resolved = path.resolve()
+                try:
+                    rel = resolved.relative_to(ws_abs).as_posix()
+                except ValueError:
+                    continue
                 if rel not in seen:
                     seen.add(rel)
-                    candidates.append(path)
+                    candidates.append(resolved)
 
     # Collect test files that import target modules
     source_files = [
