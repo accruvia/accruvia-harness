@@ -535,6 +535,25 @@ class SkillsWorkOrchestrator:
                     break
                 # Still failing — loop continues with fresh verbose diagnostics
 
+        # STAGE 6: /quality-gate (deterministic, runs on every successful pipeline)
+        quality_concerns: list[dict[str, str]] = []
+        if overall != "fail":
+            from ..skills.quality_gate import QualityGateSkill
+
+            qg = QualityGateSkill()
+            qg_result = qg.invoke_deterministic(
+                workspace=workspace,
+                changed_files=list(apply_summary.get("written") or []),
+                run_dir=run_dir / "skill_quality_gate",
+            )
+            artifacts.append(
+                _write_artifact(
+                    run_dir, "quality_gate_output", qg_result.output,
+                    "Automatic quality enforcement (lint, security, docs, types)",
+                )
+            )
+            quality_concerns = list(qg_result.output.get("quality_concerns") or [])
+
         # Compose final WorkResult
         written = apply_summary.get("written") or []
         test_files = [p for p in written if _is_test_path(p)]
@@ -556,6 +575,7 @@ class SkillsWorkOrchestrator:
                     "scope": scope,
                     "implementation_rationale": implement_result.output.get("rationale", ""),
                     "self_review_summary": self_review_result.output.get("summary", "") if self_review_result.success else "",
+                    "quality_concerns": quality_concerns,
                     "diagnosis": diagnosis,
                 },
                 "Skills-pipeline consolidated report",

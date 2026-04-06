@@ -112,6 +112,11 @@ def build_parser() -> argparse.ArgumentParser:
     auto_merge.add_argument("--dry-run", action="store_true", help="Evaluate without executing the merge.")
     auto_merge.add_argument("--target-branch", default="main", help="Target branch for the merge.")
 
+    request = subparsers.add_parser("request", help="Describe a feature in plain language. The harness translates it into a technical task and executes it.")
+    request.add_argument("intent", help="What you want, in your own words.")
+    request.add_argument("--project-id", help="Project to create the task in.")
+    request.add_argument("--dry-run", action="store_true", help="Show the translated task without executing it.")
+
     run_until_stable = subparsers.add_parser("run-until-stable", help="Run repeated cycles until a task is completed or failed.")
     run_until_stable.add_argument("task_id")
 

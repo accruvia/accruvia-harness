@@ -1039,6 +1039,81 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
         run = engine.run_once(args.task_id)
         emit({"run": serialize_dataclass(run), "artifacts": [serialize_dataclass(i) for i in store.list_artifacts(run.id)], "evaluations": [serialize_dataclass(i) for i in store.list_evaluations(run.id)], "decisions": [serialize_dataclass(i) for i in store.list_decisions(run.id)]})
         return True
+    if args.command == "request":
+        from pathlib import Path
+
+        from ..skills import TranslateIntentSkill, SkillInvocation, invoke_skill, build_default_registry
+        from ..services.work_orchestrator import _collect_repo_context, _search_codebase
+
+        project_id = args.project_id
+        if not project_id:
+            projects = store.list_projects()
+            if not projects:
+                raise ValueError("No projects exist. Create one first with create-project.")
+            project_id = projects[0].id
+        project = store.get_project(project_id)
+        if project is None:
+            raise ValueError(f"Unknown project: {project_id}")
+
+        workspace = Path(".")
+        repo_context = _collect_repo_context(workspace)
+
+        import re as _re
+        queries = _re.findall(r'"([^"]+)"|([A-Z][a-z]+(?:[A-Z][a-z]+)+)', args.intent)
+        search_queries = [q[0] or q[1] for q in queries if q[0] or q[1]]
+        search_results = _search_codebase(workspace, search_queries) if search_queries else {}
+
+        skill = TranslateIntentSkill()
+        from ..domain import Task, Run, TaskStatus, RunStatus, new_id
+
+        task = Task(id=new_id("request"), project_id=project_id, title="Intent translation",
+                    objective=args.intent, strategy="request", status=TaskStatus.COMPLETED)
+        run = Run(id=new_id("request_run"), task_id=task.id, status=RunStatus.COMPLETED,
+                  attempt=1, summary="translate intent")
+        run_dir = config.workspace_root / "requests" / run.id
+        result = invoke_skill(
+            skill,
+            SkillInvocation(skill_name="translate_intent", inputs={
+                "intent": args.intent,
+                "repo_context": repo_context,
+                "project_description": project.description,
+                "codebase_search_results": search_results,
+            }, task=task, run=run, run_dir=run_dir),
+            engine.llm_router,
+            telemetry=ctx.telemetry,
+        )
+        if not result.success:
+            emit({"error": "translate_intent failed", "errors": result.errors})
+            return True
+        output = result.output
+        emit({
+            "summary_for_requester": output.get("summary_for_requester", ""),
+            "acceptance_criteria": output.get("acceptance_criteria", []),
+            "estimated_complexity": output.get("estimated_complexity", ""),
+            "risks": output.get("risks_plain_language", []),
+        })
+        if args.dry_run:
+            emit({"dry_run": True, "full_translation": output})
+            return True
+        # Create and run the task
+        scope: dict[str, object] = {}
+        if output.get("suggested_files"):
+            scope["allowed_paths"] = output["suggested_files"]
+        if output.get("suggested_forbidden_files"):
+            scope["forbidden_paths"] = output["suggested_forbidden_files"]
+        created = ctx.query_service.store.create_task(Task(
+            id=new_id("task"), project_id=project_id,
+            title=f"Request: {args.intent[:60]}",
+            objective=output.get("technical_objective", args.intent),
+            strategy="implementation", status=TaskStatus.PENDING,
+            priority=700, scope=scope,
+            validation_profile=output.get("validation_profile", "generic"),
+            required_artifacts=["report"],
+        ))
+        emit({"task_created": serialize_dataclass(created)})
+        run_result = engine.run_until_stable(created.id)
+        emit({"runs": [serialize_dataclass(r) for r in run_result], "task": serialize_dataclass(store.get_task(created.id))})
+        return True
     if args.command == "run-until-stable":
         runs = engine.run_until_stable(args.task_id)
         emit({"runs": [serialize_dataclass(r) for r in runs], "task": serialize_dataclass(store.get_task(args.task_id))})
