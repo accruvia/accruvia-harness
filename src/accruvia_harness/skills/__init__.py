@@ -34,6 +34,7 @@ from .summarize_run import SummarizeRunSkill
 from .test_health import TestHealthSkill
 from .translate_intent import TranslateIntentSkill
 from .validate import ValidateSkill, commands_for_profile
+from .verify_acceptance import VerifyAcceptanceSkill
 
 
 def build_default_registry() -> SkillRegistry:
@@ -55,6 +56,7 @@ def build_default_registry() -> SkillRegistry:
     registry.register(TestHealthSkill())
     registry.register(TranslateIntentSkill())
     registry.register(QualityGateSkill())
+    registry.register(VerifyAcceptanceSkill())
     return registry
 
 
@@ -80,6 +82,7 @@ __all__ = [
     "FollowOnSkill",
     "QualityGateSkill",
     "TranslateIntentSkill",
+    "VerifyAcceptanceSkill",
     "apply_changes",
     "build_default_registry",
     "commands_for_profile",
