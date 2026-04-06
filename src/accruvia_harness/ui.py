@@ -38,22 +38,17 @@ def _get_git_commit() -> str:
 _GIT_COMMIT = _get_git_commit()
 _SERVER_STARTED_AT = _dt.datetime.now(_dt.timezone.utc).isoformat()
 from .context_control import objective_execution_gate
-from .frustration_triage import triage_frustration
 from .llm import LLMExecutionError, LLMInvocation
 from .services.red_team_service import RedTeamLoopService
 from .services.task_service import TaskService
 from .services.workflow_timing_service import WorkflowTimingService
 from .services.workflow_service import WorkflowService
-from .ui_memory import LocalContextMemoryProvider
-from .ui_responder import (
-    ConversationTurn,
-    ObjectiveResponderContext,
-    ResponderResult,
-    ResponderContextPacket,
-    RunResponderContext,
-    TaskResponderContext,
-    answer_ui_message,
-)
+
+# ui_responder and ui_memory deleted — mediation replaced by MCP server.
+# Stubs for types still referenced in method signatures below.
+ConversationTurn = dict  # type: ignore[assignment,misc]
+ResponderResult = dict  # type: ignore[assignment,misc]
+ResponderContextPacket = dict  # type: ignore[assignment,misc]
 from .domain import (
     ContextRecord,
     IntentModel,
@@ -382,7 +377,7 @@ class HarnessUIDataService:
         self.task_service = TaskService(self.store)
         self.workflow_service = WorkflowService(self.store)
         self.workflow_timing = WorkflowTimingService()
-        self.memory_provider = LocalContextMemoryProvider(self.store)
+        self.memory_provider = None  # Mediation layer removed; MCP server replaces it
         self.auto_resume_atomic_generation = not bool(getattr(ctx, "is_test", False))
         self.auto_resume_objective_review = not bool(getattr(ctx, "is_test", False))
         self.background_workflow_enabled = not bool(getattr(ctx, "is_test", False))
@@ -7231,9 +7226,7 @@ def _build_fastapi_app(data_service: HarnessUIDataService, event_bus: _EventBus)
     def run_cli_output(run_id: str):
         return _dispatch(lambda: data_service.run_cli_output(run_id))
 
-    @app.get("/api/tasks/{task_id}/conversation")
-    def task_conversation(task_id: str):
-        return _dispatch(lambda: data_service.task_conversation(task_id))
+    # /conversation endpoint removed — mediation replaced by MCP server.
 
     @app.get("/api/tasks/{task_id}/insight")
     def task_insight(task_id: str):
@@ -7281,22 +7274,8 @@ def _build_fastapi_app(data_service: HarnessUIDataService, event_bus: _EventBus)
             project_ref, str(payload.get("title") or ""), str(payload.get("summary") or ""),
         ), status_code=201, notify=True)
 
-    @app.post("/api/projects/{project_ref}/comments", status_code=201)
-    async def add_comment(project_ref: str, request: Request):
-        payload = await request.json()
-        return _dispatch(lambda: data_service.add_operator_comment(
-            project_ref, str(payload.get("text") or ""), str(payload.get("author") or ""),
-            str(payload.get("objective_id") or "").strip() or None,
-            str(payload.get("task_id") or "").strip() or None,
-        ), status_code=201, notify=True)
-
-    @app.post("/api/projects/{project_ref}/frustrations", status_code=201)
-    async def add_frustration(project_ref: str, request: Request):
-        payload = await request.json()
-        return _dispatch(lambda: data_service.add_operator_frustration(
-            project_ref, str(payload.get("text") or ""), str(payload.get("author") or ""),
-            str(payload.get("objective_id") or "").strip() or None,
-        ), status_code=201, notify=True)
+    # /comments and /frustrations endpoints removed — mediation replaced by
+    # MCP server. Users talk to Claude directly; Claude calls harness tools.
 
     @app.post("/api/objectives/{objective_id}/tasks", status_code=201)
     def create_linked_task(objective_id: str):
