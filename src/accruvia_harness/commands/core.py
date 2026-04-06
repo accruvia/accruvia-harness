@@ -1120,8 +1120,52 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
             print("  Your request was completed successfully.")
         else:
             print("  Your request could not be completed.")
-            print(f"  Status: {final_task.status.value if final_task else 'unknown'}")
-        print("=" * 60)
+            print("=" * 60)
+            # Explain the failure in plain language
+            if run_result:
+                last_run = run_result[-1]
+                last_evals = store.list_evaluations(last_run.id)
+                diag = {}
+                if last_evals:
+                    diag = (last_evals[-1].details or {}).get("diagnostics") or {}
+                from ..skills import ExplainFailureSkill
+
+                explain_skill = ExplainFailureSkill()
+                explain_result = invoke_skill(
+                    explain_skill,
+                    SkillInvocation(skill_name="explain_failure", inputs={
+                        "intent": args.intent,
+                        "failure_category": str(diag.get("failure_category") or ""),
+                        "failure_message": str(diag.get("failure_message") or ""),
+                        "stage": str(diag.get("stage") or ""),
+                        "diagnosis": diag.get("diagnosis"),
+                        "attempt_count": last_run.attempt,
+                        "max_attempts": 2,
+                    }, task=task, run=run, run_dir=config.workspace_root / "explain" / last_run.id),
+                    engine.llm_router,
+                    telemetry=ctx.telemetry,
+                )
+                if explain_result.success:
+                    e = explain_result.output
+                    print(f"\n  What happened: {e.get('what_happened', '')}")
+                    print(f"  Impact: {e.get('why_it_matters', '')}")
+                    what_to_try = e.get("what_to_try") or []
+                    if what_to_try:
+                        print("\n  What you can do:")
+                        for suggestion in what_to_try:
+                            print(f"    - {suggestion}")
+                else:
+                    # Fallback: deterministic explanation
+                    fb = ExplainFailureSkill.fallback_explanation(
+                        str(diag.get("failure_category") or "unknown")
+                    )
+                    print(f"\n  What happened: {fb['what_happened']}")
+                    for suggestion in fb.get("what_to_try") or []:
+                        print(f"  Suggestion: {suggestion}")
+                print()
+        if final_task and final_task.status.value == "completed":
+            pass  # banner already printed
+        print("=" * 60 if final_task and final_task.status.value != "completed" else "")
 
         # Run acceptance verification if we have criteria and the task completed
         acceptance_criteria = output.get("acceptance_criteria") or []
