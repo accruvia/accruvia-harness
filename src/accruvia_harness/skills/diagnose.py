@@ -92,6 +92,7 @@ class DiagnoseSkill:
             "cooldown_seconds": "int",
             "root_cause": "str",
             "scope_adjustment": "str",
+            "why_chain": "list",
         },
         "allowed_values": {"classification": list(FAILURE_CLASSES)},
     }
@@ -138,6 +139,11 @@ class DiagnoseSkill:
                 "classification should recommend splitting.\n"
                 "  system_failure: an unexpected harness-level error that doesn't fit elsewhere.\n"
                 "  unknown: reserved for cases where evidence is too sparse to classify.",
+                "CRITICAL: Apply the 6 Whys technique. Ask 'Why did this fail?' six "
+                "times, each answer feeding the next question. Include the chain in "
+                "a 'why_chain' key (list of 6 strings). The final why should name the "
+                "root cause — not the proximate error, but the underlying reason. "
+                "Set root_cause from the deepest why, not the surface error.\n"
                 "Retry guidance: rate limits and credit exhaustion should NOT retry quickly. "
                 "Timeouts, artifact contract failures, and hung processes should retry. "
                 "Code defects should retry with scope_adjustment guidance.",

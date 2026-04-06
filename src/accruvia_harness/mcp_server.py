@@ -155,6 +155,70 @@ def get_run_detail(run_id: str) -> dict:
 
 
 @mcp.tool()
+def get_intent_diagram(task_id: str) -> dict:
+    """Get the Mermaid diagram showing the system's understanding of a task's
+    intent. This is the visual representation of 'what was asked → what will
+    be built → how it will be verified.' Rendered in the UI so non-developers
+    can see intent vs execution at a glance.
+
+    If the task was created via /translate-intent, the diagram is stored in the
+    run artifacts. Otherwise, a basic diagram is generated from task metadata.
+    """
+    store = _get_store()
+    config = _get_config()
+    task = store.get_task(task_id)
+    if task is None:
+        return {"error": f"Task not found: {task_id}"}
+
+    # Try to find the translate-intent output for this task
+    for run in store.list_runs(task_id):
+        run_dir = config.workspace_root / "runs" / run.id
+        for artifact_dir in [run_dir, config.workspace_root / "requests"]:
+            for json_path in artifact_dir.rglob("translate_intent_analysis.json"):
+                try:
+                    data = json.loads(json_path.read_text(encoding="utf-8"))
+                    output = data.get("output") or {}
+                    if output.get("mermaid_diagram"):
+                        return {
+                            "task_id": task_id,
+                            "mermaid": output["mermaid_diagram"],
+                            "why_chain": output.get("why_chain", []),
+                            "acceptance_criteria": output.get("acceptance_criteria", []),
+                            "source": "translate_intent",
+                        }
+                except (OSError, json.JSONDecodeError):
+                    continue
+
+    # Fallback: generate a basic diagram from task metadata
+    criteria = []
+    scope = task.scope or {}
+    files = scope.get("allowed_paths") or []
+    diagram = (
+        "stateDiagram-v2\n"
+        f'    [*] --> Intent: "{_escape_mermaid(task.title)}"\n'
+        f'    Intent --> Objective: "{_escape_mermaid(task.objective[:80])}"\n'
+    )
+    if files:
+        diagram += f'    Objective --> Scope: "Files: {", ".join(f[:30] for f in files[:3])}"\n'
+        diagram += f'    Scope --> Pipeline: "strategy: {task.strategy}"\n'
+    else:
+        diagram += f'    Objective --> Pipeline: "strategy: {task.strategy}"\n'
+    diagram += '    Pipeline --> [*]: "status: ' + task.status.value + '"\n'
+    return {
+        "task_id": task_id,
+        "mermaid": diagram,
+        "why_chain": [],
+        "acceptance_criteria": criteria,
+        "source": "generated_from_metadata",
+    }
+
+
+def _escape_mermaid(text: str) -> str:
+    """Escape text for Mermaid diagram labels."""
+    return text.replace('"', "'").replace("\n", " ")[:100]
+
+
+@mcp.tool()
 def explain_run(run_id: str) -> dict:
     """Get a human-readable summary of what a run accomplished or why it failed."""
     store = _get_store()

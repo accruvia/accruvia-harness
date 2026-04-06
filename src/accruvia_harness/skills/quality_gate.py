@@ -145,17 +145,34 @@ class QualityGateSkill:
         workspace: Path,
         changed_files: list[str],
         run_dir: Path,
+        validation_profile: str = "generic",
     ) -> SkillResult:
-        """Run quality checks on changed files. Returns structured report."""
+        """Run quality checks on changed files. Returns structured report.
+
+        Language-specific checks (lint, docstrings, type hints) only run when
+        the changed files match. Security scan is language-agnostic and always
+        runs. This keeps the harness useful for any language, not just Python.
+        """
         run_dir.mkdir(parents=True, exist_ok=True)
         checks: list[dict[str, Any]] = []
         all_concerns: list[dict[str, str]] = []
 
-        # 1. Lint (ruff if available)
-        lint_result = self._run_lint(workspace, changed_files, run_dir)
-        checks.append(lint_result)
-        if lint_result.get("issues"):
-            all_concerns.extend(lint_result["issues"][:10])
+        py_files = [f for f in changed_files if f.endswith(".py")]
+        js_files = [f for f in changed_files if f.endswith((".js", ".jsx", ".ts", ".tsx"))]
+
+        # 1. Lint — dispatch by language
+        if py_files:
+            lint_result = self._run_lint(workspace, py_files, run_dir, linter="ruff")
+            checks.append(lint_result)
+            if lint_result.get("issues"):
+                all_concerns.extend(lint_result["issues"][:10])
+        elif js_files:
+            lint_result = self._run_lint(workspace, js_files, run_dir, linter="eslint")
+            checks.append(lint_result)
+            if lint_result.get("issues"):
+                all_concerns.extend(lint_result["issues"][:10])
+        else:
+            checks.append({"name": "lint", "status": "skip", "issues": []})
 
         # 2. Security scan
         secret_findings: list[dict[str, str]] = []
@@ -175,11 +192,9 @@ class QualityGateSkill:
         })
         all_concerns.extend(secret_findings)
 
-        # 3. Docstring coverage
+        # 3. Docstring coverage (Python only)
         doc_issues: list[dict[str, str]] = []
-        for rel_path in changed_files:
-            if not rel_path.endswith(".py"):
-                continue
+        for rel_path in py_files:
             full = (workspace / rel_path).resolve()
             if not full.exists():
                 continue
@@ -194,11 +209,9 @@ class QualityGateSkill:
             "issues": doc_issues,
         })
 
-        # 4. Type hint coverage
+        # 4. Type hint coverage (Python only)
         type_issues: list[dict[str, str]] = []
-        for rel_path in changed_files:
-            if not rel_path.endswith(".py"):
-                continue
+        for rel_path in py_files:
             full = (workspace / rel_path).resolve()
             if not full.exists():
                 continue
@@ -240,13 +253,19 @@ class QualityGateSkill:
 
     def _run_lint(
         self, workspace: Path, changed_files: list[str], run_dir: Path,
+        linter: str = "ruff",
     ) -> dict[str, Any]:
-        py_files = [f for f in changed_files if f.endswith(".py")]
-        if not py_files:
+        if not changed_files:
+            return {"name": "lint", "status": "skip", "issues": []}
+        if linter == "ruff":
+            cmd = ["python", "-m", "ruff", "check", "--select=E,W,F", "--no-fix", *changed_files]
+        elif linter == "eslint":
+            cmd = ["npx", "eslint", "--no-error-on-unmatched-pattern", *changed_files]
+        else:
             return {"name": "lint", "status": "skip", "issues": []}
         try:
             result = subprocess.run(
-                ["python", "-m", "ruff", "check", "--select=E,W,F", "--no-fix", *py_files],
+                cmd,
                 cwd=workspace,
                 capture_output=True,
                 encoding="utf-8",

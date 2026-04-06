@@ -545,6 +545,7 @@ class SkillsWorkOrchestrator:
                 workspace=workspace,
                 changed_files=list(apply_summary.get("written") or []),
                 run_dir=run_dir / "skill_quality_gate",
+                validation_profile=profile,
             )
             artifacts.append(
                 _write_artifact(

@@ -41,6 +41,8 @@ class TranslateIntentSkill:
             "estimated_complexity",
             "risks_plain_language",
             "summary_for_requester",
+            "why_chain",
+            "mermaid_diagram",
         ],
         "types": {
             "technical_objective": "str",
@@ -51,6 +53,8 @@ class TranslateIntentSkill:
             "estimated_complexity": "str",
             "risks_plain_language": "list",
             "summary_for_requester": "str",
+            "why_chain": "list",
+            "mermaid_diagram": "str",
         },
         "allowed_values": {
             "estimated_complexity": ["trivial", "small", "medium", "large", "too_large"],
@@ -88,7 +92,15 @@ class TranslateIntentSkill:
                     "concrete technical task specification. The requester is NOT a "
                     "developer — they describe what they want in business/product "
                     "terms. Your job is to figure out the technical implementation "
-                    "details so the coding pipeline can execute.",
+                    "details so the coding pipeline can execute.\n\n"
+                    "CRITICAL: Before writing the specification, apply the 6 Whys "
+                    "technique to drill from the surface request to the root need. "
+                    "Ask yourself 'Why does the requester want this?' six times, each "
+                    "answer feeding the next question. Include your 6 Whys reasoning "
+                    "chain in a new JSON key 'why_chain' (list of 6 strings, each "
+                    "a why→because pair). The final why should reveal the root "
+                    "technical action. Build your technical_objective from that root, "
+                    "not from the surface request.",
                     f"Feature request (verbatim from requester):\n{intent}",
                     f"Project description: {project_description or '(not provided)'}",
                     "Repository structure:\n" + (repo_context or "(not provided)"),
@@ -111,6 +123,14 @@ class TranslateIntentSkill:
                     "go wrong, in terms the requester understands — no jargon)\n"
                     "  summary_for_requester (string, 2-3 sentences explaining what "
                     "you plan to build and how, in non-technical terms)",
+                    "  why_chain (list of 6 strings, each a 'Why? → Because...' pair "
+                    "from the 6 Whys analysis. First why is about the surface request, "
+                    "last why reveals the root technical need)\n"
+                    "  mermaid_diagram (string, a Mermaid stateDiagram-v2 showing the "
+                    "system's understanding: the user's intent at the top, the "
+                    "acceptance criteria as states, the technical approach as transitions, "
+                    "and the expected outcome. This is rendered in the UI so the user "
+                    "can see 'this is what I asked for, this is what will be built.')\n",
                     "GUIDELINES:\n"
                     "  - If the request is vague, make reasonable assumptions and "
                     "state them in the summary_for_requester.\n"
@@ -132,6 +152,8 @@ class TranslateIntentSkill:
             return {}
         parsed.setdefault("suggested_forbidden_files", [])
         parsed.setdefault("risks_plain_language", [])
+        parsed.setdefault("why_chain", [])
+        parsed.setdefault("mermaid_diagram", "")
         for list_key in ("acceptance_criteria", "suggested_files",
                          "suggested_forbidden_files", "risks_plain_language"):
             if isinstance(parsed.get(list_key), list):
