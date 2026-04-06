@@ -288,5 +288,16 @@ class CLIAutoMergeTests(unittest.TestCase):
         self.assertTrue(args.dry_run)
 
 
+class PromotionServiceConvergenceTests(unittest.TestCase):
+    def test_evaluate_run_returns_merge_decision(self):
+        store, run_id, _ = _make_store_with_run(
+            report=_healthy_report(["src/a.py"]),
+        )
+        decision = evaluate_run(store, run_id)
+        self.assertTrue(decision.auto_merge)
+        self.assertEqual([], decision.concerns)
+        self.assertEqual(run_id, decision.run_id)
+
+
 if __name__ == "__main__":
     unittest.main()
