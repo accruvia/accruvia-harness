@@ -937,18 +937,39 @@ class RunService:
             "commit_sha": result.commit_sha,
         })
 
-        # Post-merge health check. If main is broken, revert.
+        # Post-merge health check — scoped to changed files, not full suite.
+        # Running the full suite would fail on pre-existing issues and revert
+        # good merges. Instead, run only the tests affected by this merge.
         try:
-            from ..skills.post_merge_check import PostMergeCheckSkill
+            from ..skills.validate import ValidateSkill, commands_for_profile
+            from ..services.work_orchestrator import _resolve_validate_commands, _is_test_path
 
-            pmc = PostMergeCheckSkill()
             pmc_run_dir = self.workspace_root / "runs" / run.id / "post_merge_check"
+            pmc_run_dir.mkdir(parents=True, exist_ok=True)
             profile = task.validation_profile or "python"
-            pmc_result = pmc.invoke_deterministic(
+            changed = decision.changed_files or []
+            pmc_commands = _resolve_validate_commands(
+                profile=profile,
+                validation_mode=task.validation_mode,
+                changed_files=changed,
                 workspace=Path("."),
-                validation_profile=profile,
+            )
+            vs = ValidateSkill()
+            pmc_result_raw = vs.invoke_deterministic(
+                workspace_root=Path("."),
+                commands=pmc_commands,
                 run_dir=pmc_run_dir,
             )
+            # Wrap in the shape post-merge-check expects
+            class _PMCResult:
+                output = {
+                    "main_healthy": str(pmc_result_raw.output.get("overall") or "pass") != "fail",
+                    "failed_stage": next(
+                        (str(e.get("name")) for e in pmc_result_raw.output.get("results") or [] if str(e.get("status")) == "fail"),
+                        "",
+                    ),
+                }
+            pmc_result = _PMCResult()
             if not pmc_result.output.get("main_healthy", True):
                 # Revert the merge commit.
                 import subprocess
