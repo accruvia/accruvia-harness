@@ -622,10 +622,29 @@ class SkillsWorkOrchestrator:
                     "changed_files": written,
                 },
             )
-        # STAGE 6: /commit â€” persist changes in git
-        deleted_files = implement_result.output.get("deleted_files") or []
-        commit_paths = list(written) + [p for p in deleted_files if p not in written]
+        # STAGE 6.5: Auto-append CHANGELOG entry before committing
         rationale = implement_result.output.get("rationale") or ""
+        _append_changelog_entry(
+            workspace=workspace,
+            task_title=task.title,
+            rationale=rationale,
+            changed_files=written,
+            quality_summary=str(
+                next((c.get("summary", "") for c in quality_concerns), "")
+            ) if quality_concerns else "",
+        )
+        # Include CHANGELOG.md in the commit if it was updated
+        changelog_path = "CHANGELOG.md"
+        if (workspace / changelog_path).exists():
+            written_with_changelog = list(written) + (
+                [changelog_path] if changelog_path not in written else []
+            )
+        else:
+            written_with_changelog = list(written)
+
+        # STAGE 7: /commit — persist changes in git
+        deleted_files = implement_result.output.get("deleted_files") or []
+        commit_paths = written_with_changelog + [p for p in deleted_files if p not in written_with_changelog]
         commit_message = (
             f"Task: {task.title}\n\n"
             f"{rationale[:500]}\n\n"
@@ -834,6 +853,51 @@ def _load_reference_contents(
         total += len(text)
         result[rel] = text
     return result
+
+
+def _append_changelog_entry(
+    *,
+    workspace: Path,
+    task_title: str,
+    rationale: str,
+    changed_files: list[str],
+    quality_summary: str = "",
+) -> None:
+    """Append a human-readable entry to CHANGELOG.md in the workspace.
+
+    Creates the file if it doesn't exist. Each entry has: date, title,
+    what changed (plain language), files affected.
+    """
+    from datetime import date
+
+    changelog = workspace / "CHANGELOG.md"
+    try:
+        existing = changelog.read_text(encoding="utf-8") if changelog.exists() else ""
+    except OSError:
+        existing = ""
+    if not existing.strip():
+        existing = "# Changelog\n\nAll notable changes to this project.\n\n"
+    entry_lines = [
+        f"## {date.today().isoformat()} — {task_title}",
+        "",
+        rationale.strip() if rationale.strip() else "No description provided.",
+        "",
+        f"**Files changed:** {', '.join(changed_files) if changed_files else 'none'}",
+    ]
+    if quality_summary:
+        entry_lines.append(f"**Quality notes:** {quality_summary}")
+    entry_lines.append("")
+    entry = "\n".join(entry_lines)
+    # Insert after header (first blank line after the title)
+    header_end = existing.find("\n\n")
+    if header_end > 0:
+        updated = existing[: header_end + 2] + entry + "\n" + existing[header_end + 2:]
+    else:
+        updated = existing + "\n" + entry
+    try:
+        changelog.write_text(updated, encoding="utf-8")
+    except OSError:
+        pass  # Non-fatal: changelog is a convenience, not a gate
 
 
 def _verbose_test_commands(commands: list[dict[str, Any]]) -> list[dict[str, Any]]:
