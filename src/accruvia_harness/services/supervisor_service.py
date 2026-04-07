@@ -286,6 +286,10 @@ class SupervisorService:
             if due_heartbeats:
                 for heartbeat_project_id in due_heartbeats:
                     backlog_before = self._metrics_snapshot(heartbeat_project_id)
+                    emit({
+                        "type": "heartbeat_running",
+                        "project_id": heartbeat_project_id,
+                    })
                     try:
                         heartbeat = self.cognition.heartbeat(heartbeat_project_id)
                     except Exception as exc:

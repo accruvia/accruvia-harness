@@ -330,6 +330,9 @@ def _emit_supervise_progress(event: dict[str, object]) -> None:
             flush=True,
         )
         return
+    if event_type == "heartbeat_running":
+        print(_timestamped(f"Running heartbeat for {event.get('project_id', '')} (analyzing project, ~2 min)..."), flush=True)
+        return
     if event_type == "worker_phase":
         skill = str(event.get("worker_phase") or "")
         status = str(event.get("status") or "")
