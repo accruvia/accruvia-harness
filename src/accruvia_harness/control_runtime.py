@@ -159,12 +159,22 @@ class ControlRuntimeObserver:
             replace(lane, state=state, reason=reason, cooldown_until=None, updated_at=datetime.now(UTC))
         )
 
+    # Classifications that are INFRASTRUCTURE failures — pause the lane because
+    # ALL tasks would fail for the same reason.
+    _INFRA_FAILURES = frozenset({
+        "provider_rate_limit", "provider_outage", "credit_exhaustion",
+        "hung_process",
+    })
+    # Classifications that are TASK-LEVEL failures — the task failed but the
+    # infrastructure is fine. Other tasks should keep running.
+    _TASK_FAILURES = frozenset({
+        "code_defect", "test_infrastructure_failure", "scope_too_broad",
+        "artifact_contract_failure", "system_failure", "unknown",
+    })
+
     def _apply_classification_policy(self, classification: str, cooldown_seconds: int) -> None:
         if classification in {"provider_rate_limit", "provider_outage"} and cooldown_seconds > 0:
             self.control_plane.enter_cooldown("worker", reason=classification, seconds=cooldown_seconds)
-            return
-        if classification == "artifact_contract_failure":
-            self._set_worker_lane(ControlLaneStateValue.RUNNING, classification)
             return
         if classification == "credit_exhaustion":
             self.control_plane.pause_lane("worker", reason=classification)
@@ -173,8 +183,18 @@ class ControlRuntimeObserver:
                 payload={"reason": "Credit exhaustion requires operator action before more work can run."},
             )
             return
-        self._set_worker_lane(ControlLaneStateValue.PAUSED, classification)
-        self.control_plane.mark_degraded(classification)
+        if classification in self._TASK_FAILURES:
+            # Task failed but infrastructure is healthy. Keep the lane running
+            # so other tasks can proceed.
+            self._set_worker_lane(ControlLaneStateValue.RUNNING, classification)
+            return
+        # Unknown infrastructure issue — pause conservatively.
+        if classification in self._INFRA_FAILURES:
+            self._set_worker_lane(ControlLaneStateValue.PAUSED, classification)
+            self.control_plane.mark_degraded(classification)
+            return
+        # Truly unknown — keep running but record it.
+        self._set_worker_lane(ControlLaneStateValue.RUNNING, classification)
 
     def _recent_classification_count(self, classification: str) -> int:
         count = 0
