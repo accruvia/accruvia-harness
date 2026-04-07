@@ -1309,7 +1309,10 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
             stop_requested["signal_count"] += 1
             stop_requested["value"] = True
             if not args.json:
-                print(f"\n{_timestamped('Shutting down...')}", flush=True)
+                try:
+                    print(f"\n{_timestamped('Shutting down...')}", flush=True)
+                except RuntimeError:
+                    pass  # reentrant print from signal handler — safe to skip
             stop_ui_process(config)
             stop_request_path.write_text("graceful-stop-requested\n", encoding="utf-8")
             if stop_requested["signal_count"] >= 2:
