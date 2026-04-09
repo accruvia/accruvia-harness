@@ -42,20 +42,40 @@ def _git_stdout(workspace: Path, *args: str) -> str:
 
 
 def changed_files(workspace: Path) -> list[str]:
-    changed = [line.strip() for line in _git_stdout(workspace, "diff", "--name-only").splitlines() if line.strip()]
+    uncommitted = [line.strip() for line in _git_stdout(workspace, "diff", "--name-only").splitlines() if line.strip()]
+    staged = [line.strip() for line in _git_stdout(workspace, "diff", "--cached", "--name-only").splitlines() if line.strip()]
+    merge_base = _git_stdout(workspace, "merge-base", "HEAD", "main").strip()
+    committed: list[str] = []
+    if merge_base:
+        committed = [
+            line.strip()
+            for line in _git_stdout(workspace, "diff", "--name-only", merge_base, "HEAD").splitlines()
+            if line.strip()
+        ]
     untracked = [
         line.strip()
         for line in _git_stdout(workspace, "ls-files", "--others", "--exclude-standard").splitlines()
         if line.strip()
     ]
-    return sorted(dict.fromkeys(changed + untracked))
+    return sorted(dict.fromkeys(uncommitted + staged + committed + untracked))
+
+
+def _diff_range_args(workspace: Path) -> list[str]:
+    """Return ``['<merge_base>..HEAD']`` when there are committed branch changes, else ``[]``."""
+    merge_base = _git_stdout(workspace, "merge-base", "HEAD", "main").strip()
+    if merge_base:
+        committed = _git_stdout(workspace, "diff", "--name-only", merge_base, "HEAD").strip()
+        if committed:
+            return [f"{merge_base}..HEAD"]
+    return []
 
 
 def _diff_size_features(workspace: Path) -> dict[str, int]:
     lines_added = 0
     lines_deleted = 0
     changed_hunk_count = 0
-    for line in _git_stdout(workspace, "diff", "--numstat").splitlines():
+    range_args = _diff_range_args(workspace)
+    for line in _git_stdout(workspace, "diff", "--numstat", *range_args).splitlines():
         parts = line.split("\t")
         if len(parts) >= 3:
             added, deleted = parts[0], parts[1]
@@ -63,9 +83,22 @@ def _diff_size_features(workspace: Path) -> dict[str, int]:
                 lines_added += int(added)
             if deleted.isdigit():
                 lines_deleted += int(deleted)
-    for line in _git_stdout(workspace, "diff", "--unified=0").splitlines():
+    for line in _git_stdout(workspace, "diff", "--unified=0", *range_args).splitlines():
         if line.startswith("@@"):
             changed_hunk_count += 1
+    # Also include plain (unstaged) diff when range-based was used
+    if range_args:
+        for line in _git_stdout(workspace, "diff", "--numstat").splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 3:
+                added, deleted = parts[0], parts[1]
+                if added.isdigit():
+                    lines_added += int(added)
+                if deleted.isdigit():
+                    lines_deleted += int(deleted)
+        for line in _git_stdout(workspace, "diff", "--unified=0").splitlines():
+            if line.startswith("@@"):
+                changed_hunk_count += 1
     return {
         "lines_added": lines_added,
         "lines_deleted": lines_deleted,

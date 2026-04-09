@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -18,6 +19,30 @@ from .subprocess_env import build_subprocess_env
 
 STRUCTURAL_FIX_MAX_RUN_SECONDS = 15 * 60
 STRUCTURAL_FIX_STALE_PROGRESS_SECONDS = 10 * 60
+_KILL_COMMUNICATE_TIMEOUT = 10
+
+
+def _kill_process_tree(process: subprocess.Popen) -> tuple[str, str]:
+    """Kill the entire process group and reap output."""
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        process.kill()
+    try:
+        stdout, stderr = process.communicate(timeout=_KILL_COMMUNICATE_TIMEOUT)
+    except Exception:
+        for pipe in (process.stdout, process.stderr):
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except Exception:
+                    pass
+        try:
+            process.wait(timeout=5)
+        except Exception:
+            pass
+        stdout, stderr = "", ""
+    return (_coerce_subprocess_output(stdout), _coerce_subprocess_output(stderr))
 
 
 class WorkerBackend(Protocol):
@@ -307,6 +332,7 @@ class CommandWorker:
             f"Timed out in task_run_timeout after {effective_timeout_seconds}s while executing the {self.backend_name} worker command."
         )
         try:
+            _preexec = self.resource_policy.preexec_fn() if self.resource_policy is not None else None
             process = subprocess.Popen(
                 self.command,
                 shell=True,
@@ -316,7 +342,8 @@ class CommandWorker:
                 text=True,
                 env=build_subprocess_env(env, passthrough=self.env_passthrough),
                 bufsize=1,
-                preexec_fn=self.resource_policy.preexec_fn() if self.resource_policy is not None else None,
+                preexec_fn=_preexec,
+                start_new_session=(_preexec is None),
             )
             started_at = self._monotonic()
             last_status_at = started_at
@@ -340,8 +367,7 @@ class CommandWorker:
                 if returncode is not None:
                     break
                 if self._stop_requested():
-                    process.kill()
-                    stdout_text, stderr_text = process.communicate(timeout=5)
+                    stdout_text, stderr_text = _kill_process_tree(process)
                     raise subprocess.TimeoutExpired(
                         self.command,
                         timeout=0,
@@ -349,8 +375,7 @@ class CommandWorker:
                         stderr=stderr_text,
                     )
                 if effective_timeout_seconds is not None and now - started_at >= effective_timeout_seconds:
-                    process.kill()
-                    stdout_text, stderr_text = process.communicate()
+                    stdout_text, stderr_text = _kill_process_tree(process)
                     raise subprocess.TimeoutExpired(
                         self.command,
                         timeout=effective_timeout_seconds,
@@ -390,8 +415,7 @@ class CommandWorker:
                         }
                     )
                     if stale:
-                        process.kill()
-                        stdout_text, stderr_text = process.communicate()
+                        stdout_text, stderr_text = _kill_process_tree(process)
                         timeout_category = "stale_progress_timeout"
                         timeout_reason = (
                             f"Timed out in stale_progress_timeout after {effective_stale_after_seconds:.0f}s without a new durable artifact."

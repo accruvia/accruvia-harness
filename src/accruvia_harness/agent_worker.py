@@ -502,6 +502,16 @@ def select_worker_llm_command(environ: Mapping[str, str]) -> tuple[str, str]:
     return chain[0] if chain else ("codex", "codex exec")
 
 
+def _ensure_claude_noninteractive_flags(command: str) -> str:
+    """Append ``-p`` and ``--dangerously-skip-permissions`` when missing."""
+    tokens = command.split()
+    if "-p" not in tokens and "--print" not in tokens:
+        tokens.append("-p")
+    if "--dangerously-skip-permissions" not in tokens:
+        tokens.append("--dangerously-skip-permissions")
+    return " ".join(tokens)
+
+
 def select_worker_llm_chain(environ: Mapping[str, str]) -> list[tuple[str, str]]:
     """Return an ordered list of (backend, command) to try for worker execution."""
     preferred = str(environ.get("ACCRUVIA_WORKER_LLM_BACKEND", "")).strip().lower()
@@ -517,7 +527,11 @@ def select_worker_llm_chain(environ: Mapping[str, str]) -> list[tuple[str, str]]
     for backend in ("codex", "claude", "command", "accruvia_client"):
         if commands[backend] and not any(b == backend for b, _ in chain):
             chain.append((backend, commands[backend]))
-    return chain or [("codex", "codex exec")]
+    chain = chain or [("codex", "codex exec")]
+    return [
+        (backend, _ensure_claude_noninteractive_flags(cmd)) if backend == "claude" else (backend, cmd)
+        for backend, cmd in chain
+    ]
 
 
 def _is_backend_unavailable(returncode: int, stdout: str, stderr: str) -> bool:

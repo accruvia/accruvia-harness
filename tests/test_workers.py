@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -13,8 +14,8 @@ from unittest.mock import patch
 from routellect.protocols import ModelCapability
 from routellect.routing_events import ModelUniverseSnapshot
 
-from accruvia_harness.atomicity import atomicity_gate
-from accruvia_harness.agent_worker import _focused_test_command, run_agent_worker, run_validation, select_worker_llm_command
+from accruvia_harness.atomicity import atomicity_gate, changed_files
+from accruvia_harness.agent_worker import _ensure_claude_noninteractive_flags, _focused_test_command, run_agent_worker, run_validation, select_worker_llm_chain, select_worker_llm_command
 from accruvia_harness.adapters import build_adapter_registry
 from accruvia_harness.config import HarnessConfig
 from accruvia_harness.domain import Run, RunStatus, Task, new_id
@@ -33,6 +34,7 @@ from accruvia_harness.workers import (
     STRUCTURAL_FIX_MAX_RUN_SECONDS,
     STRUCTURAL_FIX_STALE_PROGRESS_SECONDS,
     _default_agent_worker_command,
+    _kill_process_tree,
     build_worker,
     build_worker_from_config,
 )
@@ -174,8 +176,11 @@ class WorkerTests(unittest.TestCase):
             def kill(self):
                 return None
 
-            def communicate(self):
+            def communicate(self, **kwargs):
                 return (b"partial stdout", b"partial stderr")
+
+            def wait(self, **kwargs):
+                return self.returncode
 
         worker = ShellCommandWorker(
             "sleep 2",
@@ -184,7 +189,9 @@ class WorkerTests(unittest.TestCase):
             sleep_fn=lambda _seconds: None,
         )
 
-        with patch("accruvia_harness.workers.subprocess.Popen", return_value=_FakeProcess()):
+        with patch("accruvia_harness.workers.subprocess.Popen", return_value=_FakeProcess()), \
+             patch("accruvia_harness.workers.os.killpg"), \
+             patch("accruvia_harness.workers.os.getpgid", return_value=12345):
             result = worker.work(self.task, self.run, self.base)
 
         stderr_path = self.base / "runs" / self.run.id / "worker.stderr.txt"
@@ -212,8 +219,11 @@ class WorkerTests(unittest.TestCase):
             def kill(self):
                 return None
 
-            def communicate(self):
+            def communicate(self, **kwargs):
                 return ("partial stdout", "partial stderr")
+
+            def wait(self, **kwargs):
+                return self.returncode
 
         worker = ShellCommandWorker(
             "sleep 2000",
@@ -222,7 +232,9 @@ class WorkerTests(unittest.TestCase):
             sleep_fn=lambda _seconds: None,
         )
 
-        with patch("accruvia_harness.workers.subprocess.Popen", return_value=_FakeProcess()):
+        with patch("accruvia_harness.workers.subprocess.Popen", return_value=_FakeProcess()), \
+             patch("accruvia_harness.workers.os.killpg"), \
+             patch("accruvia_harness.workers.os.getpgid", return_value=12345):
             result = worker.work(self.task, self.run, self.base)
 
         self.assertEqual("blocked", result.outcome)
@@ -242,8 +254,11 @@ class WorkerTests(unittest.TestCase):
             def kill(self):
                 return None
 
-            def communicate(self):
+            def communicate(self, **kwargs):
                 return ("partial stdout", "partial stderr")
+
+            def wait(self, **kwargs):
+                return self.returncode
 
         worker = ShellCommandWorker(
             "sleep 2000",
@@ -259,7 +274,9 @@ class WorkerTests(unittest.TestCase):
             float(STRUCTURAL_FIX_STALE_PROGRESS_SECONDS) + 1.0,
         )
 
-        with patch("accruvia_harness.workers.subprocess.Popen", return_value=_FakeProcess()):
+        with patch("accruvia_harness.workers.subprocess.Popen", return_value=_FakeProcess()), \
+             patch("accruvia_harness.workers.os.killpg"), \
+             patch("accruvia_harness.workers.os.getpgid", return_value=12345):
             result = worker.work(self.task, self.run, self.base)
 
         self.assertEqual("blocked", result.outcome)
@@ -507,7 +524,8 @@ class WorkerTests(unittest.TestCase):
         )
 
         self.assertEqual("claude", backend)
-        self.assertEqual("claude", command)
+        self.assertIn("-p", command.split())
+        self.assertIn("--dangerously-skip-permissions", command.split())
 
     def test_run_agent_worker_uses_shared_stdin_command_path(self) -> None:
         workspace = self.base / "workspace"
@@ -1459,3 +1477,79 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual("/usr/bin", env["PATH"])
         self.assertEqual("ok", env["KEEP_ME"])
         self.assertEqual("task_1", env["ACCRUVIA_TASK_ID"])
+
+    # --- Fix 1: Claude CLI non-interactive flags ---
+
+    def test_ensure_claude_noninteractive_flags_adds_missing(self) -> None:
+        result = _ensure_claude_noninteractive_flags("claude")
+        tokens = result.split()
+        self.assertIn("-p", tokens)
+        self.assertIn("--dangerously-skip-permissions", tokens)
+
+    def test_ensure_claude_noninteractive_flags_preserves_existing(self) -> None:
+        result = _ensure_claude_noninteractive_flags("claude -p --dangerously-skip-permissions")
+        tokens = result.split()
+        self.assertEqual(1, tokens.count("-p"))
+        self.assertEqual(1, tokens.count("--dangerously-skip-permissions"))
+
+    def test_ensure_claude_noninteractive_flags_recognizes_print_alias(self) -> None:
+        result = _ensure_claude_noninteractive_flags("claude --print")
+        tokens = result.split()
+        self.assertIn("--print", tokens)
+        self.assertNotIn("-p", tokens)
+        self.assertIn("--dangerously-skip-permissions", tokens)
+
+    def test_select_worker_llm_chain_adds_flags_to_claude_backend(self) -> None:
+        chain = select_worker_llm_chain(
+            {
+                "ACCRUVIA_LLM_CODEX_COMMAND": "codex exec",
+                "ACCRUVIA_LLM_CLAUDE_COMMAND": "claude",
+            }
+        )
+        claude_entries = [(b, c) for b, c in chain if b == "claude"]
+        codex_entries = [(b, c) for b, c in chain if b == "codex"]
+        self.assertTrue(claude_entries)
+        self.assertIn("-p", claude_entries[0][1].split())
+        self.assertIn("--dangerously-skip-permissions", claude_entries[0][1].split())
+        self.assertTrue(codex_entries)
+        self.assertNotIn("-p", codex_entries[0][1].split())
+
+    # --- Fix 2: Kill process tree on timeout ---
+
+    def test_kill_process_tree_terminates_shell_children(self) -> None:
+        process = subprocess.Popen(
+            "sleep 3600",
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        pgid = os.getpgid(process.pid)
+        _kill_process_tree(process)
+        # The process group should be dead
+        import time
+        time.sleep(0.1)
+        with self.assertRaises(ProcessLookupError):
+            os.killpg(pgid, 0)
+
+    # --- Fix 3: Detect committed changes in changed_files() ---
+
+    def test_changed_files_detects_committed_changes(self) -> None:
+        workspace = self.base / "workspace-committed"
+        workspace.mkdir(parents=True)
+        subprocess.run(["git", "init", "-b", "main"], cwd=workspace, check=True, capture_output=True, text=True)
+        (workspace / "initial.txt").write_text("init\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
+            cwd=workspace, check=True, capture_output=True, text=True,
+        )
+        subprocess.run(["git", "checkout", "-b", "feature"], cwd=workspace, check=True, capture_output=True, text=True)
+        (workspace / "committed_file.txt").write_text("new\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "add file"],
+            cwd=workspace, check=True, capture_output=True, text=True,
+        )
+        files = changed_files(workspace)
+        self.assertIn("committed_file.txt", files)
