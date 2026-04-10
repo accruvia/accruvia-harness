@@ -472,6 +472,12 @@ class RunService:
                 # Update work result with validation outcome
                 if validation_result is not None:
                     work = validation_result
+            else:
+                # No external validation service: invoke the agent worker's
+                # in-tree run_validation() helper to populate compile_check and
+                # test_check.  Without this, every agent-backend candidate fails
+                # the _enforce_validation_evidence gate below.
+                work = self._run_inline_agent_validation(task, run, work, project_workspace_root)
             work = self._enforce_validation_evidence(task, run, work)
 
         self.store.create_event(
@@ -712,6 +718,77 @@ class RunService:
                 validation_profile=task.validation_profile,
             )
         return run
+
+    def _run_inline_agent_validation(self, task, run, work, project_workspace_root: Path):
+        """Run agent_worker.run_validation() in-process when no external
+        validation_service is wired in.
+
+        The agent worker writes a candidate report.json containing changed_files
+        and test_files but defers compile/test execution to a downstream step.
+        run_validation() reads that report, runs py_compile + the focused test
+        suite, then writes compile_check and test_check back into the same file.
+
+        We then re-load the report and merge those fields into work.diagnostics
+        so _enforce_validation_evidence() finds them.
+        """
+        import os
+        from ..agent_worker import run_validation as _agent_run_validation
+
+        run_dir = self.workspace_root / "runs" / run.id
+        report_path = run_dir / "report.json"
+        if not report_path.exists():
+            return work
+
+        env = dict(os.environ)
+        env.update(
+            {
+                "ACCRUVIA_RUN_DIR": str(run_dir),
+                "ACCRUVIA_PROJECT_WORKSPACE": str(project_workspace_root),
+                "ACCRUVIA_TASK_ID": task.id,
+                "ACCRUVIA_RUN_ID": run.id,
+                "ACCRUVIA_TASK_OBJECTIVE": task.objective or "",
+                "ACCRUVIA_TASK_VALIDATION_PROFILE": task.validation_profile or "generic",
+                "ACCRUVIA_TASK_VALIDATION_MODE": task.validation_mode or "default_focused",
+            }
+        )
+        try:
+            _agent_run_validation(env)
+        except Exception:  # noqa: BLE001 — record the failure as missing evidence
+            return work
+
+        try:
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return work
+
+        compile_check = payload.get("compile_check")
+        test_check = payload.get("test_check")
+        if not isinstance(compile_check, dict) or not isinstance(test_check, dict):
+            return work
+
+        diagnostics = dict(work.diagnostics or {})
+        diagnostics["compile_check"] = compile_check
+        diagnostics["test_check"] = test_check
+        # Promote candidate to success if validation passed.
+        if compile_check.get("passed") and test_check.get("passed"):
+            diagnostics["worker_outcome"] = "success"
+            outcome = "success"
+        else:
+            diagnostics["worker_outcome"] = "failed"
+            outcome = "failed"
+            failure_category = payload.get("failure_category")
+            if failure_category:
+                diagnostics["failure_category"] = failure_category
+            failure_message = payload.get("failure_message")
+            if failure_message:
+                diagnostics["failure_message"] = failure_message
+
+        return type(work)(
+            summary=work.summary,
+            artifacts=list(work.artifacts),
+            outcome=outcome,
+            diagnostics=diagnostics,
+        )
 
     def _enforce_validation_evidence(self, task, run, work):
         diagnostics = dict(work.diagnostics or {})
