@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-04-11 — Add validation_queue table migration to store.py
+
+Added migration version 17 creating the validation_queue table with the specified columns (id, run_id, task_id, snapshot_id, priority, created_at, status with default 'pending', started_at, completed_at). Added a test that initializes the store and asserts the table exists via sqlite_master.
+
+**Files changed:** src/accruvia_harness/migrations.py, tests/test_store.py
+
 ## 2026-04-11 — BREAKING: remove agent worker backend, skills only
 
 Pre-alpha hard cutover. Skills is now the only supported worker backend. The

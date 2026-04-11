@@ -430,6 +430,23 @@ MIGRATIONS: list[Migration] = [
         ON control_recovery_actions(target_type, target_id, created_at);
         """,
     ),
+    Migration(
+        version=17,
+        name="validation_queue",
+        sql="""
+        CREATE TABLE IF NOT EXISTS validation_queue (
+            id TEXT PRIMARY KEY,
+            run_id TEXT,
+            task_id TEXT,
+            snapshot_id TEXT,
+            priority INTEGER,
+            created_at TEXT,
+            status TEXT DEFAULT 'pending',
+            started_at TEXT,
+            completed_at TEXT
+        );
+        """,
+    ),
 ]
 
 
