@@ -857,6 +857,89 @@ class HarnessEngineTests(unittest.TestCase):
             f"test_check should pass: {test_check}",
         )
 
+    def test_agent_candidate_writes_ship_ready_when_validation_passes(self) -> None:
+        """The merge gate (merge_gate.evaluate_run) requires `ship_ready: True`
+        in the report.json artifact. The skills /self-review skill writes this,
+        but the agent worker historically does not. Without it, every agent
+        candidate is auto-merge-blocked even when validation passes.
+        """
+        engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-agent-ship-ready",
+            worker=AgentCandidateWithoutValidationWorker(),
+        )
+        task = engine.create_task_with_policy(
+            project_id=self.project_id,
+            title="Agent candidate ship_ready",
+            objective="Validation must mark the candidate ship_ready when compile + tests pass",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+
+        engine.run_once(task.id)
+
+        run_dirs = list((engine.workspace_root / "runs").iterdir())
+        self.assertEqual(1, len(run_dirs))
+        report_path = run_dirs[0] / "report.json"
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+
+        self.assertTrue(
+            payload.get("ship_ready"),
+            f"ship_ready must be True after passing validation; got: {payload.get('ship_ready')}",
+        )
+        self.assertEqual(
+            "pass",
+            payload.get("overall_validation"),
+            f"overall_validation must be 'pass' after passing validation; got: {payload.get('overall_validation')}",
+        )
+
+    def test_agent_promote_decision_invokes_auto_merge_gate(self) -> None:
+        """When a run from worker_backend=agent gets decision=PROMOTE, the
+        auto-merge gate (_try_auto_merge_and_verify) MUST be called. Historically
+        the gate was hard-coded to skip non-skills backends, leaving 100% of
+        agent runs un-merged.
+        """
+        from unittest.mock import patch
+
+        engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-agent-auto-merge",
+            worker=AgentCandidateWithoutValidationWorker(),
+        )
+        task = engine.create_task_with_policy(
+            project_id=self.project_id,
+            title="Agent promote auto-merge",
+            objective="Auto-merge gate must be called for agent backend on PROMOTE",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+
+        with patch.object(
+            engine.runs,
+            "_try_auto_merge_and_verify",
+            wraps=engine.runs._try_auto_merge_and_verify,
+        ) as auto_merge_mock:
+            engine.run_once(task.id)
+
+        self.assertGreaterEqual(
+            auto_merge_mock.call_count,
+            1,
+            "Auto-merge gate must be called for agent backend on PROMOTE; "
+            "the worker_backend == 'skills' guard was skipping it.",
+        )
+
     def test_run_once_blocks_objective_linked_task_when_execution_gate_is_not_ready(self) -> None:
         objective = Objective(
             id=new_id("objective"),
@@ -1393,8 +1476,17 @@ class HarnessEngineTests(unittest.TestCase):
         )
         self.assertEqual("gitlab_issue", task_events[0].payload["external_ref_type"])
         self.assertEqual("458", task_events[0].payload["external_ref_id"])
+        # The auto-merge gate fires on PROMOTE decisions for any backend.
+        # The default LocalArtifactWorker doesn't write `ship_ready` to its
+        # report, so the gate blocks and emits `auto_merge_blocked`.
         self.assertEqual(
-            ["run_created", "project_workspace_prepared", "planned", "worker_completed"],
+            [
+                "run_created",
+                "project_workspace_prepared",
+                "planned",
+                "worker_completed",
+                "auto_merge_blocked",
+            ],
             [event.event_type for event in run_events],
         )
 

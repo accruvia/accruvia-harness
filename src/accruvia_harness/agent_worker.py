@@ -1128,8 +1128,14 @@ def run_validation(environ: Mapping[str, str] | None = None) -> int:
     elif worker_outcome == "candidate":
         worker_outcome = "success"
 
+    # ship_ready is the merge gate's signal that validation passed end-to-end.
+    # The skills /self-review skill writes this for the skills backend; the
+    # agent backend must also set it so merge_gate.evaluate_run accepts the run.
+    validation_passed = compile_rc == 0 and test_completed.returncode == 0
     payload.update({
         "worker_outcome": worker_outcome,
+        "ship_ready": validation_passed,
+        "overall_validation": "pass" if validation_passed else "fail",
         "compile_check": {
             "passed": compile_rc == 0,
             "targets": [path for path in all_changed if path.endswith(".py")],

@@ -646,8 +646,12 @@ class RunService:
                     payload={"status": task_status.value, "run_id": run.id},
                 )
             )
-        # Auto-merge promoted skills-pipeline runs and verify post-merge health.
-        if decision_result.action == DecisionAction.PROMOTE and work.diagnostics and work.diagnostics.get("worker_backend") == "skills":
+        # Auto-merge any promoted run and verify post-merge health.
+        # Historically this was gated to worker_backend == "skills" only, which
+        # left every agent-backend run un-merged even when validation passed.
+        # The merge gate (merge_gate.evaluate_run) is the actual safety net —
+        # it inspects the report.json artifact and rejects unsafe merges.
+        if decision_result.action == DecisionAction.PROMOTE:
             self._try_auto_merge_and_verify(task, run, work, progress)
 
         # Emit structured failure diagnostic on any non-success outcome.
