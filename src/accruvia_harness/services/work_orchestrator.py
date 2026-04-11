@@ -318,6 +318,14 @@ class SkillsWorkOrchestrator:
                 "Structured scope decision",
             )
         )
+        if scope_result.success:
+            artifacts.append(
+                _write_artifact(
+                    run_dir, "plan",
+                    scope_result.output,
+                    "Scope-derived plan (approach, files_to_touch, risks)",
+                )
+            )
         if not scope_result.success:
             return WorkResult(
                 summary="Scope skill failed to produce valid output.",

@@ -1067,6 +1067,16 @@ class WorkOrchestratorDiagnosticsTests(unittest.TestCase):
         self.assertEqual("failed", result.outcome)
         self.assertNotIn("retry_hints", result.diagnostics)
 
+    def test_plan_artifact_emitted_after_scope(self) -> None:
+        """Regression: tasks with required_artifacts=['plan','report'] expect a
+        'plan' kind artifact. The skills pipeline must emit one after /scope,
+        otherwise DefaultAnalyzer flags the run as incomplete."""
+        result, _ = self._run_to_validation_failure({}, diagnose_success=False)
+        artifact_kinds = {kind for (kind, _path, _summary) in result.artifacts}
+        self.assertIn("plan", artifact_kinds)
+        self.assertIn("scope_output", artifact_kinds)
+        self.assertIn("report", artifact_kinds)
+
 
 class TestHealthSkillTests(unittest.TestCase):
     """Tests for the /test-health deterministic skill."""
