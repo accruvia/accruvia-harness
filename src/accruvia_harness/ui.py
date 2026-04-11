@@ -43,6 +43,7 @@ from .services.red_team_service import RedTeamLoopService
 from .services.task_service import TaskService
 from .services.workflow_timing_service import WorkflowTimingService
 from .services.workflow_service import WorkflowService
+from .context_recorder import ContextRecorder
 
 # ui_responder and ui_memory deleted — mediation replaced by MCP server.
 # Stubs for types still referenced in method signatures below.
@@ -377,6 +378,7 @@ class HarnessUIDataService:
         self.task_service = TaskService(self.store)
         self.workflow_service = WorkflowService(self.store)
         self.workflow_timing = WorkflowTimingService()
+        self.context_recorder = ContextRecorder(self.store)
         self.memory_provider = None  # Mediation layer removed; MCP server replaces it
         self.auto_resume_atomic_generation = not bool(getattr(ctx, "is_test", False))
         self.auto_resume_objective_review = not bool(getattr(ctx, "is_test", False))
@@ -4260,18 +4262,13 @@ class HarnessUIDataService:
                 raise ValueError(f"Task {task_id} does not belong to objective {objective_id}")
             if objective_id is None:
                 objective_id = selected_task.objective_id
-        record = ContextRecord(
-            id=new_id("context"),
-            record_type="operator_comment",
+        record = self.context_recorder.record_operator_comment(
             project_id=project.id,
             objective_id=objective_id,
             task_id=task_id,
-            visibility="model_visible",
-            author_type="operator",
-            author_id=(author or "").strip(),
+            author=author,
             content=body,
         )
-        self.store.create_context_record(record)
         if task_id:
             return self._enqueue_task_question(
                 project_id=project.id,

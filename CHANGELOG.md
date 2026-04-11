@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-04-11 — Route UIDataService.add_operator_comment through ContextRecorder.record_operator_comment
+
+Created ContextRecorder in a new module to encapsulate the operator-comment ContextRecord creation and store persistence. Refactored add_operator_comment to delegate the initial mutation to ContextRecorder.record_operator_comment while preserving all downstream behavior (frustration detection, task-question enqueueing, mermaid proposals, reply creation). Added a dedicated test file verifying the recorder path, responder integration, and frustration detection.
+
+**Files changed:** src/accruvia_harness/ui.py, src/accruvia_harness/context_recorder.py, tests/test_ui_add_operator_comment_recorder.py
+
 ## 2026-04-11 — Add validation_queue table migration to store.py
 
 Added migration version 17 creating the validation_queue table with the specified columns (id, run_id, task_id, snapshot_id, priority, created_at, status with default 'pending', started_at, completed_at). Added a test that initializes the store and asserts the table exists via sqlite_master.
