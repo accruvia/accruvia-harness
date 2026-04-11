@@ -103,7 +103,7 @@ Minimum fields for the first schema version:
     ],
     "forbidden_paths": [
       "src/accruvia_harness/services/",
-      "src/accruvia_harness/agent_worker.py"
+      "src/accruvia_harness/skills_worker.py"
     ],
     "max_files": 1,
     "max_symbols": 1

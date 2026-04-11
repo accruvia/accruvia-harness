@@ -9,7 +9,6 @@ from hashlib import sha1
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
-from .agent_worker import run_agent_worker, run_validation
 from .control_plane import ControlPlane
 from .domain import (
     ContextRecord,
@@ -1452,6 +1451,10 @@ class SAWatchService:
         }
 
     def _run_direct_repair(self, repair_task: Task, repair_run: Run, repo_root: Path) -> SAWatchRepairResult:
+        """Direct-repair path was backed by the agent worker, which was removed
+        in the pre-alpha skills-only cutover. SA-watch repairs now block and
+        surface a failure so the operator can rework them through the normal
+        skills pipeline."""
         run_dir = self.workspace_root / "control" / "sa_watch_repairs" / repair_run.id
         run_dir.mkdir(parents=True, exist_ok=True)
         if self.structural_progress_callback is not None:
@@ -1463,52 +1466,28 @@ class SAWatchService:
                     "attempt": repair_run.attempt,
                 }
             )
-        env = {
-            "ACCRUVIA_RUN_DIR": str(run_dir),
-            "ACCRUVIA_PROJECT_WORKSPACE": str(repo_root),
-            "ACCRUVIA_TASK_ID": repair_task.id,
-            "ACCRUVIA_RUN_ID": repair_run.id,
-            "ACCRUVIA_RUN_ATTEMPT": str(repair_run.attempt),
-            "ACCRUVIA_TASK_TITLE": repair_task.title,
-            "ACCRUVIA_TASK_OBJECTIVE": repair_task.objective,
-            "ACCRUVIA_RUN_SUMMARY": repair_run.summary,
-            "ACCRUVIA_TASK_SCOPE_JSON": json.dumps(repair_task.scope, sort_keys=True),
-            "ACCRUVIA_TASK_EXTERNAL_METADATA_JSON": json.dumps(repair_task.external_ref_metadata, sort_keys=True),
-            "ACCRUVIA_TASK_REQUIRED_ARTIFACTS": json.dumps(repair_task.required_artifacts, sort_keys=True),
-            "ACCRUVIA_TASK_STRATEGY": repair_task.strategy,
-            "ACCRUVIA_TASK_VALIDATION_PROFILE": repair_task.validation_profile,
-            "ACCRUVIA_TASK_VALIDATION_MODE": repair_task.validation_mode,
-        }
-        agent_exit = run_agent_worker(env)
-        report_path = run_dir / "report.json"
-        report = self._read_json_dict(report_path)
-        if agent_exit == 0 and str(report.get("worker_outcome") or "") == "candidate":
-            run_validation(env)
-            report = self._read_json_dict(report_path)
-        compile_check = report.get("compile_check") if isinstance(report.get("compile_check"), dict) else {}
-        test_check = report.get("test_check") if isinstance(report.get("test_check"), dict) else {}
-        validated = (
-            str(report.get("worker_outcome") or "") == "success"
-            and bool(compile_check.get("ok"))
-            and bool(test_check.get("ok"))
+        summary = (
+            "sa_watch direct repair is unavailable: the agent worker backend "
+            "was removed in pre-alpha. Route this repair through the skills pipeline."
         )
-        stdout_summary = None
-        stdout_path = run_dir / "codex_worker.stdout.txt"
-        if stdout_path.exists():
-            stdout_summary = next((line.strip() for line in stdout_path.read_text(encoding="utf-8").splitlines() if line.strip()), None)
         return SAWatchRepairResult(
-            status="validated" if validated else ("blocked" if report.get("blocked") else "failed"),
+            status="blocked",
             run_id=repair_run.id,
             run_dir=run_dir,
-            summary=str(report.get("failure_message") or stdout_summary or repair_run.summary),
-            changed_files=[str(item) for item in report.get("changed_files", []) if str(item).strip()],
+            summary=summary,
+            changed_files=[],
             validation={
-                "compile_check": compile_check,
-                "test_check": test_check,
-                "validation_elapsed_seconds": report.get("validation_elapsed_seconds"),
+                "compile_check": {},
+                "test_check": {},
+                "validation_elapsed_seconds": None,
             },
-            diagnostics=report,
-            stdout_summary=stdout_summary,
+            diagnostics={
+                "worker_outcome": "blocked",
+                "blocked": True,
+                "failure_category": "agent_backend_removed",
+                "failure_message": summary,
+            },
+            stdout_summary=None,
         )
 
     def _record_repair_evidence(

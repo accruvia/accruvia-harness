@@ -1,6 +1,6 @@
 """SkillsWorker — a WorkerBackend that drives the skills pipeline.
 
-Drop-in replacement for LocalArtifactWorker and CommandWorker. Implements
+Implements
 the WorkerBackend protocol so it plugs into RunService without signature
 changes. Internally delegates to SkillsWorkOrchestrator which runs the
 scope/implement/self-review/validate/diagnose pipeline.

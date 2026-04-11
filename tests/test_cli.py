@@ -436,43 +436,6 @@ class CLITests(unittest.TestCase):
         self.assertEqual(task["id"], task_report["task"]["id"])
         self.assertEqual(1, len(task_report["runs"]))
 
-    def test_process_next_honors_explicit_lightweight_validation_mode(self) -> None:
-        codex_script = Path(self.temp_dir.name) / "fake_codex_validation_mode.sh"
-        codex_script.write_text(
-            "#!/usr/bin/env bash\n"
-            "git init -q . 2>/dev/null || true\n"
-            "git add -A 2>/dev/null || true\n"
-            "git -c user.email=test@test -c user.name=test commit -q --allow-empty -m init 2>/dev/null || true\n"
-            "printf 'value = 1\\n' > lightweight_module.py\n"
-            "printf 'lightweight summary\\n'\n",
-            encoding="utf-8",
-        )
-        codex_script.chmod(0o755)
-        self.env["ACCRUVIA_WORKER_BACKEND"] = "agent"
-        self.env["ACCRUVIA_LLM_BACKEND"] = "codex"
-        self.env["ACCRUVIA_LLM_CODEX_COMMAND"] = str(codex_script)
-
-        project = self.run_cli("create-project", "lightweight-mode", "lightweight mode project")["project"]
-        task = self.run_cli(
-            "create-task",
-            project["id"],
-            "Light repair task",
-            "Verify explicit validation mode flows through process-next",
-            "--validation-mode",
-            "lightweight_repair",
-            "--strategy",
-            "default",
-        )["task"]
-
-        self.run_cli("process-next", "--project-id", project["id"], "--worker-id", "cli-worker", "--lease-seconds", "60")
-        report = self.run_cli("task-report", task["id"])
-        artifact_report = next(item for item in report["runs"][0]["artifacts"] if item["kind"] == "report")
-        payload = json.loads(Path(artifact_report["path"]).read_text(encoding="utf-8"))
-
-        self.assertEqual("lightweight_repair", payload["validation_mode"])
-        self.assertEqual([sys.executable, "-m", "unittest", "-v", "tests.test_workers"], payload["test_check"]["command"])
-        self.assertEqual("lightweight_repair", payload["test_check"]["selection"])
-
     def test_create_project_runs_bootstrap_heartbeat_by_default(self) -> None:
         llm_script = Path(self.temp_dir.name) / "fake_bootstrap_heartbeat.sh"
         llm_script.write_text(

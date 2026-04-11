@@ -96,7 +96,7 @@ class DeterministicValidationTests(unittest.TestCase):
                     "validation_profile": "python",
                     "validation_mode": "default_focused",
                     "effective_validation_mode": "default_focused",
-                    "worker_backend": "agent",
+                    "worker_backend": "skills",
                     "llm_backend": "codex",
                     "command": "codex exec",
                     "atomicity_gate": {"score": 0.1, "flags": [], "action": "allow", "rationale": "safe"},

@@ -1,5 +1,10 @@
 # Skills Migration Plan
 
+**Status (2026-04-11): COMPLETE.** The agent worker backend has been removed in a
+pre-alpha hard cutover. Skills is now the only worker backend. This document is
+preserved for historical reference only — any remaining references to the agent
+worker no longer apply.
+
 Replace the `working` and `promoting` workflows with a gstack-inspired skills model
 while preserving the discipline that makes the `planning` workflow work.
 

@@ -221,82 +221,6 @@ class CandidateArtifactWorker(LocalArtifactWorker):
         return None
 
 
-class AgentCandidateWithoutValidationWorker(LocalArtifactWorker):
-    """Mirrors production agent_worker.py behavior: writes a candidate report
-    that intentionally lacks compile_check / test_check, leaving validation as
-    a downstream responsibility.  Used to assert that the run_service path
-    correctly invokes validation for the agent backend.
-    """
-
-    backend_name = "agent"
-
-    def work(self, task, run, workspace_root: Path) -> WorkResult:  # type: ignore[override]
-        run_dir = workspace_root / "runs" / run.id
-        run_dir.mkdir(parents=True, exist_ok=True)
-        project_workspace = run_dir / "workspace"
-        project_workspace.mkdir(parents=True, exist_ok=True)
-        # Initialize a real git repo so changed_files() works
-        subprocess.run(["git", "init", "-b", "main", str(project_workspace)], check=True, capture_output=True)
-        subprocess.run(["git", "-C", str(project_workspace), "config", "user.email", "t@t"], check=True, capture_output=True)
-        subprocess.run(["git", "-C", str(project_workspace), "config", "user.name", "test"], check=True, capture_output=True)
-        # Initial commit on main
-        (project_workspace / "README.md").write_text("seed\n", encoding="utf-8")
-        subprocess.run(["git", "-C", str(project_workspace), "add", "."], check=True, capture_output=True)
-        subprocess.run(["git", "-C", str(project_workspace), "commit", "-m", "init"], check=True, capture_output=True)
-        # Worker branch with a real change
-        subprocess.run(["git", "-C", str(project_workspace), "checkout", "-b", "worker"], check=True, capture_output=True)
-        (project_workspace / "src").mkdir(exist_ok=True)
-        (project_workspace / "src" / "demo.py").write_text("VALUE = 1\n", encoding="utf-8")
-        (project_workspace / "tests").mkdir(exist_ok=True)
-        (project_workspace / "tests" / "test_demo.py").write_text(
-            "import unittest\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertTrue(True)\n",
-            encoding="utf-8",
-        )
-        subprocess.run(["git", "-C", str(project_workspace), "add", "."], check=True, capture_output=True)
-        subprocess.run(["git", "-C", str(project_workspace), "commit", "-m", "worker change"], check=True, capture_output=True)
-
-        plan_path = run_dir / "plan.txt"
-        plan_path.write_text("plan\n", encoding="utf-8")
-        report_path = run_dir / "report.json"
-        # CRITICAL: this matches what production agent_worker.py writes — a
-        # candidate payload WITHOUT compile_check / test_check.
-        report_path.write_text(
-            json.dumps(
-                {
-                    "worker_outcome": "candidate",
-                    "changed_files": ["src/demo.py", "tests/test_demo.py"],
-                    "test_files": ["tests/test_demo.py"],
-                    "summary": "Commit succeeded. All changes are committed.",
-                    "validation_profile": "generic",
-                    "validation_mode": "lightweight_operator",
-                    "effective_validation_mode": "lightweight_operator",
-                    "worker_backend": "agent",
-                    "llm_backend": "claude",
-                    "command": "/home/soverton/accruvia-harness/bin/accruvia-codex-worker",
-                    "atomicity_gate": {"score": 0, "flags": [], "action": "validate_normal", "rationale": "ok"},
-                }
-            ),
-            encoding="utf-8",
-        )
-        return WorkResult(
-            summary="Commit succeeded. All changes are committed.",
-            artifacts=[
-                ("plan", str(plan_path), "Plan artifact"),
-                ("report", str(report_path), "Candidate report artifact"),
-            ],
-            outcome="success",
-            diagnostics={
-                "worker_outcome": "candidate",
-                "worker_backend": "agent",
-                "changed_files": ["src/demo.py", "tests/test_demo.py"],
-                "test_files": ["tests/test_demo.py"],
-            },
-        )
-
-    def build_worker(self, project, task, run, workspace, default_worker):
-        return None
-
-
 class ProjectOverrideWorker(LocalArtifactWorker):
     def work(self, task, run, workspace_root: Path) -> WorkResult:  # type: ignore[override]
         run_dir = workspace_root / "runs" / run.id
@@ -730,7 +654,7 @@ class HarnessEngineTests(unittest.TestCase):
                             "validation_profile": "python",
                             "validation_mode": "default_focused",
                             "effective_validation_mode": "default_focused",
-                            "worker_backend": "agent",
+                            "worker_backend": "skills",
                             "llm_backend": "codex",
                             "command": "codex exec",
                             "atomicity_gate": {"score": 0.1, "flags": [], "action": "allow", "rationale": "safe"},
@@ -761,184 +685,6 @@ class HarnessEngineTests(unittest.TestCase):
         payload = json.loads(report_path.read_text(encoding="utf-8"))
         self.assertEqual("failed", payload["worker_outcome"])
         self.assertEqual("validation_evidence_missing", payload["failure_category"])
-
-    def test_agent_candidate_is_validated_when_no_external_validation_service(self) -> None:
-        """When the agent worker emits a candidate without compile_check / test_check
-        and no external validation_service is wired in, run_service must invoke the
-        in-tree agent_worker.run_validation() to populate those fields.  Without this
-        the harness produces 100% validation_evidence_missing failures.
-        """
-        engine = HarnessEngine(
-            store=self.store,
-            workspace_root=Path(self.temp_dir.name) / "workspace-agent-no-validation-svc",
-            worker=AgentCandidateWithoutValidationWorker(),
-        )
-        # Sanity: there is no external validation service.
-        self.assertIsNone(engine.runs.validation_service)
-
-        task = engine.create_task_with_policy(
-            project_id=self.project_id,
-            title="Agent candidate validation",
-            objective="Mirror production agent worker output and verify validation runs",
-            priority=100,
-            parent_task_id=None,
-            source_run_id=None,
-            external_ref_type=None,
-            external_ref_id=None,
-            strategy="baseline",
-            max_attempts=1,
-            required_artifacts=["plan", "report"],
-        )
-
-        run = engine.run_once(task.id)
-
-        report_path = engine.workspace_root / "runs" / run.id / "report.json"
-        self.assertTrue(report_path.exists(), "report.json must exist after validation")
-        payload = json.loads(report_path.read_text(encoding="utf-8"))
-
-        # The contract: after validation, compile_check and test_check MUST be dicts.
-        self.assertIsInstance(
-            payload.get("compile_check"),
-            dict,
-            f"compile_check missing from report: {sorted(payload.keys())}",
-        )
-        self.assertIsInstance(
-            payload.get("test_check"),
-            dict,
-            f"test_check missing from report: {sorted(payload.keys())}",
-        )
-
-        # The run must NOT be marked failed with validation_evidence_missing.
-        self.assertNotEqual(
-            "validation_evidence_missing",
-            payload.get("failure_category"),
-            "validation must run for agent candidates so the gate doesn't reject them",
-        )
-
-    def test_agent_candidate_validation_can_pass(self) -> None:
-        """End-to-end: when the agent worker emits a candidate with real changed
-        files and a passing test, the validated report must show
-        compile_check.passed=True and test_check.passed=True.
-        """
-        engine = HarnessEngine(
-            store=self.store,
-            workspace_root=Path(self.temp_dir.name) / "workspace-agent-validation-passes",
-            worker=AgentCandidateWithoutValidationWorker(),
-        )
-        task = engine.create_task_with_policy(
-            project_id=self.project_id,
-            title="Agent candidate passes validation",
-            objective="Validation must produce positive evidence for a clean candidate",
-            priority=100,
-            parent_task_id=None,
-            source_run_id=None,
-            external_ref_type=None,
-            external_ref_id=None,
-            strategy="baseline",
-            max_attempts=1,
-            required_artifacts=["plan", "report"],
-        )
-
-        run = engine.run_once(task.id)
-
-        report_path = engine.workspace_root / "runs" / run.id / "report.json"
-        payload = json.loads(report_path.read_text(encoding="utf-8"))
-
-        compile_check = payload.get("compile_check")
-        test_check = payload.get("test_check")
-        self.assertIsInstance(compile_check, dict)
-        self.assertIsInstance(test_check, dict)
-        self.assertTrue(
-            compile_check.get("passed"),
-            f"compile_check should pass: {compile_check}",
-        )
-        self.assertTrue(
-            test_check.get("passed"),
-            f"test_check should pass: {test_check}",
-        )
-
-    def test_agent_candidate_writes_ship_ready_when_validation_passes(self) -> None:
-        """The merge gate (merge_gate.evaluate_run) requires `ship_ready: True`
-        in the report.json artifact. The skills /self-review skill writes this,
-        but the agent worker historically does not. Without it, every agent
-        candidate is auto-merge-blocked even when validation passes.
-        """
-        engine = HarnessEngine(
-            store=self.store,
-            workspace_root=Path(self.temp_dir.name) / "workspace-agent-ship-ready",
-            worker=AgentCandidateWithoutValidationWorker(),
-        )
-        task = engine.create_task_with_policy(
-            project_id=self.project_id,
-            title="Agent candidate ship_ready",
-            objective="Validation must mark the candidate ship_ready when compile + tests pass",
-            priority=100,
-            parent_task_id=None,
-            source_run_id=None,
-            external_ref_type=None,
-            external_ref_id=None,
-            strategy="baseline",
-            max_attempts=1,
-            required_artifacts=["plan", "report"],
-        )
-
-        engine.run_once(task.id)
-
-        run_dirs = list((engine.workspace_root / "runs").iterdir())
-        self.assertEqual(1, len(run_dirs))
-        report_path = run_dirs[0] / "report.json"
-        payload = json.loads(report_path.read_text(encoding="utf-8"))
-
-        self.assertTrue(
-            payload.get("ship_ready"),
-            f"ship_ready must be True after passing validation; got: {payload.get('ship_ready')}",
-        )
-        self.assertEqual(
-            "pass",
-            payload.get("overall_validation"),
-            f"overall_validation must be 'pass' after passing validation; got: {payload.get('overall_validation')}",
-        )
-
-    def test_agent_promote_decision_invokes_auto_merge_gate(self) -> None:
-        """When a run from worker_backend=agent gets decision=PROMOTE, the
-        auto-merge gate (_try_auto_merge_and_verify) MUST be called. Historically
-        the gate was hard-coded to skip non-skills backends, leaving 100% of
-        agent runs un-merged.
-        """
-        from unittest.mock import patch
-
-        engine = HarnessEngine(
-            store=self.store,
-            workspace_root=Path(self.temp_dir.name) / "workspace-agent-auto-merge",
-            worker=AgentCandidateWithoutValidationWorker(),
-        )
-        task = engine.create_task_with_policy(
-            project_id=self.project_id,
-            title="Agent promote auto-merge",
-            objective="Auto-merge gate must be called for agent backend on PROMOTE",
-            priority=100,
-            parent_task_id=None,
-            source_run_id=None,
-            external_ref_type=None,
-            external_ref_id=None,
-            strategy="baseline",
-            max_attempts=1,
-            required_artifacts=["plan", "report"],
-        )
-
-        with patch.object(
-            engine.runs,
-            "_try_auto_merge_and_verify",
-            wraps=engine.runs._try_auto_merge_and_verify,
-        ) as auto_merge_mock:
-            engine.run_once(task.id)
-
-        self.assertGreaterEqual(
-            auto_merge_mock.call_count,
-            1,
-            "Auto-merge gate must be called for agent backend on PROMOTE; "
-            "the worker_backend == 'skills' guard was skipping it.",
-        )
 
     def test_run_once_blocks_objective_linked_task_when_execution_gate_is_not_ready(self) -> None:
         objective = Objective(
@@ -2226,8 +1972,6 @@ class HarnessEngineTests(unittest.TestCase):
             temporal_target="localhost:7233",
             temporal_namespace="default",
             temporal_task_queue="accruvia-harness",
-            worker_backend="local",
-            worker_command=None,
             llm_backend="command",
             llm_model=None,
             llm_command=f'bash "{Path(__file__).resolve().parent / "fixtures" / "fake_affirm_approve.sh"}"',
@@ -3215,8 +2959,6 @@ class HarnessEngineTests(unittest.TestCase):
             temporal_target="localhost:7233",
             temporal_namespace="default",
             temporal_task_queue="accruvia-harness",
-            worker_backend="local",
-            worker_command=None,
             llm_backend="command",
             llm_model=None,
             llm_command=f'bash "{Path(__file__).resolve().parent / "fixtures" / "fake_affirm_reject.sh"}"',

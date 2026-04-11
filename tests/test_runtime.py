@@ -45,8 +45,6 @@ class RuntimeTests(unittest.TestCase):
             temporal_target="localhost:7233",
             temporal_namespace="default",
             temporal_task_queue="accruvia-harness",
-            worker_backend="local",
-            worker_command=None,
             llm_backend="auto",
             llm_model=None,
             llm_command=None,
@@ -223,6 +221,14 @@ class RuntimeTests(unittest.TestCase):
             }
         )
         engine = _build_engine(config.to_payload())
+        # Skills is the only production worker backend; this test exercises
+        # the adapter-module loading path through the temporal builder, not
+        # the skills pipeline, so swap in the no-LLM LocalArtifactWorker.
+        from accruvia_harness.workers import LocalArtifactWorker
+        from accruvia_harness.adapters import build_adapter_registry
+        engine.set_worker(LocalArtifactWorker(
+            adapter_registry=build_adapter_registry(config.adapter_modules),
+        ))
         project = engine.create_project("temporal-private", "Temporal private project")
         task = engine.create_task_with_policy(
             project_id=project.id,

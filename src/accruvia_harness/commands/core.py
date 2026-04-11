@@ -873,8 +873,6 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
             "temporal_target": config.temporal_target,
             "temporal_namespace": config.temporal_namespace,
             "temporal_task_queue": config.temporal_task_queue,
-            "worker_backend": config.worker_backend,
-            "worker_command": _redact_command(config.worker_command),
             "llm_backend": config.llm_backend,
             "llm_model": config.llm_model,
             "llm_command": _redact_command(config.llm_command),

@@ -46,8 +46,6 @@ def _make_config(base: Path) -> HarnessConfig:
         temporal_target="localhost:7233",
         temporal_namespace="default",
         temporal_task_queue="accruvia-harness",
-        worker_backend="local",
-        worker_command=None,
         llm_backend="auto",
         llm_model=None,
         llm_command=None,

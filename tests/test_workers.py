@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
-import signal
 import subprocess
 import sys
 import tempfile
@@ -11,36 +9,41 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from routellect.protocols import ModelCapability
-from routellect.routing_events import ModelUniverseSnapshot
-
 from accruvia_harness.atomicity import atomicity_gate, changed_files
-from accruvia_harness.agent_worker import _ensure_claude_noninteractive_flags, _focused_test_command, run_agent_worker, run_validation, select_worker_llm_chain, select_worker_llm_command
 from accruvia_harness.adapters import build_adapter_registry
 from accruvia_harness.config import HarnessConfig
 from accruvia_harness.domain import Run, RunStatus, Task, new_id
-from accruvia_harness.exploration_policy import EpsilonGreedyPolicy
 from accruvia_harness.llm import CommandLLMExecutor, LLMInvocation, build_llm_router, parse_affirmation_response
-from accruvia_harness.routing_hook import RoutingHook
 from accruvia_harness.resource_limits import resolve_memory_limit_mb
 from accruvia_harness.subprocess_env import build_subprocess_env
 from accruvia_harness.telemetry import TelemetrySink
 from accruvia_harness.timeout_policy import ExecutionTimeoutPolicy
-from accruvia_harness.workers import (
-    AgentCommandWorker,
-    LocalArtifactWorker,
-    LLMTaskWorker,
-    ShellCommandWorker,
-    STRUCTURAL_FIX_MAX_RUN_SECONDS,
-    STRUCTURAL_FIX_STALE_PROGRESS_SECONDS,
-    _default_agent_worker_command,
-    _kill_process_tree,
-    build_worker,
-    build_worker_from_config,
-)
+from accruvia_harness.workers import LocalArtifactWorker
 
 
-class WorkerTests(unittest.TestCase):
+def _minimal_config(base: Path, **overrides) -> HarnessConfig:
+    defaults = dict(
+        db_path=base / "harness.db",
+        workspace_root=base,
+        log_path=base / "harness.log",
+        default_project_name="demo",
+        default_repo="accruvia/accruvia",
+        runtime_backend="local",
+        temporal_target="localhost:7233",
+        temporal_namespace="default",
+        temporal_task_queue="accruvia-harness",
+        llm_backend="auto",
+        llm_model=None,
+        llm_command=None,
+        llm_codex_command=None,
+        llm_claude_command=None,
+        llm_accruvia_client_command=None,
+    )
+    defaults.update(overrides)
+    return HarnessConfig(**defaults)
+
+
+class LocalWorkerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
@@ -132,281 +135,25 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual("private_profile", payload["validation_profile"])
         self.assertEqual("private_profile", result.diagnostics["adapter"])
 
-    def test_shell_worker_executes_command(self) -> None:
-        worker = ShellCommandWorker("printf 'hello from shell worker' > output.txt")
-        result = worker.work(self.task, self.run, self.base)
-        kinds = sorted(kind for kind, _, _ in result.artifacts)
-        self.assertEqual(["report", "worker_stderr", "worker_stdout"], kinds)
-        self.assertEqual("success", result.outcome)
-        self.assertTrue((self.base / "runs" / self.run.id / "output.txt").exists())
 
-    def test_shell_worker_times_out_with_policy(self) -> None:
-        telemetry = TelemetrySink(self.base / "telemetry")
-        timeout_policy = ExecutionTimeoutPolicy(
-            telemetry,
-            min_seconds=1,
-            max_seconds=1,
-            multiplier=1.0,
+class LLMExecutorTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.base = Path(self.temp_dir.name)
+        self.task = Task(
+            id=new_id("task"),
+            project_id="project_1",
+            title="LLM task",
+            objective="Verify CommandLLMExecutor",
         )
-        worker = ShellCommandWorker("sleep 2", timeout_policy=timeout_policy)
-
-        result = worker.work(self.task, self.run, self.base)
-
-        self.assertEqual("blocked", result.outcome)
-        self.assertTrue(result.diagnostics["timed_out"])
-        self.assertEqual(1, result.diagnostics["timeout_seconds"])
-
-    def test_shell_worker_timeout_handles_bytes_stderr(self) -> None:
-        telemetry = TelemetrySink(self.base / "telemetry")
-        timeout_policy = ExecutionTimeoutPolicy(
-            telemetry,
-            min_seconds=1,
-            max_seconds=1,
-            multiplier=1.0,
+        self.run = Run(
+            id=new_id("run"),
+            task_id=self.task.id,
+            status=RunStatus.WORKING,
+            attempt=1,
+            summary="",
         )
-        monotonic_values = iter([0.0, 2.0])
-
-        class _FakeProcess:
-            pid = 12345
-            returncode = -9
-
-            def poll(self):
-                return None
-
-            def kill(self):
-                return None
-
-            def communicate(self, **kwargs):
-                return (b"partial stdout", b"partial stderr")
-
-            def wait(self, **kwargs):
-                return self.returncode
-
-        worker = ShellCommandWorker(
-            "sleep 2",
-            timeout_policy=timeout_policy,
-            monotonic=lambda: next(monotonic_values),
-            sleep_fn=lambda _seconds: None,
-        )
-
-        with patch("accruvia_harness.workers.subprocess.Popen", return_value=_FakeProcess()), \
-             patch("accruvia_harness.workers.os.killpg"), \
-             patch("accruvia_harness.workers.os.getpgid", return_value=12345):
-            result = worker.work(self.task, self.run, self.base)
-
-        stderr_path = self.base / "runs" / self.run.id / "worker.stderr.txt"
-        self.assertEqual("blocked", result.outcome)
-        self.assertEqual("partial stderr", stderr_path.read_text(encoding="utf-8"))
-
-    def test_structural_fix_uses_tighter_run_timeout(self) -> None:
-        self.task.strategy = "sa_structural_fix"
-        telemetry = TelemetrySink(self.base / "telemetry")
-        timeout_policy = ExecutionTimeoutPolicy(
-            telemetry,
-            min_seconds=1800,
-            max_seconds=1800,
-            multiplier=1.0,
-        )
-        monotonic_values = iter([0.0, float(STRUCTURAL_FIX_MAX_RUN_SECONDS) + 1.0])
-
-        class _FakeProcess:
-            pid = 12345
-            returncode = -9
-
-            def poll(self):
-                return None
-
-            def kill(self):
-                return None
-
-            def communicate(self, **kwargs):
-                return ("partial stdout", "partial stderr")
-
-            def wait(self, **kwargs):
-                return self.returncode
-
-        worker = ShellCommandWorker(
-            "sleep 2000",
-            timeout_policy=timeout_policy,
-            monotonic=lambda: next(monotonic_values),
-            sleep_fn=lambda _seconds: None,
-        )
-
-        with patch("accruvia_harness.workers.subprocess.Popen", return_value=_FakeProcess()), \
-             patch("accruvia_harness.workers.os.killpg"), \
-             patch("accruvia_harness.workers.os.getpgid", return_value=12345):
-            result = worker.work(self.task, self.run, self.base)
-
-        self.assertEqual("blocked", result.outcome)
-        self.assertEqual(STRUCTURAL_FIX_MAX_RUN_SECONDS, result.diagnostics["timeout_seconds"])
-
-    def test_structural_fix_uses_tighter_stale_progress_timeout(self) -> None:
-        self.task.strategy = "sa_structural_fix"
-        monotonic_values = iter([0.0, 61.0])
-
-        class _FakeProcess:
-            pid = 12345
-            returncode = -9
-
-            def poll(self):
-                return None
-
-            def kill(self):
-                return None
-
-            def communicate(self, **kwargs):
-                return ("partial stdout", "partial stderr")
-
-            def wait(self, **kwargs):
-                return self.returncode
-
-        worker = ShellCommandWorker(
-            "sleep 2000",
-            timeout_policy=None,
-            stale_after_seconds=7200,
-            monotonic=lambda: next(monotonic_values),
-            sleep_fn=lambda _seconds: None,
-        )
-        worker._latest_artifact_details = lambda _run_dir: (  # type: ignore[method-assign]
-            "plan.txt",
-            "/tmp/run/plan.txt",
-            "plan",
-            float(STRUCTURAL_FIX_STALE_PROGRESS_SECONDS) + 1.0,
-        )
-
-        with patch("accruvia_harness.workers.subprocess.Popen", return_value=_FakeProcess()), \
-             patch("accruvia_harness.workers.os.killpg"), \
-             patch("accruvia_harness.workers.os.getpgid", return_value=12345):
-            result = worker.work(self.task, self.run, self.base)
-
-        self.assertEqual("blocked", result.outcome)
-        self.assertEqual("stale_progress_timeout", result.diagnostics["failure_category"])
-        self.assertEqual(float(STRUCTURAL_FIX_STALE_PROGRESS_SECONDS), result.diagnostics["stale_after_seconds"])
-
-    def test_agent_worker_captures_failure_without_raising(self) -> None:
-        worker = AgentCommandWorker("printf 'boom' >&2; exit 7")
-        result = worker.work(self.task, self.run, self.base)
-
-        self.assertEqual("blocked", result.outcome)
-        self.assertEqual(7, result.diagnostics["returncode"])
-        self.assertTrue((self.base / "runs" / self.run.id / "worker.stderr.txt").exists())
-
-    def test_agent_worker_discovers_required_artifact_written_to_prepared_workspace(self) -> None:
-        self.task.required_artifacts = ["plan", "report", "completed_objective_review_telemetry_trace"]
-        run_dir = self.base / "runs" / self.run.id
-        workspace = run_dir / "workspace"
-        workspace.mkdir(parents=True)
-        command = (
-            "printf 'summary\\n' && "
-            "printf '{\"worker_outcome\":\"success\"}\\n' > \"$ACCRUVIA_RUN_DIR/report.json\" && "
-            "printf '{\"review_id\":\"review_1\"}\\n' > completed_objective_review_telemetry_trace.json"
-        )
-
-        worker = AgentCommandWorker(command)
-        result = worker.work(self.task, self.run, self.base)
-
-        self.assertEqual("success", result.outcome)
-        artifact_kinds = {kind for kind, _, _ in result.artifacts}
-        self.assertIn("completed_objective_review_telemetry_trace", artifact_kinds)
-        artifact_paths = {
-            kind: path for kind, path, _ in result.artifacts if kind == "completed_objective_review_telemetry_trace"
-        }
-        self.assertEqual(
-            str(workspace / "completed_objective_review_telemetry_trace.json"),
-            artifact_paths["completed_objective_review_telemetry_trace"],
-        )
-
-    def test_build_worker_requires_command_for_shell_backend(self) -> None:
-        with self.assertRaises(ValueError):
-            build_worker("shell")
-
-    def test_build_worker_requires_command_for_agent_backend(self) -> None:
-        with self.assertRaises(ValueError):
-            build_worker("agent")
-
-    def test_llm_worker_executes_routed_codex_command(self) -> None:
-        config = HarnessConfig(
-            db_path=self.base / "harness.db",
-            workspace_root=self.base,
-            log_path=self.base / "harness.log",
-            default_project_name="demo",
-            default_repo="accruvia/accruvia",
-            runtime_backend="local",
-            temporal_target="localhost:7233",
-            temporal_namespace="default",
-            temporal_task_queue="accruvia-harness",
-            worker_backend="llm",
-            worker_command=None,
-            llm_backend="codex",
-            llm_model="gpt-5.4-codex",
-            llm_command=None,
-            llm_codex_command="printf 'codex response' > \"$ACCRUVIA_LLM_RESPONSE_PATH\"; printf '{\"cost_usd\": 0.12, \"prompt_tokens\": 10, \"completion_tokens\": 20, \"total_tokens\": 30, \"latency_ms\": 250, \"model\": \"gpt-5.4-codex\"}' > \"$ACCRUVIA_LLM_METADATA_PATH\"",
-            llm_claude_command=None,
-            llm_accruvia_client_command=None,
-        )
-
-        telemetry = TelemetrySink(self.base / "telemetry")
-        worker = build_worker_from_config(config, telemetry=telemetry)
-        self.assertIsInstance(worker, LLMTaskWorker)
-        result = worker.work(self.task, self.run, self.base)
-
-        kinds = sorted(kind for kind, _, _ in result.artifacts)
-        self.assertEqual(["llm_response", "plan", "report"], kinds)
-        self.assertEqual("success", result.outcome)
-        self.assertEqual("codex", result.diagnostics["llm_backend"])
-        self.assertEqual(0.12, result.diagnostics["cost_usd"])
-        summary = telemetry.summary()
-        self.assertEqual(0.12, summary["cost_totals"]["cost_usd"])
-        self.assertEqual(30.0, summary["cost_totals"]["total_tokens"])
-
-    def test_build_worker_from_config_records_routing_outcome_end_to_end(self) -> None:
-        config = HarnessConfig(
-            db_path=self.base / "harness.db",
-            workspace_root=self.base,
-            log_path=self.base / "harness.log",
-            default_project_name="demo",
-            default_repo="accruvia/accruvia",
-            runtime_backend="local",
-            temporal_target="localhost:7233",
-            temporal_namespace="default",
-            temporal_task_queue="accruvia-harness",
-            worker_backend="llm",
-            worker_command=None,
-            llm_backend="codex",
-            llm_model=None,
-            llm_command=None,
-            llm_codex_command="printf 'codex response' > \"$ACCRUVIA_LLM_RESPONSE_PATH\"; printf '{\"cost_usd\": 0.12, \"prompt_tokens\": 10, \"completion_tokens\": 20, \"total_tokens\": 30, \"latency_ms\": 250, \"model\": \"gpt-5.4-codex\"}' > \"$ACCRUVIA_LLM_METADATA_PATH\"",
-            llm_claude_command=None,
-            llm_accruvia_client_command=None,
-        )
-        hook = RoutingHook(
-            universe=ModelUniverseSnapshot(
-                models=[
-                    ModelCapability(
-                        backend="codex",
-                        provider="openai",
-                        model_id="gpt-5.4-codex",
-                        available=True,
-                    )
-                ]
-            ),
-            policy=EpsilonGreedyPolicy(epsilon=0.0),
-        )
-
-        with patch("accruvia_harness.routing_hook.RoutingHook.from_config", return_value=hook):
-            worker = build_worker_from_config(config, telemetry=TelemetrySink(self.base / "telemetry"))
-
-        self.assertIs(worker.routing_hook, hook)
-        result = worker.work(self.task, self.run, self.base)
-
-        self.assertEqual("success", result.outcome)
-        self.assertEqual("gpt-5.4-codex", result.diagnostics["llm_model"])
-        event_log = hook.get_event_log()
-        self.assertEqual(2, len(event_log))
-        self.assertIn("decision", event_log[0])
-        self.assertTrue(event_log[1]["outcome"]["success"])
-        self.assertEqual(30.0, event_log[1]["token_metrics"]["llm_total_tokens"])
-        self.assertEqual(250.0, event_log[1]["token_metrics"]["llm_latency_ms"])
 
     def test_command_llm_executor_allows_invocation_timeout_override(self) -> None:
         telemetry = TelemetrySink(self.base / "telemetry")
@@ -458,830 +205,18 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(result.prompt_path.is_absolute())
         self.assertTrue(result.response_path.is_absolute())
 
-    def test_agent_worker_marks_executor_bootstrap_failures_blocked(self) -> None:
-        worker = AgentCommandWorker("exit 7")
 
-        result = worker.work(self.task, self.run, self.base)
-
-        self.assertEqual("blocked", result.outcome)
-        self.assertTrue(result.diagnostics["infrastructure_failure"])
-        self.assertEqual("executor_process_failure", result.diagnostics["failure_category"])
-
-    def test_shell_worker_emits_live_progress_for_long_running_child(self) -> None:
-        progress_events: list[dict[str, object]] = []
-        run_dir = self.base / "runs" / self.run.id
-        run_dir.mkdir(parents=True)
-        plan_path = run_dir / "plan.txt"
-        plan_path.write_text("plan\n", encoding="utf-8")
-        command = f"{shlex.quote(sys.executable)} -c {shlex.quote('import time; time.sleep(0.25)')}"
-        worker = ShellCommandWorker(
-            command,
-            progress_callback=progress_events.append,
-            status_interval_seconds=0.05,
-            stale_after_seconds=1.0,
-        )
-
-        result = worker.work(self.task, self.run, self.base)
-
-        self.assertEqual("success", result.outcome)
-        self.assertEqual("worker_launched", progress_events[0]["type"])
-        status_events = [event for event in progress_events if event["type"] == "worker_status"]
-        self.assertTrue(status_events)
-        self.assertTrue(any(event["latest_artifact"] == "plan.txt" for event in status_events))
-        self.assertTrue(any(event["latest_artifact_kind"] == "plan" for event in status_events))
-        self.assertTrue(any(str(event["latest_artifact_path"]).endswith("/plan.txt") for event in status_events))
-        self.assertTrue(all(not bool(event["stale"]) for event in status_events))
-
-    def test_shell_worker_kills_stale_progress_before_full_run_timeout(self) -> None:
-        progress_events: list[dict[str, object]] = []
-        run_dir = self.base / "runs" / self.run.id
-        run_dir.mkdir(parents=True)
-        plan_path = run_dir / "plan.txt"
-        plan_path.write_text("plan\n", encoding="utf-8")
-        command = f"{shlex.quote(sys.executable)} -c {shlex.quote('import time; time.sleep(5)')}"
-        worker = ShellCommandWorker(
-            command,
-            progress_callback=progress_events.append,
-            status_interval_seconds=0.05,
-            stale_after_seconds=0.05,
-        )
-
-        result = worker.work(self.task, self.run, self.base)
-
-        self.assertEqual("blocked", result.outcome)
-        self.assertEqual("stale_progress_timeout", result.diagnostics["failure_category"])
-        report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
-        self.assertEqual("stale_progress_timeout", report["failure_category"])
-        self.assertTrue(any(event["type"] == "worker_status" and event["stale"] for event in progress_events))
-
-    def test_select_worker_llm_command_prefers_selected_backend(self) -> None:
-        backend, command = select_worker_llm_command(
-            {
-                "ACCRUVIA_WORKER_LLM_BACKEND": "claude",
-                "ACCRUVIA_LLM_CODEX_COMMAND": "codex exec",
-                "ACCRUVIA_LLM_CLAUDE_COMMAND": "claude",
-            }
-        )
-
-        self.assertEqual("claude", backend)
-        self.assertIn("-p", command.split())
-        self.assertIn("--dangerously-skip-permissions", command.split())
-
-    def test_run_agent_worker_uses_shared_stdin_command_path(self) -> None:
-        workspace = self.base / "workspace"
-        tests_dir = workspace / "tests"
-        tests_dir.mkdir(parents=True)
-        for name in ("test_engine.py", "test_store.py", "test_validation.py", "test_phase1.py"):
-            (tests_dir / name).write_text(
-                "import unittest\n\n"
-                "class Smoke(unittest.TestCase):\n"
-                "    def test_ok(self):\n"
-                "        self.assertTrue(True)\n",
-                encoding="utf-8",
-            )
-        subprocess.run(["git", "init", "-b", "main"], cwd=workspace, check=True, capture_output=True, text=True)
-        cli_script = self.base / "fake_codex.sh"
-        cli_script.write_text(
-            "#!/usr/bin/env bash\n"
-            "cat > shared_prompt.txt\n"
-            "printf 'worker summary\\n'\n"
-            "printf 'value = 1\\n' > changed_module.py\n",
-            encoding="utf-8",
-        )
-        cli_script.chmod(0o755)
-        run_dir = self.base / "run"
-        result = run_agent_worker(
-            {
-                "ACCRUVIA_RUN_DIR": str(run_dir),
-                "ACCRUVIA_PROJECT_WORKSPACE": str(workspace),
-                "ACCRUVIA_TASK_ID": self.task.id,
-                "ACCRUVIA_RUN_ID": self.run.id,
-                "ACCRUVIA_TASK_OBJECTIVE": self.task.objective,
-                "ACCRUVIA_RUN_SUMMARY": self.run.summary,
-                "ACCRUVIA_TASK_STRATEGY": "default",
-                "ACCRUVIA_WORKER_LLM_BACKEND": "codex",
-                "ACCRUVIA_LLM_CODEX_COMMAND": str(cli_script),
-            }
-        )
-
-        report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
-        prompt_text = (run_dir / "codex_worker_prompt.txt").read_text(encoding="utf-8")
-        self.assertEqual(0, result)
-        self.assertEqual("codex", report["llm_backend"])
-        self.assertEqual("candidate", report["worker_outcome"])
-        self.assertIn("changed_module.py", report["changed_files"])
-        self.assertIn("Objective: Verify worker abstraction", prompt_text)
-        self.assertIn(f"Workspace root: {workspace}", prompt_text)
-        self.assertIn('"validation_command"', prompt_text)
-        self.assertIn('"required_artifacts"', prompt_text)
-        self.assertIn("evidence_reviewed", report)
-        self.assertIn("run_files_present", report["evidence_reviewed"])
-        self.assertIn("Objective: Verify worker abstraction", (workspace / "shared_prompt.txt").read_text(encoding="utf-8"))
-
-    def test_run_agent_worker_fails_when_fix_oriented_task_produces_no_changes(self) -> None:
-        workspace = self.base / "workspace-no-changes"
-        tests_dir = workspace / "tests"
-        tests_dir.mkdir(parents=True)
-        for name in ("test_engine.py", "test_store.py", "test_validation.py", "test_phase1.py"):
-            (tests_dir / name).write_text(
-                "import unittest\n\n"
-                "class Smoke(unittest.TestCase):\n"
-                "    def test_ok(self):\n"
-                "        self.assertTrue(True)\n",
-                encoding="utf-8",
-            )
-        subprocess.run(["git", "init", "-b", "main"], cwd=workspace, check=True, capture_output=True, text=True)
-        subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
-        subprocess.run(
-            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
-            cwd=workspace,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        cli_script = self.base / "fake_codex_no_changes.sh"
-        cli_script.write_text(
-            "#!/usr/bin/env bash\n"
-            "printf 'worker summary\\n'\n",
-            encoding="utf-8",
-        )
-        cli_script.chmod(0o755)
-        run_dir = self.base / "run-no-changes"
-
-        result = run_agent_worker(
-            {
-                "ACCRUVIA_RUN_DIR": str(run_dir),
-                "ACCRUVIA_PROJECT_WORKSPACE": str(workspace),
-                "ACCRUVIA_TASK_ID": self.task.id,
-                "ACCRUVIA_RUN_ID": self.run.id,
-                "ACCRUVIA_TASK_OBJECTIVE": self.task.objective,
-                "ACCRUVIA_RUN_SUMMARY": self.run.summary,
-                "ACCRUVIA_TASK_STRATEGY": "objective_review_remediation",
-                "ACCRUVIA_WORKER_LLM_BACKEND": "codex",
-                "ACCRUVIA_LLM_CODEX_COMMAND": str(cli_script),
-            }
-        )
-
-        report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
-        self.assertEqual(1, result)
-        self.assertEqual("failed", report["worker_outcome"])
-        self.assertEqual("no_changes_produced", report["failure_category"])
-        self.assertFalse(report["changed_files"])
-        self.assertFalse(report["suspected_tooling_misread"])
-        self.assertIn("evidence_reviewed", report)
-
-    def test_run_agent_worker_flags_suspected_tooling_misread_when_stdout_claims_write_block(self) -> None:
-        workspace = self.base / "workspace-write-misread"
-        tests_dir = workspace / "tests"
-        tests_dir.mkdir(parents=True)
-        for name in ("test_engine.py", "test_store.py", "test_validation.py", "test_phase1.py"):
-            (tests_dir / name).write_text(
-                "import unittest\n\n"
-                "class Smoke(unittest.TestCase):\n"
-                "    def test_ok(self):\n"
-                "        self.assertTrue(True)\n",
-                encoding="utf-8",
-            )
-        subprocess.run(["git", "init", "-b", "main"], cwd=workspace, check=True, capture_output=True, text=True)
-        subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
-        subprocess.run(
-            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
-            cwd=workspace,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        cli_script = self.base / "fake_codex_write_misread.sh"
-        cli_script.write_text(
-            "#!/usr/bin/env bash\n"
-            "printf 'I am blocked on file writes. The permission system is not granting write access.\\n'\n",
-            encoding="utf-8",
-        )
-        cli_script.chmod(0o755)
-        run_dir = self.base / "run-write-misread"
-
-        result = run_agent_worker(
-            {
-                "ACCRUVIA_RUN_DIR": str(run_dir),
-                "ACCRUVIA_PROJECT_WORKSPACE": str(workspace),
-                "ACCRUVIA_TASK_ID": self.task.id,
-                "ACCRUVIA_RUN_ID": self.run.id,
-                "ACCRUVIA_TASK_OBJECTIVE": self.task.objective,
-                "ACCRUVIA_RUN_SUMMARY": self.run.summary,
-                "ACCRUVIA_TASK_STRATEGY": "default",
-                "ACCRUVIA_WORKER_LLM_BACKEND": "codex",
-                "ACCRUVIA_LLM_CODEX_COMMAND": str(cli_script),
-            }
-        )
-
-        report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
-        self.assertEqual(1, result)
-        self.assertEqual("no_changes_produced", report["failure_category"])
-        self.assertTrue(report["suspected_tooling_misread"])
-        self.assertIn("write-permission problem", report["failure_message"])
-        self.assertIn("blocked on file writes", report["evidence_reviewed"]["claimed_blockers"])
-
-    def test_run_agent_worker_emits_heartbeat_during_llm_execution(self) -> None:
-        workspace = self.base / "workspace-heartbeat"
-        tests_dir = workspace / "tests"
-        tests_dir.mkdir(parents=True)
-        for name in ("test_engine.py", "test_store.py", "test_validation.py", "test_phase1.py"):
-            (tests_dir / name).write_text(
-                "import unittest\n\n"
-                "class Smoke(unittest.TestCase):\n"
-                "    def test_ok(self):\n"
-                "        self.assertTrue(True)\n",
-                encoding="utf-8",
-            )
-        subprocess.run(["git", "init", "-b", "main"], cwd=workspace, check=True, capture_output=True, text=True)
-        cli_script = self.base / "fake_codex_heartbeat.sh"
-        cli_script.write_text(
-            "#!/usr/bin/env bash\n"
-            "sleep 0.2\n"
-            "printf 'worker summary\\n'\n"
-            "printf 'value = 1\\n' > changed_module.py\n",
-            encoding="utf-8",
-        )
-        cli_script.chmod(0o755)
-        run_dir = self.base / "run-heartbeat"
-
-        result = run_agent_worker(
-            {
-                "ACCRUVIA_RUN_DIR": str(run_dir),
-                "ACCRUVIA_PROJECT_WORKSPACE": str(workspace),
-                "ACCRUVIA_TASK_ID": self.task.id,
-                "ACCRUVIA_RUN_ID": self.run.id,
-                "ACCRUVIA_TASK_OBJECTIVE": self.task.objective,
-                "ACCRUVIA_RUN_SUMMARY": self.run.summary,
-                "ACCRUVIA_TASK_STRATEGY": "default",
-                "ACCRUVIA_WORKER_LLM_BACKEND": "codex",
-                "ACCRUVIA_LLM_CODEX_COMMAND": str(cli_script),
-                "ACCRUVIA_PROGRESS_HEARTBEAT_SECONDS": "0.05",
-            }
-        )
-
-        self.assertEqual(0, result)
-        heartbeat = json.loads((run_dir / "worker.heartbeat.json").read_text(encoding="utf-8"))
-        self.assertEqual("llm_generation", heartbeat["phase"])
-        self.assertEqual("llm_generation", (run_dir / "phase.txt").read_text(encoding="utf-8"))
-
-    def test_run_agent_worker_fails_fast_when_focused_tests_exceed_timeout(self) -> None:
-        workspace = self.base / "workspace"
-        tests_dir = workspace / "tests"
-        tests_dir.mkdir(parents=True)
-        for name in ("test_store.py", "test_validation.py", "test_phase1.py"):
-            (tests_dir / name).write_text(
-                "import unittest\n\n"
-                "class Smoke(unittest.TestCase):\n"
-                "    def test_ok(self):\n"
-                "        self.assertTrue(True)\n",
-                encoding="utf-8",
-            )
-        (tests_dir / "test_engine.py").write_text(
-            "import time\n"
-            "import unittest\n\n"
-            "class Slow(unittest.TestCase):\n"
-            "    def test_slow(self):\n"
-            "        time.sleep(2)\n",
-            encoding="utf-8",
-        )
-        subprocess.run(["git", "init", "-b", "main"], cwd=workspace, check=True, capture_output=True, text=True)
-        cli_script = self.base / "fake_codex.sh"
-        cli_script.write_text(
-            "#!/usr/bin/env bash\n"
-            "printf 'worker summary\\n'\n"
-            "printf 'value = 1\\n' > changed_module.py\n",
-            encoding="utf-8",
-        )
-        cli_script.chmod(0o755)
-        run_dir = self.base / "run-timeout"
-
-        env = {
-                "ACCRUVIA_RUN_DIR": str(run_dir),
-                "ACCRUVIA_PROJECT_WORKSPACE": str(workspace),
-                "ACCRUVIA_TASK_ID": self.task.id,
-                "ACCRUVIA_RUN_ID": self.run.id,
-                "ACCRUVIA_TASK_OBJECTIVE": self.task.objective,
-                "ACCRUVIA_RUN_SUMMARY": self.run.summary,
-                "ACCRUVIA_TASK_STRATEGY": "default",
-                "ACCRUVIA_WORKER_LLM_BACKEND": "codex",
-                "ACCRUVIA_LLM_CODEX_COMMAND": str(cli_script),
-                "ACCRUVIA_AGENT_TEST_TIMEOUT_SECONDS": "1",
-        }
-        worker_result = run_agent_worker(env)
-        self.assertEqual(0, worker_result)  # Worker returns candidate
-
-        # Validation runs separately and should timeout
-        val_result = run_validation(env)
-
-        report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
-        self.assertEqual(1, val_result)
-        self.assertEqual("failed", report["worker_outcome"])
-        self.assertEqual("validation_timeout", report["failure_category"])
-        self.assertTrue(report["test_check"]["timed_out"])
-        self.assertEqual(1, report["test_check"]["timeout_seconds"])
-        self.assertIn("terminated", (run_dir / "test_output.txt").read_text(encoding="utf-8"))
-        self.assertIn("changed_module.py", report["changed_files"])
-
-    def test_focused_test_command_uses_lightweight_suite_for_repair_mode(self) -> None:
-        self.assertEqual(
-            [sys.executable, "-m", "unittest", "-v", "tests.test_workers"],
-            _focused_test_command("lightweight_repair"),
-        )
-
-    def test_focused_test_command_uses_lightweight_suite_for_operator_mode(self) -> None:
-        self.assertEqual(
-            [sys.executable, "-m", "unittest", "-v", "tests.test_phase1"],
-            _focused_test_command("lightweight_operator"),
-        )
-
-    def test_focused_test_command_keeps_default_suite_for_default_mode(self) -> None:
-        self.assertEqual(
-            [
-                sys.executable,
-                "-m",
-                "unittest",
-                "-v",
-                "tests.test_engine",
-                "tests.test_store",
-                "tests.test_validation",
-                "tests.test_phase1",
-            ],
-            _focused_test_command("default_focused"),
-        )
-
-    def test_run_agent_worker_fails_fast_when_validation_never_starts(self) -> None:
-        workspace = self.base / "workspace-startup-timeout"
-        workspace.mkdir(parents=True)
-        subprocess.run(["git", "init", "-b", "main"], cwd=workspace, check=True, capture_output=True, text=True)
-        cli_script = self.base / "fake_codex_startup_timeout.sh"
-        cli_script.write_text(
-            "#!/usr/bin/env bash\n"
-            "printf 'worker summary\\n'\n"
-            "printf 'value = 1\\n' > changed_module.py\n",
-            encoding="utf-8",
-        )
-        cli_script.chmod(0o755)
-        run_dir = self.base / "run-startup-timeout"
-
-        env = {
-                    "ACCRUVIA_RUN_DIR": str(run_dir),
-                    "ACCRUVIA_PROJECT_WORKSPACE": str(workspace),
-                    "ACCRUVIA_TASK_ID": self.task.id,
-                    "ACCRUVIA_RUN_ID": self.run.id,
-                    "ACCRUVIA_TASK_OBJECTIVE": self.task.objective,
-                    "ACCRUVIA_RUN_SUMMARY": self.run.summary,
-                    "ACCRUVIA_TASK_STRATEGY": "operator_ergonomics",
-                    "ACCRUVIA_TASK_VALIDATION_MODE": "lightweight_operator",
-                    "ACCRUVIA_WORKER_LLM_BACKEND": "codex",
-                    "ACCRUVIA_LLM_CODEX_COMMAND": str(cli_script),
-                    "ACCRUVIA_TASK_VALIDATION_STARTUP_TIMEOUT_SECONDS": "1",
-                    "ACCRUVIA_AGENT_TEST_TIMEOUT_SECONDS": "5",
-        }
-        worker_result = run_agent_worker(env)
-        self.assertEqual(0, worker_result)  # Worker returns candidate
-
-        report_path = run_dir / "report.json"
-        report = json.loads(report_path.read_text(encoding="utf-8"))
-        report["test_files"] = []
-        report_path.write_text(json.dumps(report), encoding="utf-8")
-
-        with patch(
-            "accruvia_harness.agent_worker._focused_test_command",
-            return_value=["python3", "-c", "import time; time.sleep(2)"],
-        ):
-            val_result = run_validation(env)
-
-        report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
-        self.assertEqual(1, val_result)
-        self.assertEqual("validation_startup_timeout", report["failure_category"])
-        self.assertTrue(report["test_check"]["timed_out"])
-        self.assertEqual(1, report["test_check"]["startup_timeout_seconds"])
-        self.assertIn("startup ceiling", (run_dir / "test_output.txt").read_text(encoding="utf-8"))
-
-    def test_run_validation_fails_fast_on_workspace_contract_violation(self) -> None:
-        workspace = self.base / "workspace-contract-failure"
-        workspace.mkdir(parents=True)
-        run_dir = self.base / "run-workspace-contract"
-        run_dir.mkdir(parents=True)
-        report_path = run_dir / "report.json"
-        report_path.write_text(
-            json.dumps(
-                {
-                    "worker_outcome": "candidate",
-                    "changed_files": ["src/accruvia_harness/ui.py"],
-                    "effective_validation_mode": "default_focused",
-                }
-            ),
-            encoding="utf-8",
-        )
-
-        env = {
-            "ACCRUVIA_RUN_DIR": str(run_dir),
-            "ACCRUVIA_PROJECT_WORKSPACE": str(workspace),
-            "ACCRUVIA_TASK_ID": self.task.id,
-            "ACCRUVIA_RUN_ID": self.run.id,
-            "ACCRUVIA_TASK_VALIDATION_MODE": "default_focused",
-        }
-
-        result = run_validation(env)
-        report = json.loads(report_path.read_text(encoding="utf-8"))
-
-        self.assertEqual(1, result)
-        self.assertEqual("workspace_contract_failure", report["failure_category"])
-        self.assertTrue(report["infrastructure_failure"])
-        self.assertTrue(report["workspace_contract_failure"])
-        self.assertIn("missing expected python targets", report["failure_message"].lower())
-        self.assertIn("workspace contract failed", (run_dir / "compile_output.txt").read_text(encoding="utf-8").lower())
-
-    def test_run_validation_prefers_task_specific_test_files_for_operator_mode(self) -> None:
-        workspace = self.base / "workspace-specific-tests"
-        src_dir = workspace / "src" / "accruvia_harness"
-        tests_dir = workspace / "tests"
-        src_dir.mkdir(parents=True)
-        tests_dir.mkdir(parents=True)
-        (src_dir / "__init__.py").write_text("", encoding="utf-8")
-        (src_dir / "store.py").write_text("VALUE = 1\n", encoding="utf-8")
-        (tests_dir / "test_store.py").write_text(
-            "import unittest\n\n"
-            "from accruvia_harness import store\n\n"
-            "class StoreTests(unittest.TestCase):\n"
-            "    def test_value(self):\n"
-            "        self.assertEqual(1, store.VALUE)\n",
-            encoding="utf-8",
-        )
-        run_dir = self.base / "run-specific-tests"
-        run_dir.mkdir(parents=True)
-        report_path = run_dir / "report.json"
-        report_path.write_text(
-            json.dumps(
-                {
-                    "worker_outcome": "candidate",
-                    "changed_files": ["src/accruvia_harness/store.py", "tests/test_store.py"],
-                    "test_files": ["tests/test_store.py"],
-                    "effective_validation_mode": "lightweight_operator",
-                }
-            ),
-            encoding="utf-8",
-        )
-
-        env = {
-            "ACCRUVIA_RUN_DIR": str(run_dir),
-            "ACCRUVIA_PROJECT_WORKSPACE": str(workspace),
-            "ACCRUVIA_TASK_ID": self.task.id,
-            "ACCRUVIA_RUN_ID": self.run.id,
-            "ACCRUVIA_TASK_VALIDATION_MODE": "lightweight_operator",
-        }
-
-        result = run_validation(env)
-        report = json.loads(report_path.read_text(encoding="utf-8"))
-
-        self.assertEqual(0, result)
-        self.assertEqual("success", report["worker_outcome"])
-        self.assertEqual(
-            [sys.executable, "-m", "unittest", "-v", "tests.test_store"],
-            report["test_check"]["command"],
-        )
-
-    def test_run_validation_records_validation_failure_when_tests_error(self) -> None:
-        workspace = self.base / "workspace-validation-failure"
-        src_dir = workspace / "src" / "accruvia_harness"
-        tests_dir = workspace / "tests"
-        src_dir.mkdir(parents=True)
-        tests_dir.mkdir(parents=True)
-        (src_dir / "__init__.py").write_text("", encoding="utf-8")
-        (src_dir / "ui.py").write_text("VALUE = 1\n", encoding="utf-8")
-        (tests_dir / "test_ui.py").write_text(
-            "raise ModuleNotFoundError('fastapi')\n",
-            encoding="utf-8",
-        )
-        run_dir = self.base / "run-validation-failure"
-        run_dir.mkdir(parents=True)
-        report_path = run_dir / "report.json"
-        report_path.write_text(
-            json.dumps(
-                {
-                    "worker_outcome": "candidate",
-                    "changed_files": ["src/accruvia_harness/ui.py", "tests/test_ui.py"],
-                    "test_files": ["tests/test_ui.py"],
-                    "effective_validation_mode": "lightweight_operator",
-                }
-            ),
-            encoding="utf-8",
-        )
-
-        env = {
-            "ACCRUVIA_RUN_DIR": str(run_dir),
-            "ACCRUVIA_PROJECT_WORKSPACE": str(workspace),
-            "ACCRUVIA_TASK_ID": self.task.id,
-            "ACCRUVIA_RUN_ID": self.run.id,
-            "ACCRUVIA_TASK_VALIDATION_MODE": "lightweight_operator",
-        }
-
-        result = run_validation(env)
-        report = json.loads(report_path.read_text(encoding="utf-8"))
-
-        self.assertEqual(1, result)
-        self.assertEqual("validation_failure", report["failure_category"])
-        self.assertEqual("ERROR: test_ui (unittest.loader._FailedTest.test_ui)", report["failure_message"])
-        self.assertEqual([sys.executable, "-m", "unittest", "-v", "tests.test_ui"], report["evidence_reviewed"]["validation_command"])
-
-    def test_run_validation_refuses_candidate_with_no_changed_files(self) -> None:
-        workspace = self.base / "workspace-no-validation-changes"
-        workspace.mkdir(parents=True)
-        run_dir = self.base / "run-no-validation-changes"
-        run_dir.mkdir(parents=True)
-        report_path = run_dir / "report.json"
-        report_path.write_text(
-            json.dumps(
-                {
-                    "worker_outcome": "candidate",
-                    "changed_files": [],
-                    "effective_validation_mode": "default_focused",
-                    "suspected_tooling_misread": True,
-                }
-            ),
-            encoding="utf-8",
-        )
-
-        env = {
-            "ACCRUVIA_RUN_DIR": str(run_dir),
-            "ACCRUVIA_PROJECT_WORKSPACE": str(workspace),
-            "ACCRUVIA_TASK_ID": self.task.id,
-            "ACCRUVIA_RUN_ID": self.run.id,
-            "ACCRUVIA_TASK_VALIDATION_MODE": "default_focused",
-        }
-
-        result = run_validation(env)
-        report = json.loads(report_path.read_text(encoding="utf-8"))
-
-        self.assertEqual(1, result)
-        self.assertEqual("no_changes_produced", report["failure_category"])
-        self.assertTrue(report["suspected_tooling_misread"])
-        self.assertIn("no changed files", report["failure_message"])
-
-    def test_run_validation_adds_workspace_src_to_pythonpath(self) -> None:
-        workspace = self.base / "workspace-pythonpath"
-        src_dir = workspace / "src" / "accruvia_harness"
-        tests_dir = workspace / "tests"
-        src_dir.mkdir(parents=True)
-        tests_dir.mkdir(parents=True)
-        (src_dir / "__init__.py").write_text("", encoding="utf-8")
-        (src_dir / "context_service.py").write_text("VALUE = 7\n", encoding="utf-8")
-        (tests_dir / "test_context_service.py").write_text(
-            "import unittest\n\n"
-            "from accruvia_harness.context_service import VALUE\n\n"
-            "class ContextServiceTests(unittest.TestCase):\n"
-            "    def test_value(self):\n"
-            "        self.assertEqual(7, VALUE)\n",
-            encoding="utf-8",
-        )
-        run_dir = self.base / "run-pythonpath"
-        run_dir.mkdir(parents=True)
-        report_path = run_dir / "report.json"
-        report_path.write_text(
-            json.dumps(
-                {
-                    "worker_outcome": "candidate",
-                    "changed_files": [
-                        "src/accruvia_harness/context_service.py",
-                        "tests/test_context_service.py",
-                    ],
-                    "test_files": ["tests/test_context_service.py"],
-                    "effective_validation_mode": "lightweight_operator",
-                }
-            ),
-            encoding="utf-8",
-        )
-
-        env = {
-            "ACCRUVIA_RUN_DIR": str(run_dir),
-            "ACCRUVIA_PROJECT_WORKSPACE": str(workspace),
-            "ACCRUVIA_TASK_ID": self.task.id,
-            "ACCRUVIA_RUN_ID": self.run.id,
-            "ACCRUVIA_TASK_VALIDATION_MODE": "lightweight_operator",
-            "PYTHONPATH": "",
-        }
-
-        result = run_validation(env)
-        report = json.loads(report_path.read_text(encoding="utf-8"))
-
-        self.assertEqual(0, result)
-        self.assertTrue(report["compile_check"]["passed"])
-        self.assertTrue(report["test_check"]["passed"])
-
-    def test_atomicity_gate_blocks_self_referential_operator_change_before_validation(self) -> None:
-        workspace = self.base / "workspace-self-ref"
-        target = workspace / "src" / "accruvia_harness"
-        target.mkdir(parents=True)
-        (target / "agent_worker.py").write_text("VALUE = 1\n", encoding="utf-8")
-        subprocess.run(["git", "init", "-b", "main"], cwd=workspace, check=True, capture_output=True, text=True)
-        subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
-        subprocess.run(
-            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
-            cwd=workspace,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        cli_script = self.base / "fake_codex_self_ref.sh"
-        cli_script.write_text(
-            "#!/usr/bin/env bash\n"
-            "printf 'worker summary\\n'\n"
-            "printf 'VALUE = 2\\n' > src/accruvia_harness/agent_worker.py\n",
-            encoding="utf-8",
-        )
-        cli_script.chmod(0o755)
-        run_dir = self.base / "run-self-ref"
-
-        result = run_agent_worker(
-            {
-                "ACCRUVIA_RUN_DIR": str(run_dir),
-                "ACCRUVIA_PROJECT_WORKSPACE": str(workspace),
-                "ACCRUVIA_TASK_ID": self.task.id,
-                "ACCRUVIA_TASK_TITLE": "Operator validation self reference",
-                "ACCRUVIA_RUN_ID": self.run.id,
-                "ACCRUVIA_RUN_ATTEMPT": "1",
-                "ACCRUVIA_TASK_OBJECTIVE": self.task.objective,
-                "ACCRUVIA_RUN_SUMMARY": self.run.summary,
-                "ACCRUVIA_TASK_STRATEGY": "operator_ergonomics",
-                "ACCRUVIA_TASK_VALIDATION_MODE": "lightweight_operator",
-                "ACCRUVIA_WORKER_LLM_BACKEND": "codex",
-                "ACCRUVIA_LLM_CODEX_COMMAND": str(cli_script),
-            }
-        )
-
-        report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
-        self.assertEqual(1, result)
-        self.assertEqual("blocked", report["worker_outcome"])
-        self.assertEqual("policy_self_modification", report["failure_category"])
-        self.assertEqual("block_self_referential", report["atomicity_gate"]["action"])
-        self.assertTrue((run_dir / "atomicity_telemetry.json").exists())
-        self.assertFalse((run_dir / "test_output.txt").exists())
-
-    def test_high_atomicity_score_does_not_hard_block(self) -> None:
-        """Per Mermaid spec: only block_self_referential hard-blocks.
-        High scores from wide diffs should produce a candidate, not block."""
-        workspace = self.base / "workspace-wide-diff"
-        src = workspace / "src" / "accruvia_harness"
-        persistence = src / "persistence"
-        tests_dir = workspace / "tests"
-        persistence.mkdir(parents=True)
-        tests_dir.mkdir(parents=True)
-        # Create many files so the diff is wide (high score) but NOT self-referential.
-        (src / "domain.py").write_text("VALUE = 1\n", encoding="utf-8")
-        (src / "migrations.py").write_text("VALUE = 1\n", encoding="utf-8")
-        (persistence / "common.py").write_text("VALUE = 1\n", encoding="utf-8")
-        (persistence / "project_task.py").write_text("VALUE = 1\n", encoding="utf-8")
-        (tests_dir / "test_store.py").write_text(
-            "import unittest\n\nclass Smoke(unittest.TestCase):\n    def test_ok(self):\n        self.assertTrue(True)\n",
-            encoding="utf-8",
-        )
-        subprocess.run(["git", "init", "-b", "main"], cwd=workspace, check=True, capture_output=True, text=True)
-        subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
-        subprocess.run(
-            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
-            cwd=workspace, check=True, capture_output=True, text=True,
-        )
-        # Script modifies all 5 files (wide diff, high score, but not self-referential)
-        cli_script = self.base / "fake_codex_wide.sh"
-        cli_script.write_text(
-            "#!/usr/bin/env bash\n"
-            "printf 'worker summary\\n'\n"
-            "printf 'VALUE = 2\\n' > src/accruvia_harness/domain.py\n"
-            "printf 'VALUE = 2\\n' > src/accruvia_harness/migrations.py\n"
-            "printf 'VALUE = 2\\n' > src/accruvia_harness/persistence/common.py\n"
-            "printf 'VALUE = 2\\n' > src/accruvia_harness/persistence/project_task.py\n"
-            "printf 'VALUE = 2\\n' > tests/test_store.py\n",
-            encoding="utf-8",
-        )
-        cli_script.chmod(0o755)
-        run_dir = self.base / "run-wide-diff"
-
-        result = run_agent_worker(
-            {
-                "ACCRUVIA_RUN_DIR": str(run_dir),
-                "ACCRUVIA_PROJECT_WORKSPACE": str(workspace),
-                "ACCRUVIA_TASK_ID": self.task.id,
-                "ACCRUVIA_TASK_TITLE": "Add CRUD methods for WIP plans",
-                "ACCRUVIA_RUN_ID": self.run.id,
-                "ACCRUVIA_RUN_ATTEMPT": "2",
-                "ACCRUVIA_TASK_OBJECTIVE": "Add CRUD methods for WIP plans to the store",
-                "ACCRUVIA_RUN_SUMMARY": self.run.summary,
-                "ACCRUVIA_TASK_STRATEGY": "atomic_from_mermaid",
-                "ACCRUVIA_TASK_VALIDATION_MODE": "lightweight_operator",
-                "ACCRUVIA_WORKER_LLM_BACKEND": "codex",
-                "ACCRUVIA_LLM_CODEX_COMMAND": str(cli_script),
-            }
-        )
-
-        report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
-        # Should NOT block — should return candidate for validation
-        self.assertEqual(0, result)
-        self.assertEqual("candidate", report["worker_outcome"])
-        self.assertNotEqual("block_self_referential", report["atomicity_gate"]["action"])
-
-    def test_atomicity_gate_narrows_default_validation_for_operator_surface(self) -> None:
-        workspace = self.base / "workspace-narrow"
-        src = workspace / "src" / "accruvia_harness" / "commands"
-        tests_dir = workspace / "tests"
-        src.mkdir(parents=True)
-        tests_dir.mkdir(parents=True)
-        (src / "core.py").write_text("VALUE = 1\n", encoding="utf-8")
-        (tests_dir / "test_cli.py").write_text(
-            "import unittest\n\nclass Smoke(unittest.TestCase):\n    def test_ok(self):\n        self.assertTrue(True)\n",
-            encoding="utf-8",
-        )
-        (tests_dir / "test_phase1.py").write_text(
-            "import unittest\n\nclass Smoke(unittest.TestCase):\n    def test_ok(self):\n        self.assertTrue(True)\n",
-            encoding="utf-8",
-        )
-        subprocess.run(["git", "init", "-b", "main"], cwd=workspace, check=True, capture_output=True, text=True)
-        subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True, text=True)
-        subprocess.run(
-            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
-            cwd=workspace,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        cli_script = self.base / "fake_codex_narrow.sh"
-        cli_script.write_text(
-            "#!/usr/bin/env bash\n"
-            "printf 'worker summary\\n'\n"
-            "printf 'VALUE = 2\\n' > src/accruvia_harness/commands/core.py\n",
-            encoding="utf-8",
-        )
-        cli_script.chmod(0o755)
-        run_dir = self.base / "run-narrow"
-
-        result = run_agent_worker(
-            {
-                "ACCRUVIA_RUN_DIR": str(run_dir),
-                "ACCRUVIA_PROJECT_WORKSPACE": str(workspace),
-                "ACCRUVIA_TASK_ID": self.task.id,
-                "ACCRUVIA_TASK_TITLE": "Operator startup wording",
-                "ACCRUVIA_RUN_ID": self.run.id,
-                "ACCRUVIA_RUN_ATTEMPT": "2",
-                "ACCRUVIA_TASK_OBJECTIVE": "Adjust supervise startup wording for operators",
-                "ACCRUVIA_RUN_SUMMARY": "Previous validation timed out.",
-                "ACCRUVIA_TASK_STRATEGY": "operator_ergonomics",
-                "ACCRUVIA_TASK_VALIDATION_MODE": "default_focused",
-                "ACCRUVIA_WORKER_LLM_BACKEND": "codex",
-                "ACCRUVIA_LLM_CODEX_COMMAND": str(cli_script),
-            }
-        )
-
-        report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
-        self.assertEqual(0, result)
-        # Single CLI file change scores 1 — validate_normal with default mode.
-        self.assertEqual("validate_normal", report["atomicity_gate"]["action"])
-
-    def test_build_worker_from_config_defaults_agent_worker_command(self) -> None:
-        config = HarnessConfig(
-            db_path=self.base / "harness.db",
-            workspace_root=self.base,
-            log_path=self.base / "harness.log",
-            default_project_name="demo",
-            default_repo="accruvia/accruvia",
-            runtime_backend="local",
-            temporal_target="localhost:7233",
-            temporal_namespace="default",
-            temporal_task_queue="accruvia-harness",
-            worker_backend="agent",
-            worker_command=None,
-            llm_backend="codex",
-            llm_model=None,
-            llm_command=None,
-            llm_codex_command="codex exec",
-            llm_claude_command=None,
-            llm_accruvia_client_command=None,
-        )
-
-        worker = build_worker_from_config(config)
-
-        self.assertIsInstance(worker, AgentCommandWorker)
-        self.assertEqual(_default_agent_worker_command(), worker.command)
+class LLMRouterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.base = Path(self.temp_dir.name)
 
     def test_build_llm_router_uses_higher_memory_floor_for_llm_clis(self) -> None:
-        config = HarnessConfig(
-            db_path=self.base / "harness.db",
-            workspace_root=self.base,
-            log_path=self.base / "harness.log",
-            default_project_name="demo",
-            default_repo="accruvia/accruvia",
-            runtime_backend="local",
-            temporal_target="localhost:7233",
-            temporal_namespace="default",
-            temporal_task_queue="accruvia-harness",
-            worker_backend="llm",
-            worker_command=None,
+        config = _minimal_config(
+            self.base,
             llm_backend="codex",
-            llm_model=None,
-            llm_command=None,
             llm_codex_command="printf 'ok' > \"$ACCRUVIA_LLM_RESPONSE_PATH\"",
-            llm_claude_command=None,
-            llm_accruvia_client_command=None,
             memory_limit_mb=1024,
         )
 
@@ -1290,33 +225,6 @@ class WorkerTests(unittest.TestCase):
 
         self.assertIsNone(executor.resource_policy.memory_limit_mb)
 
-    def test_agent_worker_uses_same_higher_memory_floor_for_llm_clis(self) -> None:
-        config = HarnessConfig(
-            db_path=self.base / "harness.db",
-            workspace_root=self.base,
-            log_path=self.base / "harness.log",
-            default_project_name="demo",
-            default_repo="accruvia/accruvia",
-            runtime_backend="local",
-            temporal_target="localhost:7233",
-            temporal_namespace="default",
-            temporal_task_queue="accruvia-harness",
-            worker_backend="agent",
-            worker_command="printf ok",
-            llm_backend="codex",
-            llm_model=None,
-            llm_command=None,
-            llm_codex_command="codex exec",
-            llm_claude_command=None,
-            llm_accruvia_client_command=None,
-            memory_limit_mb=1024,
-        )
-
-        worker = build_worker_from_config(config)
-
-        self.assertIsInstance(worker, AgentCommandWorker)
-        self.assertIsNone(worker.resource_policy.memory_limit_mb)
-
     def test_resolve_memory_limit_disables_cap_when_large_heap_floor_exceeds_machine_budget(self) -> None:
         with patch("accruvia_harness.resource_limits._total_memory_mb", return_value=3072):
             memory_limit_mb = resolve_memory_limit_mb(1024, backend_names=("codex",))
@@ -1324,23 +232,10 @@ class WorkerTests(unittest.TestCase):
         self.assertIsNone(memory_limit_mb)
 
     def test_llm_router_prefers_accruvia_client_in_github_actions(self) -> None:
-        config = HarnessConfig(
-            db_path=self.base / "harness.db",
-            workspace_root=self.base,
-            log_path=self.base / "harness.log",
-            default_project_name="demo",
-            default_repo="accruvia/accruvia",
-            runtime_backend="local",
-            temporal_target="localhost:7233",
-            temporal_namespace="default",
-            temporal_task_queue="accruvia-harness",
-            worker_backend="llm",
-            worker_command=None,
+        config = _minimal_config(
+            self.base,
             llm_backend="auto",
-            llm_model=None,
-            llm_command=None,
             llm_codex_command="printf 'codex response' > \"$ACCRUVIA_LLM_RESPONSE_PATH\"",
-            llm_claude_command=None,
             llm_accruvia_client_command="printf 'accruvia response' > \"$ACCRUVIA_LLM_RESPONSE_PATH\"",
         )
 
@@ -1350,96 +245,8 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual("accruvia_client", backend)
         self.assertEqual("accruvia_client", executor.backend_name)
 
-    def test_llm_worker_ignores_non_numeric_metadata_values(self) -> None:
-        config = HarnessConfig(
-            db_path=self.base / "harness.db",
-            workspace_root=self.base,
-            log_path=self.base / "harness.log",
-            default_project_name="demo",
-            default_repo="accruvia/accruvia",
-            runtime_backend="local",
-            temporal_target="localhost:7233",
-            temporal_namespace="default",
-            temporal_task_queue="accruvia-harness",
-            worker_backend="llm",
-            worker_command=None,
-            llm_backend="codex",
-            llm_model="gpt-5.4-codex",
-            llm_command=None,
-            llm_codex_command="printf 'codex response' > \"$ACCRUVIA_LLM_RESPONSE_PATH\"; printf '{\"cost_usd\": \"error\", \"prompt_tokens\": \"oops\"}' > \"$ACCRUVIA_LLM_METADATA_PATH\"",
-            llm_claude_command=None,
-            llm_accruvia_client_command=None,
-        )
 
-        telemetry = TelemetrySink(self.base / "telemetry")
-        worker = build_worker_from_config(config, telemetry=telemetry)
-        result = worker.work(self.task, self.run, self.base)
-
-        self.assertEqual("success", result.outcome)
-        summary = telemetry.summary()
-        self.assertEqual(0.0, summary["cost_totals"]["cost_usd"])
-
-    def test_llm_worker_falls_back_to_next_backend_when_primary_fails(self) -> None:
-        config = HarnessConfig(
-            db_path=self.base / "harness.db",
-            workspace_root=self.base,
-            log_path=self.base / "harness.log",
-            default_project_name="demo",
-            default_repo="accruvia/accruvia",
-            runtime_backend="local",
-            temporal_target="localhost:7233",
-            temporal_namespace="default",
-            temporal_task_queue="accruvia-harness",
-            worker_backend="llm",
-            worker_command=None,
-            llm_backend="claude",
-            llm_model="sonnet",
-            llm_command=None,
-            llm_codex_command="printf 'codex response' > \"$ACCRUVIA_LLM_RESPONSE_PATH\"",
-            llm_claude_command="printf 'auth outage' >&2; exit 9",
-            llm_accruvia_client_command=None,
-        )
-
-        telemetry = TelemetrySink(self.base / "telemetry")
-        worker = build_worker_from_config(config, telemetry=telemetry)
-        result = worker.work(self.task, self.run, self.base)
-
-        self.assertEqual("success", result.outcome)
-        self.assertEqual("codex", result.diagnostics["llm_backend"])
-        summary = telemetry.summary()
-        self.assertTrue(any(item["category"] == "llm_executor_failure" for item in summary["warnings"]))
-
-    def test_llm_worker_timeout_handles_bytes_stderr_cleanly(self) -> None:
-        config = HarnessConfig(
-            db_path=self.base / "harness.db",
-            workspace_root=self.base,
-            log_path=self.base / "harness.log",
-            default_project_name="demo",
-            default_repo="accruvia/accruvia",
-            runtime_backend="local",
-            temporal_target="localhost:7233",
-            temporal_namespace="default",
-            temporal_task_queue="accruvia-harness",
-            worker_backend="llm",
-            worker_command=None,
-            llm_backend="codex",
-            llm_model="gpt-5.4-codex",
-            llm_command=None,
-            llm_codex_command="python3 - <<'PY'\nimport sys, time\nsys.stderr.buffer.write(b'partial stderr')\ntime.sleep(2)\nPY",
-            llm_claude_command=None,
-            llm_accruvia_client_command=None,
-            timeout_min_seconds=1,
-            timeout_max_seconds=1,
-            timeout_multiplier=1.0,
-        )
-
-        worker = build_worker_from_config(config, telemetry=TelemetrySink(self.base / "telemetry"))
-        result = worker.work(self.task, self.run, self.base)
-
-        self.assertEqual("blocked", result.outcome)
-        error_path = self.base / "runs" / self.run.id / "llm_error.txt"
-        self.assertTrue(error_path.exists())
-
+class AffirmationParserTests(unittest.TestCase):
     def test_parse_affirmation_response_handles_loose_rejection_text(self) -> None:
         approved, rationale = parse_affirmation_response("I would reject this candidate.\nIt is not ready to promote.")
         self.assertFalse(approved)
@@ -1459,6 +266,8 @@ class WorkerTests(unittest.TestCase):
         self.assertFalse(approved)
         self.assertIn("failing tests", rationale)
 
+
+class SubprocessEnvTests(unittest.TestCase):
     def test_build_subprocess_env_sanitizes_ambient_variables(self) -> None:
         with patch.dict(
             os.environ,
@@ -1478,61 +287,12 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual("ok", env["KEEP_ME"])
         self.assertEqual("task_1", env["ACCRUVIA_TASK_ID"])
 
-    # --- Fix 1: Claude CLI non-interactive flags ---
 
-    def test_ensure_claude_noninteractive_flags_adds_missing(self) -> None:
-        result = _ensure_claude_noninteractive_flags("claude")
-        tokens = result.split()
-        self.assertIn("-p", tokens)
-        self.assertIn("--dangerously-skip-permissions", tokens)
-
-    def test_ensure_claude_noninteractive_flags_preserves_existing(self) -> None:
-        result = _ensure_claude_noninteractive_flags("claude -p --dangerously-skip-permissions")
-        tokens = result.split()
-        self.assertEqual(1, tokens.count("-p"))
-        self.assertEqual(1, tokens.count("--dangerously-skip-permissions"))
-
-    def test_ensure_claude_noninteractive_flags_recognizes_print_alias(self) -> None:
-        result = _ensure_claude_noninteractive_flags("claude --print")
-        tokens = result.split()
-        self.assertIn("--print", tokens)
-        self.assertNotIn("-p", tokens)
-        self.assertIn("--dangerously-skip-permissions", tokens)
-
-    def test_select_worker_llm_chain_adds_flags_to_claude_backend(self) -> None:
-        chain = select_worker_llm_chain(
-            {
-                "ACCRUVIA_LLM_CODEX_COMMAND": "codex exec",
-                "ACCRUVIA_LLM_CLAUDE_COMMAND": "claude",
-            }
-        )
-        claude_entries = [(b, c) for b, c in chain if b == "claude"]
-        codex_entries = [(b, c) for b, c in chain if b == "codex"]
-        self.assertTrue(claude_entries)
-        self.assertIn("-p", claude_entries[0][1].split())
-        self.assertIn("--dangerously-skip-permissions", claude_entries[0][1].split())
-        self.assertTrue(codex_entries)
-        self.assertNotIn("-p", codex_entries[0][1].split())
-
-    # --- Fix 2: Kill process tree on timeout ---
-
-    def test_kill_process_tree_terminates_shell_children(self) -> None:
-        process = subprocess.Popen(
-            "sleep 3600",
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
-        )
-        pgid = os.getpgid(process.pid)
-        _kill_process_tree(process)
-        # The process group should be dead
-        import time
-        time.sleep(0.1)
-        with self.assertRaises(ProcessLookupError):
-            os.killpg(pgid, 0)
-
-    # --- Fix 3: Detect committed changes in changed_files() ---
+class ChangedFilesTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.base = Path(self.temp_dir.name)
 
     def test_changed_files_detects_committed_changes(self) -> None:
         workspace = self.base / "workspace-committed"
@@ -1553,3 +313,45 @@ class WorkerTests(unittest.TestCase):
         )
         files = changed_files(workspace)
         self.assertIn("committed_file.txt", files)
+
+
+class AgentBackendRemovalAsserts(unittest.TestCase):
+    def test_agent_worker_module_is_gone(self):
+        with self.assertRaises(ModuleNotFoundError):
+            import accruvia_harness.agent_worker  # noqa: F401
+
+    def test_agent_command_worker_class_is_gone(self):
+        from accruvia_harness import workers
+        self.assertFalse(hasattr(workers, "AgentCommandWorker"))
+
+    def test_shell_command_worker_class_is_gone(self):
+        from accruvia_harness import workers
+        self.assertFalse(hasattr(workers, "ShellCommandWorker"))
+
+    def test_llm_task_worker_class_is_gone(self):
+        from accruvia_harness import workers
+        self.assertFalse(hasattr(workers, "LLMTaskWorker"))
+
+    def test_command_worker_base_is_gone(self):
+        from accruvia_harness import workers
+        self.assertFalse(hasattr(workers, "CommandWorker"))
+
+    def test_codex_worker_script_is_gone(self):
+        self.assertFalse(Path("bin/accruvia-codex-worker").exists())
+
+    def test_config_rejects_worker_backend_field(self):
+        import tempfile as _tempfile
+        import os as _os
+        from accruvia_harness.config import load_persisted_config
+        with _tempfile.NamedTemporaryFile(suffix=".json", mode="w", delete=False) as f:
+            json.dump({"worker_backend": "agent"}, f)
+            path = f.name
+        try:
+            with self.assertRaisesRegex(ValueError, "removed in pre-alpha"):
+                load_persisted_config(path)
+        finally:
+            _os.unlink(path)
+
+
+if __name__ == "__main__":
+    unittest.main()

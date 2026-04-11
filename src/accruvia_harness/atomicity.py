@@ -8,16 +8,16 @@ from pathlib import Path
 
 
 CONTROL_PLANE_FILES = {
-    "src/accruvia_harness/agent_worker.py",
     "src/accruvia_harness/workers.py",
+    "src/accruvia_harness/skills_worker.py",
     "src/accruvia_harness/policy.py",
     "src/accruvia_harness/config.py",
 }
 VALIDATION_POLICY_FILES = {
-    "src/accruvia_harness/agent_worker.py",
     "src/accruvia_harness/services/task_service.py",
     "src/accruvia_harness/services/cognition_service.py",
     "src/accruvia_harness/workers.py",
+    "src/accruvia_harness/skills_worker.py",
     "src/accruvia_harness/config.py",
 }
 

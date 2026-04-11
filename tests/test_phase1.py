@@ -165,15 +165,15 @@ class Phase1Tests(unittest.TestCase):
 
     def test_timeout_policy_tightens_after_repeated_timeout_failures(self) -> None:
         telemetry = TelemetrySink(self.base / "telemetry")
-        telemetry.span("work", duration_ms=100000, validation_profile="generic", worker_backend="agent")
-        telemetry.span("work", duration_ms=120000, validation_profile="generic", worker_backend="agent")
-        telemetry.warn("validation_timeout", "timed out", validation_profile="generic", worker_backend="agent")
-        telemetry.warn("validation_timeout", "timed out", validation_profile="generic", worker_backend="agent")
-        telemetry.warn("validation_timeout", "timed out", validation_profile="generic", worker_backend="agent")
+        telemetry.span("work", duration_ms=100000, validation_profile="generic", worker_backend="skills")
+        telemetry.span("work", duration_ms=120000, validation_profile="generic", worker_backend="skills")
+        telemetry.warn("validation_timeout", "timed out", validation_profile="generic", worker_backend="skills")
+        telemetry.warn("validation_timeout", "timed out", validation_profile="generic", worker_backend="skills")
+        telemetry.warn("validation_timeout", "timed out", validation_profile="generic", worker_backend="skills")
 
         policy = ExecutionTimeoutPolicy(telemetry, min_seconds=30, max_seconds=1200, multiplier=2.5)
 
-        self.assertEqual(policy.timeout_seconds("generic", "agent"), 1200)
+        self.assertEqual(policy.timeout_seconds("generic", "skills"), 1200)
 
     def test_config_reads_telemetry_fsync_flag(self) -> None:
         with mock.patch.dict(

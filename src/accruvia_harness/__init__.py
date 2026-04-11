@@ -11,7 +11,7 @@ from .policy import DefaultAnalyzer, DefaultDecider, DefaultPlanner
 from .runtime import LocalWorkflowRuntime, TemporalWorkflowRuntime, build_runtime
 from .store import SQLiteHarnessStore
 from .temporal_backend import run_temporal_worker_sync, temporal_support_available
-from .workers import LLMTaskWorker, LocalArtifactWorker, ShellCommandWorker, build_worker, build_worker_from_config
+from .workers import LocalArtifactWorker, build_worker_from_config
 
 __all__ = [
     "DefaultAnalyzer",
@@ -24,16 +24,13 @@ __all__ = [
     "HarnessLogger",
     "HarnessQueryService",
     "LLMRouter",
-    "LLMTaskWorker",
     "LocalWorkflowRuntime",
     "LocalArtifactWorker",
     "CommandLLMExecutor",
-    "ShellCommandWorker",
     "SQLiteHarnessStore",
     "TemporalWorkflowRuntime",
     "build_llm_router",
     "build_runtime",
-    "build_worker",
     "build_worker_from_config",
     "run_temporal_worker_sync",
     "temporal_support_available",

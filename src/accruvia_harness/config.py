@@ -19,8 +19,6 @@ PERSISTED_CONFIG_KEYS = frozenset(
         "temporal_target",
         "temporal_namespace",
         "temporal_task_queue",
-        "worker_backend",
-        "worker_command",
         "llm_backend",
         "llm_model",
         "llm_command",
@@ -109,6 +107,12 @@ def load_persisted_config(path: str | Path) -> dict[str, object]:
     if not isinstance(payload, dict):
         logger.warning("Persisted config at %s is not a JSON object; ignoring it", config_path)
         return {}
+    if "worker_backend" in payload or "worker_command" in payload:
+        raise ValueError(
+            "Config field worker_backend/worker_command was removed in pre-alpha. "
+            "Skills is the only worker backend. Remove these keys from "
+            f"{config_path} to continue."
+        )
     return {key: value for key, value in payload.items() if key in PERSISTED_CONFIG_KEYS}
 
 
@@ -131,8 +135,6 @@ class HarnessConfig:
     temporal_target: str
     temporal_namespace: str
     temporal_task_queue: str
-    worker_backend: str
-    worker_command: str | None
     llm_backend: str
     llm_model: str | None
     llm_command: str | None
@@ -203,8 +205,6 @@ class HarnessConfig:
             temporal_target=str(payload["temporal_target"]),
             temporal_namespace=str(payload["temporal_namespace"]),
             temporal_task_queue=str(payload["temporal_task_queue"]),
-            worker_backend=str(payload["worker_backend"]),
-            worker_command=(str(payload["worker_command"]) if payload["worker_command"] is not None else None),
             llm_backend=str(payload["llm_backend"]),
             llm_model=(str(payload["llm_model"]) if payload["llm_model"] is not None else None),
             llm_command=(str(payload["llm_command"]) if payload["llm_command"] is not None else None),
@@ -301,8 +301,6 @@ class HarnessConfig:
             temporal_target="localhost:7233",
             temporal_namespace="default",
             temporal_task_queue="accruvia-harness",
-            worker_backend="skills",
-            worker_command=None,
             llm_backend="auto",
             llm_model=None,
             llm_command=None,
@@ -326,8 +324,6 @@ class HarnessConfig:
                 "temporal_target": os.environ.get("ACCRUVIA_TEMPORAL_TARGET", str(payload.get("temporal_target", "localhost:7233"))),
                 "temporal_namespace": os.environ.get("ACCRUVIA_TEMPORAL_NAMESPACE", str(payload.get("temporal_namespace", "default"))),
                 "temporal_task_queue": os.environ.get("ACCRUVIA_TEMPORAL_TASK_QUEUE", str(payload.get("temporal_task_queue", "accruvia-harness"))),
-                "worker_backend": os.environ.get("ACCRUVIA_WORKER_BACKEND", str(payload.get("worker_backend", "skills"))),
-                "worker_command": os.environ.get("ACCRUVIA_WORKER_COMMAND", payload.get("worker_command")),
                 "llm_backend": os.environ.get("ACCRUVIA_LLM_BACKEND", str(payload.get("llm_backend", "auto"))),
                 "llm_model": os.environ.get("ACCRUVIA_LLM_MODEL", payload.get("llm_model")),
                 "llm_command": os.environ.get("ACCRUVIA_LLM_COMMAND", payload.get("llm_command")),
