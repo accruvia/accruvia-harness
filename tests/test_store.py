@@ -613,6 +613,14 @@ class SQLiteHarnessStoreTests(unittest.TestCase):
 
         self.assertEqual(EvaluationVerdict.ACCEPTABLE, loaded.verdict)
 
+    def test_validation_queue_table_exists_after_init(self) -> None:
+        with self.store.connect() as connection:
+            row = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='validation_queue'"
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual("validation_queue", row["name"])
+
     def test_corrupt_task_json_falls_back_instead_of_crashing(self) -> None:
         project = Project(id=new_id("project"), name="corrupt", description="Corrupt")
         self.store.create_project(project)
