@@ -74,7 +74,6 @@ test-e2e:
 	$(MAKE) verify-test-import-safety
 	PYTHONPATH=$(PYTHONPATH_VALUE) $(PYTHON) -m unittest \
 		tests.test_cli \
-		tests.test_llm_e2e \
 		tests.test_temporal_e2e -v
 
 test-temporal: install-temporal temporal-up

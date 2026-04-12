@@ -159,7 +159,7 @@ class TemporalSkillsPipelineTests(unittest.TestCase):
             temporal_namespace="default",
             temporal_task_queue=self.task_queue,
             llm_backend="command",
-            llm_model=None,
+
             llm_command="echo '{}'",
             llm_codex_command=None,
             llm_claude_command=None,

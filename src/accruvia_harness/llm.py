@@ -461,7 +461,6 @@ class LLMRouter:
                             category,
                             error_str,
                             backend=backend,
-                            worker_backend=backend,
                             validation_profile=invocation.task.validation_profile,
                             task_id=invocation.task.id,
                             run_id=invocation.run.id,

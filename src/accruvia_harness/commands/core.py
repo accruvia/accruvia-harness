@@ -874,7 +874,6 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
             "temporal_namespace": config.temporal_namespace,
             "temporal_task_queue": config.temporal_task_queue,
             "llm_backend": config.llm_backend,
-            "llm_model": config.llm_model,
             "llm_command": _redact_command(config.llm_command),
             "llm_codex_command": _redact_command(config.llm_codex_command),
             "llm_claude_command": _redact_command(config.llm_claude_command),
@@ -949,8 +948,6 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
         updates: dict[str, object] = {}
         if args.backend:
             updates["llm_backend"] = args.backend
-        if args.model is not None:
-            updates["llm_model"] = args.model
         if args.llm_command_value is not None:
             updates["llm_command"] = args.llm_command_value
         if args.llm_codex_command_value is not None:

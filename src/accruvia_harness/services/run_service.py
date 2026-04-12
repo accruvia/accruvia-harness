@@ -525,7 +525,6 @@ class RunService:
                     task_id=task.id,
                     run_id=run.id,
                     validation_profile=task.validation_profile,
-                    worker_backend="unknown",
                 )
         if self.telemetry is not None:
             with self.telemetry.timed(

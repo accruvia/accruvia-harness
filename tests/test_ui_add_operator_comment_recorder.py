@@ -108,7 +108,7 @@ class TestAddOperatorCommentRecorder(unittest.TestCase):
                     "worker_backend": "process",
                     "worker_command": None,
                     "llm_backend": "codex",
-                    "llm_model": None,
+
                     "llm_command": None,
                     "llm_codex_command": None,
                     "llm_claude_command": None,

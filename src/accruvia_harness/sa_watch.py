@@ -653,6 +653,12 @@ class SAWatchService:
         if repair_result.status == "validated" and movement_restored:
             final_run_status = RunStatus.COMPLETED
             final_task_status = TaskStatus.COMPLETED
+        elif repair_result.status == "delegated":
+            # Task was re-queued as PENDING for the skills pipeline.
+            # Mark the run as completed (this SA-watch cycle is done)
+            # but leave the task pending so the harness picks it up.
+            final_run_status = RunStatus.COMPLETED
+            final_task_status = None  # do not overwrite — already PENDING
         elif repair_result.status == "blocked":
             final_run_status = RunStatus.BLOCKED
             final_task_status = TaskStatus.FAILED
@@ -671,7 +677,8 @@ class SAWatchService:
                 updated_at=datetime.now(UTC),
             )
         )
-        self.store.update_task_status(repair_task.id, final_task_status)
+        if final_task_status is not None:
+            self.store.update_task_status(repair_task.id, final_task_status)
         self.store.create_event(
             Event(
                 id=new_id("event"),
@@ -1451,10 +1458,9 @@ class SAWatchService:
         }
 
     def _run_direct_repair(self, repair_task: Task, repair_run: Run, repo_root: Path) -> SAWatchRepairResult:
-        """Direct-repair path was backed by the agent worker, which was removed
-        in the pre-alpha skills-only cutover. SA-watch repairs now block and
-        surface a failure so the operator can rework them through the normal
-        skills pipeline."""
+        """Delegate repair to the normal skills pipeline instead of running it
+        inline. Marks the repair_task as PENDING so that SkillsWorker picks it
+        up through the standard harness task queue."""
         run_dir = self.workspace_root / "control" / "sa_watch_repairs" / repair_run.id
         run_dir.mkdir(parents=True, exist_ok=True)
         if self.structural_progress_callback is not None:
@@ -1466,12 +1472,13 @@ class SAWatchService:
                     "attempt": repair_run.attempt,
                 }
             )
+        self.store.update_task_status(repair_task.id, TaskStatus.PENDING)
         summary = (
-            "sa_watch direct repair is unavailable: the agent worker backend "
-            "was removed in pre-alpha. Route this repair through the skills pipeline."
+            "sa_watch direct repair delegated to skills pipeline. "
+            "Task re-queued as PENDING for SkillsWorker to process."
         )
         return SAWatchRepairResult(
-            status="blocked",
+            status="delegated",
             run_id=repair_run.id,
             run_dir=run_dir,
             summary=summary,
@@ -1482,10 +1489,8 @@ class SAWatchService:
                 "validation_elapsed_seconds": None,
             },
             diagnostics={
-                "worker_outcome": "blocked",
-                "blocked": True,
-                "failure_category": "agent_backend_removed",
-                "failure_message": summary,
+                "worker_outcome": "delegated",
+                "delegated_to": "skills_pipeline",
             },
             stdout_summary=None,
         )

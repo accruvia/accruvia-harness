@@ -46,7 +46,7 @@ class RuntimeTests(unittest.TestCase):
             temporal_namespace="default",
             temporal_task_queue="accruvia-harness",
             llm_backend="auto",
-            llm_model=None,
+
             llm_command=None,
             llm_codex_command=None,
             llm_claude_command=None,

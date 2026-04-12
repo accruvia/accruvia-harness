@@ -1223,15 +1223,16 @@ class HarnessEngineTests(unittest.TestCase):
         self.assertEqual("gitlab_issue", task_events[0].payload["external_ref_type"])
         self.assertEqual("458", task_events[0].payload["external_ref_id"])
         # The auto-merge gate fires on PROMOTE decisions for any backend.
-        # The default LocalArtifactWorker doesn't write `ship_ready` to its
-        # report, so the gate blocks and emits `auto_merge_blocked`.
+        # LocalArtifactWorker reports ship_ready=True so the policy check
+        # passes, but the merge itself fails (branch doesn't exist in the
+        # test workspace), emitting auto_merge_failed.
         self.assertEqual(
             [
                 "run_created",
                 "project_workspace_prepared",
                 "planned",
                 "worker_completed",
-                "auto_merge_blocked",
+                "auto_merge_failed",
             ],
             [event.event_type for event in run_events],
         )
@@ -1973,7 +1974,7 @@ class HarnessEngineTests(unittest.TestCase):
             temporal_namespace="default",
             temporal_task_queue="accruvia-harness",
             llm_backend="command",
-            llm_model=None,
+
             llm_command=f'bash "{Path(__file__).resolve().parent / "fixtures" / "fake_affirm_approve.sh"}"',
             llm_codex_command=None,
             llm_claude_command=None,
@@ -2960,7 +2961,7 @@ class HarnessEngineTests(unittest.TestCase):
             temporal_namespace="default",
             temporal_task_queue="accruvia-harness",
             llm_backend="command",
-            llm_model=None,
+
             llm_command=f'bash "{Path(__file__).resolve().parent / "fixtures" / "fake_affirm_reject.sh"}"',
             llm_codex_command=None,
             llm_claude_command=None,

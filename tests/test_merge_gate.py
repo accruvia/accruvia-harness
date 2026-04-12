@@ -217,6 +217,7 @@ class ExecuteMergeTests(unittest.TestCase):
         subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "init"], check=True)
 
     def test_merge_happy_path(self):
+        from unittest.mock import patch, MagicMock
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._init_repo(root)
@@ -225,7 +226,19 @@ class ExecuteMergeTests(unittest.TestCase):
             subprocess.run(["git", "-C", str(root), "add", "b.txt"], check=True)
             subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "feat"], check=True)
             subprocess.run(["git", "-C", str(root), "checkout", "-q", "main"], check=True)
-            r = execute_merge(root, "feature", target_branch="main")
+            original_run = subprocess.run
+
+            def mock_run(cmd, *args, **kwargs):
+                if isinstance(cmd, list) and "-m" in cmd and "pytest" in cmd:
+                    result = MagicMock()
+                    result.returncode = 0
+                    result.stdout = "10 passed\n"
+                    result.stderr = ""
+                    return result
+                return original_run(cmd, *args, **kwargs)
+
+            with patch("accruvia_harness.merge_gate.subprocess.run", side_effect=mock_run):
+                r = execute_merge(root, "feature", target_branch="main")
             self.assertTrue(r.merged, r.stderr)
             self.assertTrue((root / "b.txt").exists())
             self.assertTrue(len(r.commit_sha) >= 7)
@@ -286,6 +299,83 @@ class CLIAutoMergeTests(unittest.TestCase):
         parser = build_parser()
         args = parser.parse_args(["auto-merge-run", "run_xyz", "--dry-run"])
         self.assertTrue(args.dry_run)
+
+
+class MergeTestSuiteGateTests(unittest.TestCase):
+    """Verify that execute_merge reverts the merge when the full test suite fails."""
+
+    def test_merge_blocked_when_full_suite_fails(self):
+        from unittest.mock import patch, MagicMock
+        import sys
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Set up a minimal git repo
+            subprocess.run(["git", "init", "-q", "-b", "main", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.email", "t@t.com"], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.name", "t"], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "commit.gpgsign", "false"], check=True)
+            (root / "a.txt").write_text("v1")
+            subprocess.run(["git", "-C", str(root), "add", "a.txt"], check=True)
+            subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "init"], check=True)
+            subprocess.run(["git", "-C", str(root), "checkout", "-q", "-b", "feature"], check=True)
+            (root / "b.txt").write_text("new")
+            subprocess.run(["git", "-C", str(root), "add", "b.txt"], check=True)
+            subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "feat"], check=True)
+            subprocess.run(["git", "-C", str(root), "checkout", "-q", "main"], check=True)
+
+            # Mock subprocess.run so that the pytest invocation fails
+            original_run = subprocess.run
+
+            def mock_run(cmd, *args, **kwargs):
+                if isinstance(cmd, list) and "-m" in cmd and "pytest" in cmd:
+                    result = MagicMock()
+                    result.returncode = 1
+                    result.stdout = "3 failed, 10 passed\n"
+                    result.stderr = ""
+                    return result
+                return original_run(cmd, *args, **kwargs)
+
+            with patch("accruvia_harness.merge_gate.subprocess.run", side_effect=mock_run):
+                r = execute_merge(root, "feature", target_branch="main")
+
+            self.assertFalse(r.merged)
+            self.assertIn("test suite failed", r.stderr)
+
+    def test_merge_succeeds_when_full_suite_passes(self):
+        from unittest.mock import patch, MagicMock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q", "-b", "main", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.email", "t@t.com"], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.name", "t"], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "commit.gpgsign", "false"], check=True)
+            (root / "a.txt").write_text("v1")
+            subprocess.run(["git", "-C", str(root), "add", "a.txt"], check=True)
+            subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "init"], check=True)
+            subprocess.run(["git", "-C", str(root), "checkout", "-q", "-b", "feature"], check=True)
+            (root / "b.txt").write_text("new")
+            subprocess.run(["git", "-C", str(root), "add", "b.txt"], check=True)
+            subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "feat"], check=True)
+            subprocess.run(["git", "-C", str(root), "checkout", "-q", "main"], check=True)
+
+            original_run = subprocess.run
+
+            def mock_run(cmd, *args, **kwargs):
+                if isinstance(cmd, list) and "-m" in cmd and "pytest" in cmd:
+                    result = MagicMock()
+                    result.returncode = 0
+                    result.stdout = "10 passed\n"
+                    result.stderr = ""
+                    return result
+                return original_run(cmd, *args, **kwargs)
+
+            with patch("accruvia_harness.merge_gate.subprocess.run", side_effect=mock_run):
+                r = execute_merge(root, "feature", target_branch="main")
+
+            self.assertTrue(r.merged, r.stderr)
+            self.assertTrue(len(r.commit_sha) >= 7)
 
 
 class PromotionServiceConvergenceTests(unittest.TestCase):

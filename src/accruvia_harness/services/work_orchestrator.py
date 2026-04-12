@@ -334,7 +334,6 @@ class SkillsWorkOrchestrator:
                 diagnostics={
                     "stage": "scope",
                     "worker_outcome": "failed",
-                    "worker_backend": "skills",
                     "failure_category": "scope_skill_failure",
                     "failure_message": "; ".join(scope_result.errors),
                     "validation_profile": task.validation_profile,
@@ -349,7 +348,6 @@ class SkillsWorkOrchestrator:
                 diagnostics={
                     "stage": "scope",
                     "worker_outcome": "blocked",
-                    "worker_backend": "skills",
                     "failure_category": "scope_too_broad",
                     "failure_message": scope.get("approach", "Scope marked too_large"),
                     "needs_split": True,
@@ -404,7 +402,6 @@ class SkillsWorkOrchestrator:
                 diagnostics={
                     "stage": "implement",
                     "worker_outcome": "failed",
-                    "worker_backend": "skills",
                     "failure_category": "implement_skill_failure",
                     "failure_message": "; ".join(implement_result.errors),
                     "validation_profile": task.validation_profile,
@@ -430,7 +427,6 @@ class SkillsWorkOrchestrator:
                 diagnostics={
                     "stage": "apply_changes",
                     "worker_outcome": "failed",
-                    "worker_backend": "skills",
                     "failure_category": "scope_violation",
                     "failure_message": f"Rejected: {apply_summary['rejected']}",
                     "validation_profile": task.validation_profile,
@@ -630,7 +626,6 @@ class SkillsWorkOrchestrator:
             fail_diagnostics: dict[str, Any] = {
                 "stage": "validate",
                 "worker_outcome": "failed",
-                "worker_backend": "skills",
                 "failure_category": diagnosis.get("classification") if diagnosis else "validation_failure",
                 "failure_message": diagnosis.get("root_cause") if diagnosis else str(validate_result.output.get("failure_evidence") or "")[:500],
                 "validation_profile": profile,
@@ -659,7 +654,6 @@ class SkillsWorkOrchestrator:
                 diagnostics={
                     "stage": "self_review",
                     "worker_outcome": "failed",
-                    "worker_backend": "skills",
                     "failure_category": "self_review_blocked",
                     "failure_message": review_feedback[:500],
                     "review_feedback": review_feedback,
@@ -714,7 +708,6 @@ class SkillsWorkOrchestrator:
         final_diagnostics: dict[str, Any] = {
             "stage": "complete",
             "worker_outcome": "candidate",
-            "worker_backend": "skills",
             "skip_external_validation": True,
             "validation_profile": profile,
             "changed_files": written,

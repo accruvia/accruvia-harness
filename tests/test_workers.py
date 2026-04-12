@@ -33,7 +33,7 @@ def _minimal_config(base: Path, **overrides) -> HarnessConfig:
         temporal_namespace="default",
         temporal_task_queue="accruvia-harness",
         llm_backend="auto",
-        llm_model=None,
+
         llm_command=None,
         llm_codex_command=None,
         llm_claude_command=None,
@@ -361,7 +361,7 @@ class BuildWorkerFromConfigTests(unittest.TestCase):
                 default_project_name="demo", default_repo="x/x",
                 runtime_backend="local", temporal_target="localhost:7233",
                 temporal_namespace="default", temporal_task_queue="q",
-                llm_backend="auto", llm_model=None, llm_command=None,
+                llm_backend="auto", llm_command=None,
                 llm_codex_command=None, llm_claude_command=None,
                 llm_accruvia_client_command=None,
             )
@@ -406,9 +406,9 @@ class AgentBackendRemovalAsserts(unittest.TestCase):
         finally:
             _os.unlink(path)
 
-    def test_sa_watch_direct_repair_returns_blocked(self):
+    def test_sa_watch_direct_repair_delegates_to_skills_pipeline(self):
         from accruvia_harness.sa_watch import SAWatchService
-        from accruvia_harness.domain import Task, Run, RunStatus, new_id
+        from accruvia_harness.domain import Task, Run, RunStatus, TaskStatus, new_id
         from unittest.mock import MagicMock
         store = MagicMock()
         control_plane = MagicMock()
@@ -422,8 +422,10 @@ class AgentBackendRemovalAsserts(unittest.TestCase):
             run = Run(id=new_id("run"), task_id=task.id,
                       status=RunStatus.WORKING, attempt=1, summary="")
             result = svc._run_direct_repair(task, run, Path(tmp))
-            self.assertEqual("blocked", result.status)
-            self.assertEqual("agent_backend_removed", result.diagnostics["failure_category"])
+            self.assertEqual("delegated", result.status)
+            self.assertIn("skills pipeline", result.summary)
+            self.assertEqual("skills_pipeline", result.diagnostics["delegated_to"])
+            store.update_task_status.assert_called_once_with(task.id, TaskStatus.PENDING)
 
     def test_atomicity_control_plane_files_reference_skills_worker(self):
         from accruvia_harness.atomicity import CONTROL_PLANE_FILES, VALIDATION_POLICY_FILES

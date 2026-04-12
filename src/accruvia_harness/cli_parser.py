@@ -60,7 +60,6 @@ def build_parser() -> argparse.ArgumentParser:
     configure_llm.add_argument("--codex-command", dest="llm_codex_command_value")
     configure_llm.add_argument("--claude-command", dest="llm_claude_command_value")
     configure_llm.add_argument("--accruvia-client-command", dest="llm_accruvia_client_command_value")
-    configure_llm.add_argument("--model")
     configure_llm.add_argument("--env-passthrough", action="append", default=None)
     configure_llm.add_argument("--clear-existing", action="store_true")
 

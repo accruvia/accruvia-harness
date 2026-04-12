@@ -18,6 +18,7 @@ from __future__ import annotations
 import fnmatch
 import json
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -267,6 +268,29 @@ def execute_merge(
         _git(["merge", "--abort"], repo_root)
         return MergeResult(
             merged=False, conflicts=conflicts, stderr=rc.stderr or "merge failed",
+        )
+
+    # Full test suite gate: verify merge doesn't break existing tests
+    try:
+        test_result = subprocess.run(
+            [sys.executable, "-m", "pytest", "tests/", "--tb=no", "-q", "--timeout=300"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        _git(["reset", "--hard", "HEAD~1"], repo_root)
+        return MergeResult(
+            merged=False,
+            stderr=f"full test suite failed after merge: {exc}",
+        )
+    if test_result.returncode != 0:
+        _git(["reset", "--hard", "HEAD~1"], repo_root)
+        failed_summary = test_result.stdout.strip().split('\n')[-1] if test_result.stdout else "unknown"
+        return MergeResult(
+            merged=False,
+            stderr=f"full test suite failed after merge: {failed_summary}",
         )
 
     # Capture the commit SHA

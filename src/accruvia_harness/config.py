@@ -20,7 +20,6 @@ PERSISTED_CONFIG_KEYS = frozenset(
         "temporal_namespace",
         "temporal_task_queue",
         "llm_backend",
-        "llm_model",
         "llm_command",
         "llm_codex_command",
         "llm_claude_command",
@@ -136,7 +135,6 @@ class HarnessConfig:
     temporal_namespace: str
     temporal_task_queue: str
     llm_backend: str
-    llm_model: str | None
     llm_command: str | None
     llm_codex_command: str | None
     llm_claude_command: str | None
@@ -206,7 +204,6 @@ class HarnessConfig:
             temporal_namespace=str(payload["temporal_namespace"]),
             temporal_task_queue=str(payload["temporal_task_queue"]),
             llm_backend=str(payload["llm_backend"]),
-            llm_model=(str(payload["llm_model"]) if payload["llm_model"] is not None else None),
             llm_command=(str(payload["llm_command"]) if payload["llm_command"] is not None else None),
             llm_codex_command=(str(payload["llm_codex_command"]) if payload["llm_codex_command"] is not None else None),
             llm_claude_command=(str(payload["llm_claude_command"]) if payload["llm_claude_command"] is not None else None),
@@ -302,7 +299,6 @@ class HarnessConfig:
             temporal_namespace="default",
             temporal_task_queue="accruvia-harness",
             llm_backend="auto",
-            llm_model=None,
             llm_command=None,
             llm_codex_command=None,
             llm_claude_command=None,
@@ -325,7 +321,6 @@ class HarnessConfig:
                 "temporal_namespace": os.environ.get("ACCRUVIA_TEMPORAL_NAMESPACE", str(payload.get("temporal_namespace", "default"))),
                 "temporal_task_queue": os.environ.get("ACCRUVIA_TEMPORAL_TASK_QUEUE", str(payload.get("temporal_task_queue", "accruvia-harness"))),
                 "llm_backend": os.environ.get("ACCRUVIA_LLM_BACKEND", str(payload.get("llm_backend", "auto"))),
-                "llm_model": os.environ.get("ACCRUVIA_LLM_MODEL", payload.get("llm_model")),
                 "llm_command": os.environ.get("ACCRUVIA_LLM_COMMAND", payload.get("llm_command")),
                 "llm_codex_command": os.environ.get("ACCRUVIA_LLM_CODEX_COMMAND", payload.get("llm_codex_command")),
                 "llm_claude_command": os.environ.get("ACCRUVIA_LLM_CLAUDE_COMMAND", payload.get("llm_claude_command")),

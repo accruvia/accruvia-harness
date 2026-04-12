@@ -100,7 +100,7 @@ Legend: `green` = working and tested, `yellow` = partially implemented, `red` = 
 |---|---|---|
 | Happy path tests? | `green` | test_engine.py, test_store.py, test_cli.py cover create→run→evaluate→decide |
 | Retry and failure tests? | `green` | test_engine.py tests retry exhaustion, failure decisions, missing artifacts |
-| External integration tests? | `green` | test_cli.py mocks GitHub/GitLab CLIs; test_llm_e2e.py tests LLM worker paths |
+| External integration tests? | `green` | test_cli.py mocks GitHub/GitLab CLIs; LLM executor paths tested in test_workers.py |
 | Idempotent import tests? | `green` | test_cli.py verifies duplicate issue import returns same task |
 | Actionable error capture? | `green` | Structured JSONL logging; WorkerExecutionError; LLMExecutionError |
 | Event history for diagnosis? | `green` | Events track task_created, run_started, run_completed, branch_started, branch_winner_selected, etc. |
