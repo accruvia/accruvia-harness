@@ -638,11 +638,44 @@ class RunService:
                     payload={"status": task_status.value, "run_id": run.id},
                 )
             )
-        # Auto-merge any promoted run and verify post-merge health.
-        # The merge gate (merge_gate.evaluate_run) is the actual safety net —
-        # it inspects the report.json artifact and rejects unsafe merges.
-        if decision_result.action == DecisionAction.PROMOTE:
-            self._try_auto_merge_and_verify(task, run, work, progress)
+        # ===================================================================
+        # HOBBLE: per-task auto-merge is intentionally disabled.
+        #
+        # The harness architecture (see PRODUCT_PLAN.md, atomic-plan-schema.md,
+        # and specs/plan-to-task-mapping.md) treats each task as ONE atomic
+        # slice of an objective, not a standalone promotable unit. The
+        # documented lineage is objective -> plan -> task -> run, and
+        # promotion is an objective-level concern — the objective review
+        # flow (_maybe_resume_objective_review + promote_objective_to_repo)
+        # is the canonical merge gate.
+        #
+        # Per-task auto-merge was writing per-task commits directly to main,
+        # which races with and subverts the objective-level review, because
+        # by the time the review runs most of the objective's work has
+        # already landed as unrelated individual commits. The objective
+        # review's own "unmerged workspace branches" finding is the symptom.
+        #
+        # This block is disabled during verification of atomic task
+        # decomposition. With per-task merge off, we can observe:
+        #   1. Whether the planner decomposes objectives into correct
+        #      atomic task sets.
+        #   2. Whether tasks accumulate on their workspace branches without
+        #      prematurely shipping.
+        #   3. Whether objective review fires once all tasks in an objective
+        #      complete, and whether it analyzes the accumulated diff
+        #      coherently.
+        #
+        # The task still runs /commit, so its changes remain as a real git
+        # commit on the harness-<task>-<run> workspace branch. Nothing
+        # reaches main until an operator explicitly invokes
+        # promote_objective_to_repo (or a future automated hook).
+        #
+        # To re-enable per-task auto-merge (NOT RECOMMENDED — contradicts
+        # the product plan), uncomment the two lines below. Prefer to wire
+        # automatic objective-level promotion on review_clear=True instead.
+        # ===================================================================
+        # if decision_result.action == DecisionAction.PROMOTE:
+        #     self._try_auto_merge_and_verify(task, run, work, progress)
 
         # Emit structured failure diagnostic on any non-success outcome.
         if applied_task_status != TaskStatus.COMPLETED:

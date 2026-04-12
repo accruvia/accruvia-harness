@@ -1,0 +1,244 @@
+#!/usr/bin/env python3
+"""Backfill plans table and mermaid_node_id for existing objectives/tasks.
+
+For each objective in the DB:
+  1. Assign every existing task a stable mermaid_node_id (T_<task-suffix>)
+  2. Create a plan record for every task (1:1), populating plan_id on the task
+  3. Write a new mermaid artifact version containing the decomposition graph
+     derived from the current task list
+
+Idempotent: re-running after adding more tasks will add only the new nodes.
+Existing mermaid versions are not overwritten; a new version is appended.
+
+Usage:
+    ./bin/accruvia-backfill-plans
+    ./bin/accruvia-backfill-plans --db <path>
+    ./bin/accruvia-backfill-plans --objective <id>    # single objective only
+    ./bin/accruvia-backfill-plans --dry-run
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sqlite3
+import sys
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _new_id(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:12]}"
+
+
+def _node_id_for_task(task_id: str) -> str:
+    suffix = task_id.split("_", 1)[-1][:12] if "_" in task_id else task_id[:12]
+    return f"T_{suffix}"
+
+
+def _mermaid_label(text: str) -> str:
+    return (text or "").replace('"', "'").replace("\n", " ")[:80]
+
+
+def _decomposition_mermaid(objective_title: str, tasks: list[sqlite3.Row]) -> str:
+    lines = ["flowchart TD", f'    O["Objective: {_mermaid_label(objective_title)}"]']
+    if not tasks:
+        lines.append('    O --> AWAITING["awaiting decomposition"]')
+        return "\n".join(lines)
+    for t in tasks:
+        node_id = _node_id_for_task(t["id"])
+        label = f"{_mermaid_label(t['title'])}\\n{t['status']}"
+        lines.append(f'    {node_id}["{label}"]')
+        lines.append(f"    O --> {node_id}")
+    return "\n".join(lines)
+
+
+def _next_mermaid_version(conn: sqlite3.Connection, objective_id: str, diagram_type: str) -> int:
+    r = conn.execute(
+        """
+        SELECT COALESCE(MAX(version), 0) + 1
+          FROM mermaid_artifacts
+         WHERE objective_id = ? AND diagram_type = ?
+        """,
+        (objective_id, diagram_type),
+    ).fetchone()
+    return int(r[0] or 1)
+
+
+def backfill_objective(
+    conn: sqlite3.Connection,
+    objective: sqlite3.Row,
+    *,
+    dry_run: bool,
+) -> dict[str, int]:
+    tasks = conn.execute(
+        """
+        SELECT id, title, status, plan_id, mermaid_node_id, created_at
+          FROM tasks
+         WHERE objective_id = ?
+         ORDER BY created_at, id
+        """,
+        (objective["id"],),
+    ).fetchall()
+
+    plans_created = 0
+    tasks_linked = 0
+
+    for task in tasks:
+        node_id = _node_id_for_task(task["id"])
+        needs_node = (task["mermaid_node_id"] or "") != node_id
+        has_plan = bool(task["plan_id"])
+
+        if has_plan and not needs_node:
+            continue
+
+        if not has_plan:
+            plan_id = _new_id("plan")
+            slice_payload = {
+                "files": [],
+                "derived_from": "backfill",
+                "task_id": task["id"],
+                "task_title": task["title"],
+            }
+            if not dry_run:
+                conn.execute(
+                    """
+                    INSERT INTO plans (
+                        id, objective_id, parent_plan_id, mermaid_node_id,
+                        plan_revision, slice_json, atomicity_assessment_json,
+                        approval_status, created_at, updated_at
+                    ) VALUES (?, ?, NULL, ?, 1, ?, ?, 'approved', ?, ?)
+                    """,
+                    (
+                        plan_id,
+                        objective["id"],
+                        node_id,
+                        json.dumps(slice_payload),
+                        json.dumps({"is_atomic": True, "violations": [], "reason": "backfill"}),
+                        _now(),
+                        _now(),
+                    ),
+                )
+            plans_created += 1
+        else:
+            plan_id = task["plan_id"]
+
+        if not dry_run:
+            conn.execute(
+                "UPDATE tasks SET plan_id = ?, mermaid_node_id = ?, updated_at = ? WHERE id = ?",
+                (plan_id, node_id, _now(), task["id"]),
+            )
+        tasks_linked += 1
+
+    # Regenerate mermaid as a new version (don't touch existing ones).
+    tasks_for_mermaid = conn.execute(
+        """
+        SELECT id, title, status FROM tasks
+         WHERE objective_id = ?
+         ORDER BY created_at, id
+        """,
+        (objective["id"],),
+    ).fetchall()
+    content = _decomposition_mermaid(objective["title"], tasks_for_mermaid)
+    mermaid_written = False
+    # Skip writing if latest version already has identical content.
+    latest = conn.execute(
+        """
+        SELECT content FROM mermaid_artifacts
+         WHERE objective_id = ? AND diagram_type = 'workflow_control'
+         ORDER BY version DESC LIMIT 1
+        """,
+        (objective["id"],),
+    ).fetchone()
+    if latest is None or (latest["content"] != content):
+        version = _next_mermaid_version(conn, objective["id"], "workflow_control")
+        if not dry_run:
+            conn.execute(
+                """
+                INSERT INTO mermaid_artifacts (
+                    id, objective_id, diagram_type, version, status,
+                    summary, content, required_for_execution, blocking_reason,
+                    author_type, created_at, updated_at
+                ) VALUES (?, ?, 'workflow_control', ?, 'finished',
+                    'Decomposition backfill from task list',
+                    ?, 1, '', 'system', ?, ?)
+                """,
+                (
+                    _new_id("diagram"),
+                    objective["id"],
+                    version,
+                    content,
+                    _now(),
+                    _now(),
+                ),
+            )
+        mermaid_written = True
+
+    return {
+        "plans_created": plans_created,
+        "tasks_linked": tasks_linked,
+        "mermaid_written": int(mermaid_written),
+        "total_tasks": len(tasks),
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Backfill plans + mermaid decomposition.")
+    parser.add_argument("--db", default=".accruvia-harness/harness.db")
+    parser.add_argument("--objective", help="restrict to a single objective id")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+
+    db_path = Path(args.db)
+    if not db_path.exists():
+        print(f"Database not found: {db_path}", file=sys.stderr)
+        sys.exit(2)
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+
+    if args.objective:
+        row = conn.execute("SELECT id, title FROM objectives WHERE id = ?", (args.objective,)).fetchone()
+        if row is None:
+            print(f"Unknown objective: {args.objective}", file=sys.stderr)
+            sys.exit(2)
+        objectives = [row]
+    else:
+        objectives = conn.execute(
+            "SELECT id, title FROM objectives WHERE status != 'abandoned' ORDER BY priority DESC, created_at"
+        ).fetchall()
+
+    totals = {"plans_created": 0, "tasks_linked": 0, "mermaid_written": 0, "total_tasks": 0}
+    for obj in objectives:
+        result = backfill_objective(conn, obj, dry_run=args.dry_run)
+        for k in totals:
+            totals[k] += result[k]
+        marker = "would" if args.dry_run else ""
+        print(
+            f"{obj['id'][-12:]} {_mermaid_label(obj['title'])[:60]:<60} "
+            f"{marker}plans+{result['plans_created']:<2} "
+            f"tasks-linked={result['tasks_linked']:<2} "
+            f"mermaid={'Y' if result['mermaid_written'] else '.'}"
+        )
+
+    if not args.dry_run:
+        conn.commit()
+    conn.close()
+
+    print()
+    print(
+        f"Totals: plans_created={totals['plans_created']} "
+        f"tasks_linked={totals['tasks_linked']} "
+        f"mermaid_written={totals['mermaid_written']} "
+        f"total_tasks={totals['total_tasks']}"
+    )
+    if args.dry_run:
+        print("(dry-run: no changes committed)")
+
+
+if __name__ == "__main__":
+    main()

@@ -464,6 +464,32 @@ MIGRATIONS: list[Migration] = [
         );
         """,
     ),
+    Migration(
+        version=19,
+        name="plans_and_task_plan_linkage",
+        sql="""
+        CREATE TABLE IF NOT EXISTS plans (
+            id TEXT PRIMARY KEY,
+            objective_id TEXT NOT NULL,
+            parent_plan_id TEXT,
+            mermaid_node_id TEXT,
+            plan_revision INTEGER NOT NULL DEFAULT 1,
+            slice_json TEXT NOT NULL DEFAULT '{}',
+            atomicity_assessment_json TEXT NOT NULL DEFAULT '{}',
+            approval_status TEXT NOT NULL DEFAULT 'approved',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(objective_id) REFERENCES objectives(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_plans_objective ON plans(objective_id);
+        CREATE INDEX IF NOT EXISTS idx_plans_node ON plans(objective_id, mermaid_node_id);
+
+        ALTER TABLE tasks ADD COLUMN plan_id TEXT;
+        ALTER TABLE tasks ADD COLUMN mermaid_node_id TEXT;
+        CREATE INDEX IF NOT EXISTS idx_tasks_plan ON tasks(plan_id);
+        CREATE INDEX IF NOT EXISTS idx_tasks_objective_node ON tasks(objective_id, mermaid_node_id);
+        """,
+    ),
 ]
 
 

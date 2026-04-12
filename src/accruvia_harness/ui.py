@@ -48,6 +48,16 @@ from .frustration_triage import triage_frustration
 
 # ui_responder and ui_memory deleted — mediation replaced by MCP server.
 # Stubs for types still referenced in method signatures below.
+
+def _mermaid_node_id_for_task(task_id: str) -> str:
+    """Stable mermaid node id derived from a task id.
+
+    The node id is the value written to tasks.mermaid_node_id and to the
+    mermaid artifact content, so the two can be joined to answer "which
+    task owns this node in the decomposition diagram."
+    """
+    suffix = task_id.split("_", 1)[-1][:12] if "_" in task_id else task_id[:12]
+    return f"T_{suffix}"
 # AttrDict supports both dict["key"] and dict.key access so auto-generated
 # code that assumes dataclass-style attribute access works alongside existing
 # dict-consuming code.
@@ -6954,22 +6964,31 @@ class HarnessUIDataService:
         return "\n".join(lines)
 
     def _default_objective_mermaid(self, objective: Objective) -> str:
-        return "\n".join(
-            [
-                "flowchart TD",
-                f'    A["Objective: {self._mermaid_label(objective.title)}"]',
-                '    B["Intent Model"]',
-                '    C["Mermaid Review"]',
-                '    D["Plan"]',
-                '    E["Atomic Slice"]',
-                '    F["Execution"]',
-                "    A --> B",
-                "    B --> C",
-                "    C --> D",
-                "    D --> E",
-                "    E --> F",
-            ]
-        )
+        """Generate an objective decomposition diagram.
+
+        One node per task linked to the objective, labeled with its title and
+        status. If there are no tasks yet, emits a placeholder indicating the
+        objective is awaiting decomposition. This is what the objective-bench
+        and the objective review flow read to check decomposition coverage —
+        every node should eventually have a completed task.
+
+        See specs/plan-to-task-mapping.md and specs/atomic-plan-schema.md for
+        the intended lineage: objective -> plan -> task -> run. For now,
+        tasks stand in for plans (1:1) until the plans table is fully wired
+        into task creation.
+        """
+        tasks = [t for t in self.store.list_tasks(objective.project_id) if t.objective_id == objective.id]
+        lines = ["flowchart TD", f'    O["Objective: {self._mermaid_label(objective.title)}"]']
+        if not tasks:
+            lines.append('    O --> AWAITING["awaiting decomposition"]')
+            return "\n".join(lines)
+        sorted_tasks = sorted(tasks, key=lambda t: (t.created_at, t.id))
+        for task in sorted_tasks:
+            node_id = _mermaid_node_id_for_task(task.id)
+            label = f"{task.title}\\n{task.status.value}"
+            lines.append(f'    {node_id}["{self._mermaid_label(label)}"]')
+            lines.append(f"    O --> {node_id}")
+        return "\n".join(lines)
 
     @staticmethod
     def _mermaid_label(value: str) -> str:
