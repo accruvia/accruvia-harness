@@ -18,6 +18,7 @@ from ..domain import (
     ContextRecord,
     Decision,
     DecisionAction,
+    DecisionQueueItem,
     EvaluationVerdict,
     Event,
     Evaluation,
@@ -321,6 +322,20 @@ def context_record_from_row(row: sqlite3.Row) -> ContextRecord:
         content=row["content"],
         metadata=_safe_json_loads(row["metadata_json"], {}, column="context_records.metadata_json"),
         created_at=parse_dt(row["created_at"]),
+    )
+
+
+def decision_queue_item_from_row(row: sqlite3.Row) -> DecisionQueueItem:
+    return DecisionQueueItem(
+        id=row["id"],
+        run_id=row["run_id"],
+        task_id=row["task_id"],
+        evaluation_id=row["evaluation_id"],
+        priority=int(row["priority"]),
+        created_at=parse_dt(row["created_at"]),
+        status=row["status"],
+        started_at=parse_dt(row["started_at"]) if row["started_at"] else None,
+        completed_at=parse_dt(row["completed_at"]) if row["completed_at"] else None,
     )
 
 

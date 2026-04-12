@@ -13,6 +13,7 @@ from accruvia_harness.domain import (
     ControlLaneStateValue,
     ControlRecoveryAction,
     ControlWorkerRun,
+    DecisionQueueItem,
     GlobalSystemState,
     ContextRecord,
     Event,
@@ -628,6 +629,84 @@ class SQLiteHarnessStoreTests(unittest.TestCase):
             ).fetchone()
         self.assertIsNotNone(row)
         self.assertEqual("decision_queue", row["name"])
+
+    def test_enqueue_dequeue_decision_fifo_ordering(self) -> None:
+        from datetime import timedelta
+        from accruvia_harness.domain import utc_now
+        base_time = utc_now()
+        item_a = DecisionQueueItem(
+            id=new_id("dq"), run_id="run_1", task_id="task_1",
+            evaluation_id="eval_1", priority=100, created_at=base_time,
+        )
+        item_b = DecisionQueueItem(
+            id=new_id("dq"), run_id="run_2", task_id="task_2",
+            evaluation_id="eval_2", priority=100,
+            created_at=base_time + timedelta(seconds=1),
+        )
+        self.store.enqueue_decision(item_a)
+        self.store.enqueue_decision(item_b)
+
+        first = self.store.dequeue_decision()
+        second = self.store.dequeue_decision()
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertEqual(item_a.id, first.id)
+        self.assertEqual(item_b.id, second.id)
+        self.assertEqual("processing", first.status)
+        self.assertEqual("processing", second.status)
+        self.assertIsNotNone(first.started_at)
+
+    def test_dequeue_decision_priority_ordering(self) -> None:
+        from accruvia_harness.domain import utc_now
+        now = utc_now()
+        low_priority = DecisionQueueItem(
+            id=new_id("dq"), run_id="run_1", task_id="task_1",
+            evaluation_id="eval_1", priority=200, created_at=now,
+        )
+        high_priority = DecisionQueueItem(
+            id=new_id("dq"), run_id="run_2", task_id="task_2",
+            evaluation_id="eval_2", priority=50, created_at=now,
+        )
+        self.store.enqueue_decision(low_priority)
+        self.store.enqueue_decision(high_priority)
+
+        first = self.store.dequeue_decision()
+        self.assertIsNotNone(first)
+        self.assertEqual(high_priority.id, first.id)
+
+    def test_complete_decision_sets_status_and_completed_at(self) -> None:
+        item = DecisionQueueItem(
+            id=new_id("dq"), run_id="run_1", task_id="task_1",
+            evaluation_id="eval_1", priority=100,
+        )
+        self.store.enqueue_decision(item)
+        dequeued = self.store.dequeue_decision()
+        self.assertIsNotNone(dequeued)
+
+        self.store.complete_decision(dequeued.id, "completed")
+
+        with self.store.connect() as connection:
+            row = connection.execute(
+                "SELECT status, completed_at FROM decision_queue WHERE id = ?",
+                (dequeued.id,),
+            ).fetchone()
+        self.assertEqual("completed", row["status"])
+        self.assertIsNotNone(row["completed_at"])
+
+    def test_dequeue_decision_returns_none_when_empty(self) -> None:
+        result = self.store.dequeue_decision()
+        self.assertIsNone(result)
+
+        item = DecisionQueueItem(
+            id=new_id("dq"), run_id="run_1", task_id="task_1",
+            evaluation_id="eval_1", priority=100,
+        )
+        self.store.enqueue_decision(item)
+        self.store.dequeue_decision()
+
+        result = self.store.dequeue_decision()
+        self.assertIsNone(result)
 
     def test_corrupt_task_json_falls_back_instead_of_crashing(self) -> None:
         project = Project(id=new_id("project"), name="corrupt", description="Corrupt")
