@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-04-11 — Add skills pipeline E2E test to test_temporal_e2e.py
+
+Added TemporalSkillsPipelineTests with test_full_skills_pipeline_completes that runs a Temporal worker in-process via asyncio/threading, monkeypatches _build_engine to inject a deterministic _MockSkillsWorker returning success WorkResults with plan/report artifacts, creates project/task via the engine, submits the workflow through TemporalWorkflowRuntime, and asserts task completion status and run stage progression. Only tests/test_temporal_e2e.py was modified; no forbidden files were touched.
+
+**Files changed:** tests/test_temporal_e2e.py
+
 ## 2026-04-11 — Add create_run_activity to temporal_backend.py
 
 Added `create_run_activity` as a synchronous function that builds a Run domain object with PLANNING status and the caller-supplied attempt number, persists it via the store, and returns `run_id` + `workspace_root`. Wrapped it with `@activity.defn` in the Temporal guard block and registered it in the worker activities list. Created test_temporal_backend.py with 3 passing tests verifying run creation, workspace_root return, and caller-supplied attempt passthrough.
