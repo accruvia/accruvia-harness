@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-04-11 — Add create_run_activity to temporal_backend.py
+
+Added `create_run_activity` as a synchronous function that builds a Run domain object with PLANNING status and the caller-supplied attempt number, persists it via the store, and returns `run_id` + `workspace_root`. Wrapped it with `@activity.defn` in the Temporal guard block and registered it in the worker activities list. Created test_temporal_backend.py with 3 passing tests verifying run creation, workspace_root return, and caller-supplied attempt passthrough.
+
+**Files changed:** src/accruvia_harness/temporal_backend.py, tests/test_temporal_backend.py
+
 ## 2026-04-11 — Enqueue decision after validation evidence is recorded
 
 Added ValidationService with process_one() that runs validation, creates an Evaluation, enqueues a DecisionQueueItem, marks the run as DECIDING (closest available RunStatus since QUEUED_FOR_DECISION doesn't exist in domain.py which we cannot modify), and emits a decision_enqueued event. Tests verify all four side effects: evaluation persisted, decision queue item enqueued, run status updated, and event emitted.

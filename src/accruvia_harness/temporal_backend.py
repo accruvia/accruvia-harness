@@ -6,6 +6,7 @@ from typing import Any
 
 from .bootstrap import build_engine_from_config
 from .config import HarnessConfig
+from .domain import Run, RunStatus, new_id
 from .engine import HarnessEngine
 
 try:
@@ -135,6 +136,20 @@ def task_to_stable_activity(config: str, task_id: str) -> dict[str, object]:
     return {"task_id": task_id, "task_status": task.status.value if task else None, "run_count": len(runs)}
 
 
+def create_run_activity(config: str, task_id: str, attempt: int) -> dict[str, object]:
+    cfg = _load_config(config)
+    engine = _build_engine(config)
+    run = Run(
+        id=new_id("run"),
+        task_id=task_id,
+        status=RunStatus.PLANNING,
+        attempt=attempt,
+        summary="",
+    )
+    engine.store.create_run(run)
+    return {"run_id": run.id, "workspace_root": str(cfg.workspace_root)}
+
+
 def process_next_task_activity(
     config: str,
     project_id: str | None = None,
@@ -159,6 +174,10 @@ if activity is not None and workflow is not None:
     async def task_to_stable_activity_defn(config: str, task_id: str) -> dict[str, object]:
         return await asyncio.to_thread(task_to_stable_activity, config, task_id)
 
+
+    @activity.defn(name="create_run_activity")
+    async def create_run_activity_defn(config: str, task_id: str, attempt: int) -> dict[str, object]:
+        return await asyncio.to_thread(create_run_activity, config, task_id, attempt)
 
     @activity.defn(name="process_next_task_activity")
     async def process_next_task_activity_defn(
@@ -222,7 +241,7 @@ async def run_temporal_worker(
     if Worker is None:
         raise ModuleNotFoundError("temporalio is not installed")
 
-    activities = [task_to_stable_activity_defn, process_next_task_activity_defn]
+    activities = [task_to_stable_activity_defn, create_run_activity_defn, process_next_task_activity_defn]
 
     client = await connect_temporal_client(client_cls, target, namespace)
     worker = Worker(client, task_queue=task_queue, workflows=workflows, activities=activities)
