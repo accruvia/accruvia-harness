@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-04-11 — Add skills pipeline E2E test to test_temporal_e2e.py
+
+Added TemporalSkillsPipelineTests with test_full_skills_pipeline_completes that runs a Temporal worker in-process via asyncio/threading, monkeypatches _build_engine to inject a deterministic _MockSkillsWorker returning success WorkResults with plan/report artifacts, creates project/task via the engine, submits the workflow through TemporalWorkflowRuntime, and asserts task completion status and run stage progression. Only tests/test_temporal_e2e.py was modified; no forbidden files were touched.
+
+**Files changed:** tests/test_temporal_e2e.py
+
 ## 2026-04-11 — Enqueue decision after validation evidence is recorded
 
 Added ValidationService with process_one() that runs validation, creates an Evaluation, enqueues a DecisionQueueItem, marks the run as DECIDING (closest available RunStatus since QUEUED_FOR_DECISION doesn't exist in domain.py which we cannot modify), and emits a decision_enqueued event. Tests verify all four side effects: evaluation persisted, decision queue item enqueued, run status updated, and event emitted.
