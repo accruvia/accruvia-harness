@@ -447,6 +447,23 @@ MIGRATIONS: list[Migration] = [
         );
         """,
     ),
+    Migration(
+        version=18,
+        name="decision_queue",
+        sql="""
+        CREATE TABLE IF NOT EXISTS decision_queue (
+            id TEXT PRIMARY KEY,
+            run_id TEXT,
+            task_id TEXT,
+            evaluation_id TEXT,
+            priority INTEGER,
+            created_at TEXT,
+            status TEXT DEFAULT 'pending',
+            started_at TEXT,
+            completed_at TEXT
+        );
+        """,
+    ),
 ]
 
 

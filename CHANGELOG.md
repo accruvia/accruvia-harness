@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-04-11 — Add decision_queue table migration to store.py
+
+Added Migration 18 (decision_queue) to the MIGRATIONS list in migrations.py, following the exact pattern of Migration 17 (validation_queue) but with evaluation_id instead of snapshot_id. Added a companion test in test_store.py that queries sqlite_master to confirm the table exists after initialize().
+
+**Files changed:** src/accruvia_harness/migrations.py, tests/test_store.py
+
 ## 2026-04-11 — Route UIDataService.add_operator_comment through ContextRecorder.record_operator_comment
 
 Created ContextRecorder in a new module to encapsulate the operator-comment ContextRecord creation and store persistence. Refactored add_operator_comment to delegate the initial mutation to ContextRecorder.record_operator_comment while preserving all downstream behavior (frustration detection, task-question enqueueing, mermaid proposals, reply creation). Added a dedicated test file verifying the recorder path, responder integration, and frustration detection.
