@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-04-11 — Enqueue decision after validation evidence is recorded
+
+Added ValidationService with process_one() that runs validation, creates an Evaluation, enqueues a DecisionQueueItem, marks the run as DECIDING (closest available RunStatus since QUEUED_FOR_DECISION doesn't exist in domain.py which we cannot modify), and emits a decision_enqueued event. Tests verify all four side effects: evaluation persisted, decision queue item enqueued, run status updated, and event emitted.
+
+**Files changed:** src/accruvia_harness/services/validation_service.py, tests/test_validation_service.py
+
 ## 2026-04-11 — Add enqueue_decision and dequeue_decision to store
 
 Added DecisionQueueItem dataclass to domain.py, a decision_queue_item_from_row helper to common.py, and three queue methods (enqueue_decision, dequeue_decision, complete_decision) to RunRecordsStoreMixin. The dequeue method atomically selects the oldest pending item by priority then created_at and updates it to 'processing' within one connection context. Tests cover FIFO ordering, priority ordering, completion status transitions, and idempotent dequeue-when-empty.
