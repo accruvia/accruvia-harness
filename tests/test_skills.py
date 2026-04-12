@@ -976,7 +976,7 @@ class CommitWiringTests(unittest.TestCase):
 class WorkOrchestratorDiagnosticsTests(unittest.TestCase):
     """Tests that retry_hints propagates through WorkResult diagnostics."""
 
-    def _run_to_validation_failure(self, diagnose_output, diagnose_success=True):
+    def _run_to_validation_failure(self, diagnose_output, diagnose_success=True, telemetry=None):
         """Drive the orchestrator to a validation-fail path and return the WorkResult."""
         registry = SkillRegistry()
         registry.register(ScopeSkill())
@@ -1026,6 +1026,7 @@ class WorkOrchestratorDiagnosticsTests(unittest.TestCase):
             skill_registry=registry,
             llm_router=MagicMock(),
             workspace_root=Path("/fake"),
+            telemetry=telemetry,
         )
         task = Task(
             id=new_id("task"), project_id="proj", title="Test",
@@ -1079,6 +1080,37 @@ class WorkOrchestratorDiagnosticsTests(unittest.TestCase):
         self.assertIn("plan", artifact_kinds)
         self.assertIn("scope_output", artifact_kinds)
         self.assertIn("report", artifact_kinds)
+
+    def test_pipeline_emits_total_and_stage_telemetry_spans(self) -> None:
+        """Each SkillsWorkOrchestrator.execute run must emit one
+        'skills_pipeline' total span plus per-stage skills_<stage> spans
+        (scope, implement, self_review, validate, etc.) so dashboards can
+        measure stage timing independently of the overall pipeline cost.
+
+        See specs/split-phase-execution.md for why stage-level timing is
+        required: validation should not monopolize editing throughput, and
+        separate spans let operators see which stage is the bottleneck.
+        """
+        from accruvia_harness.telemetry import TelemetrySink
+
+        with tempfile.TemporaryDirectory() as tmp:
+            telemetry = TelemetrySink(Path(tmp))
+            result, _ = self._run_to_validation_failure(
+                {}, diagnose_success=False, telemetry=telemetry,
+            )
+            self.assertEqual("failed", result.outcome)
+            spans = telemetry.load_spans()
+            span_names = {s["name"] for s in spans}
+            # Total pipeline span must exist
+            self.assertIn("skills_pipeline", span_names)
+            # Scope always runs before the failure
+            self.assertIn("skills_scope", span_names)
+            # Implement runs too (scope succeeds in the fixture)
+            self.assertIn("skills_implement", span_names)
+            # Self-review runs before validate
+            self.assertIn("skills_self_review", span_names)
+            # Validate is the stage that fails in this fixture
+            self.assertIn("skills_validate", span_names)
 
 
 class TestHealthSkillTests(unittest.TestCase):

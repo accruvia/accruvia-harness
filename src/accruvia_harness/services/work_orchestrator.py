@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -238,7 +239,57 @@ class SkillsWorkOrchestrator:
                 "detail": detail,
             })
 
+    def _span(self, name: str, **attributes: Any):
+        """Open a telemetry span when a telemetry sink is wired.
+
+        Returns a context manager in both cases. When telemetry is None
+        (most tests, bootstrap paths) the returned object is a no-op
+        context so the `with` blocks inside execute() don't branch on
+        telemetry presence. This gives observers a per-stage and total-
+        pipeline view of skills execution — see specs/split-phase-execution.md
+        for why stage-level timing matters. Span names follow the
+        'skills_<stage>' convention so dashboards can filter the skill
+        pipeline out from other harness timing events.
+        """
+        from contextlib import nullcontext
+
+        if self.telemetry is None:
+            return nullcontext()
+        return self.telemetry.timed(name, **attributes)
+
+    def _emit_stage_span(self, stage: str, start_time: float, **attributes: Any) -> None:
+        """Record a finished stage as a telemetry span.
+
+        Used at stage boundaries inside execute() where wrapping the whole
+        body in a `with` block would force a large indent rewrite. Start
+        time is captured at stage begin via `time.perf_counter()` and
+        passed here at stage end. No-op when telemetry is None.
+        """
+        if self.telemetry is None:
+            return
+        import time as _time
+
+        duration_ms = (_time.perf_counter() - start_time) * 1000
+        span_name = f"skills_{stage}"
+        self.telemetry.span(span_name, duration_ms=duration_ms, **attributes)
+        self.telemetry.metric(
+            f"{span_name}_duration_ms", duration_ms, metric_type="histogram", **attributes,
+        )
+
     def execute(
+        self,
+        task: Task,
+        run: Run,
+        workspace: Path,
+        run_dir: Path,
+        *,
+        retry_feedback: str = "",
+        prior_scope: dict[str, Any] | None = None,
+    ) -> WorkResult:
+        with self._span("skills_pipeline", task_id=task.id, run_id=run.id, attempt=run.attempt):
+            return self._execute(task, run, workspace, run_dir, retry_feedback=retry_feedback, prior_scope=prior_scope)
+
+    def _execute(
         self,
         task: Task,
         run: Run,
@@ -287,6 +338,7 @@ class SkillsWorkOrchestrator:
         codebase_search_results = _search_codebase(workspace, _search_queries)
 
         # STAGE 1: /scope
+        _scope_start = time.perf_counter()
         self._emit("scope", "running", "analyzing task and selecting files")
         scope_result = invoke_skill(
             scope_skill,
@@ -356,7 +408,9 @@ class SkillsWorkOrchestrator:
             )
 
         self._emit("scope", "done", f"{len(scope.get('files_to_touch', []))} files, {scope.get('estimated_complexity', '?')} complexity")
+        self._emit_stage_span("scope", _scope_start, task_id=task.id, run_id=run.id, success=True)
         # STAGE 2: /implement
+        _implement_start = time.perf_counter()
         self._emit("implement", "running", "writing code edits")
         files_to_touch = list(scope.get("files_to_touch") or [])
         file_contents = _load_file_contents(workspace, files_to_touch)
@@ -434,7 +488,9 @@ class SkillsWorkOrchestrator:
             )
 
         self._emit("implement", "done", f"{apply_summary.get('edits_applied', 0)} edits, {apply_summary.get('new_files_created', 0)} new files")
+        self._emit_stage_span("implement", _implement_start, task_id=task.id, run_id=run.id, success=True)
         # STAGE 3: /self-review
+        _self_review_start = time.perf_counter()
         self._emit("self_review", "running", "staff engineer reviewing diff")
         diff_text = _git_diff(workspace)
         self_review_result = invoke_skill(
@@ -465,7 +521,9 @@ class SkillsWorkOrchestrator:
         ship_ready = bool(self_review_result.output.get("ship_ready")) if self_review_result.success else False
 
         self._emit("self_review", "done", "ship_ready" if ship_ready else "NOT ship_ready")
+        self._emit_stage_span("self_review", _self_review_start, task_id=task.id, run_id=run.id, ship_ready=ship_ready)
         # STAGE 4: /validate (deterministic)
+        _validate_start = time.perf_counter()
         self._emit("validate", "running", "compile + tests")
         profile = task.validation_profile or "generic"
         written_files = apply_summary.get("written") or []
@@ -489,6 +547,7 @@ class SkillsWorkOrchestrator:
         overall = str(validate_result.output.get("overall") or "skipped")
 
         self._emit("validate", "done" if overall != "fail" else "failed", overall)
+        self._emit_stage_span("validate", _validate_start, task_id=task.id, run_id=run.id, overall=overall)
         # STAGE 5 (conditional): /diagnose when validation fails
         diagnosis: dict[str, Any] | None = None
         if overall == "fail":
@@ -575,6 +634,7 @@ class SkillsWorkOrchestrator:
                 # Still failing — loop continues with fresh verbose diagnostics
 
         # STAGE 6: /quality-gate (deterministic, runs on every successful pipeline)
+        _quality_gate_start = time.perf_counter()
         self._emit("quality_gate", "running", "lint, security, docs, types")
         quality_concerns: list[dict[str, str]] = []
         if overall != "fail":
@@ -662,6 +722,7 @@ class SkillsWorkOrchestrator:
                 },
             )
         self._emit("quality_gate", "done", qg_result.output.get("summary", "") if overall != "fail" else "skipped")
+        self._emit_stage_span("quality_gate", _quality_gate_start, task_id=task.id, run_id=run.id)
         # STAGE 6.5: Auto-append CHANGELOG entry before committing
         rationale = implement_result.output.get("rationale") or ""
         _append_changelog_entry(
@@ -683,6 +744,7 @@ class SkillsWorkOrchestrator:
             written_with_changelog = list(written)
 
         # STAGE 7: /commit — persist changes in git
+        _commit_start = time.perf_counter()
         self._emit("commit", "running", "staging + committing")
         deleted_files = implement_result.output.get("deleted_files") or []
         commit_paths = written_with_changelog + [p for p in deleted_files if p not in written_with_changelog]
@@ -697,6 +759,10 @@ class SkillsWorkOrchestrator:
             message=commit_message,
             author_name="Accruvia Harness",
             author_email="harness@accruvia.local",
+        )
+        self._emit_stage_span(
+            "commit", _commit_start, task_id=task.id, run_id=run.id,
+            success=commit_result.success,
         )
         artifacts.append(
             _write_artifact(
