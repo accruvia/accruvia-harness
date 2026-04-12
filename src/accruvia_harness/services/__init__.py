@@ -1,6 +1,7 @@
 from .objective_promotion_service import ObjectivePromotionService
 from .branch_service import BranchResult, BranchService, WinnerResult
 from .cognition_service import CognitionService
+from .decision_service import DecisionService
 from .github_task_service import GitHubTaskService
 from .gitlab_task_service import GitLabTaskService
 from .promotion_service import PromotionReviewResult, PromotionService
@@ -16,6 +17,7 @@ __all__ = [
     "BranchResult",
     "BranchService",
     "CognitionService",
+    "DecisionService",
     "GitHubTaskService",
     "GitLabTaskService",
     "ObjectivePromotionService",

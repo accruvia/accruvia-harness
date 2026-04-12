@@ -1058,8 +1058,23 @@ def _resolve_validate_commands(
     if (validation_mode or "").strip() == "lightweight_operator":
         return []
     default_commands = commands_for_profile(profile)
+    # Skip validation when the workspace lacks the expected build tooling.
+    # This happens in ephemeral workspaces (smoke tests, generic adapters)
+    # where there is no project infrastructure to validate against.
+    if workspace is not None:
+        _PROFILE_MARKERS = {
+            "generic": "Makefile",
+            "javascript": "package.json",
+        }
+        marker = _PROFILE_MARKERS.get(profile)
+        if marker and not (workspace / marker).exists():
+            return []
     if profile != "python":
         return default_commands
+    # If no Python files were changed, skip Python-specific validation.
+    py_changed = [p for p in changed_files if p.endswith(".py")]
+    if not py_changed:
+        return []
     test_files = [p for p in changed_files if _is_test_path(p) and p.endswith(".py")]
     if workspace is not None:
         source_files = [

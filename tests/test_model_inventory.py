@@ -111,8 +111,8 @@ class TestDiscoverAvailableModels:
 class TestUniverseCache:
     def test_save_and_load_roundtrip(self, tmp_path: Path):
         models = [
-            ModelCapability(backend="claude", provider="anthropic", model_id="sonnet"),
-            ModelCapability(backend="codex", provider="openai", model_id="gpt-4o", supports_tools=True),
+            ModelCapability(backend="claude", provider="anthropic", model_id="sonnet", available=True),
+            ModelCapability(backend="codex", provider="openai", model_id="gpt-4o", available=True, supports_tools=True),
         ]
         cache_path = tmp_path / "cache.json"
         save_universe_cache(models, cache_path)
@@ -140,8 +140,8 @@ class TestEpsilonGreedyPolicy:
     def _make_universe(self) -> ModelUniverseSnapshot:
         return ModelUniverseSnapshot(
             models=[
-                ModelCapability(backend="claude", provider="anthropic", model_id="sonnet"),
-                ModelCapability(backend="codex", provider="openai", model_id="gpt-4o"),
+                ModelCapability(backend="claude", provider="anthropic", model_id="sonnet", available=True),
+                ModelCapability(backend="codex", provider="openai", model_id="gpt-4o", available=True),
             ]
         )
 
@@ -215,15 +215,15 @@ class TestEpsilonGreedyPolicy:
 
 
 class TestRoutingHook:
-    def _make_hook(self, epsilon: float = 0.0, db_path: Path | None = None) -> RoutingHook:
+    def _make_hook(self, epsilon: float = 0.0, cache_path: Path | None = None) -> RoutingHook:
         import random
         models = [
-            ModelCapability(backend="claude", provider="anthropic", model_id="sonnet"),
-            ModelCapability(backend="codex", provider="openai", model_id="gpt-4o"),
+            ModelCapability(backend="claude", provider="anthropic", model_id="sonnet", available=True),
+            ModelCapability(backend="codex", provider="openai", model_id="gpt-4o", available=True),
         ]
         universe = ModelUniverseSnapshot(models=models)
         policy = EpsilonGreedyPolicy(epsilon=epsilon, rng=random.Random(42))
-        return RoutingHook(universe=universe, policy=policy, db_path=db_path)
+        return RoutingHook(universe=universe, policy=policy, cache_path=cache_path)
 
     def test_select_model_returns_valid_decision(self):
         hook = self._make_hook()
@@ -248,7 +248,8 @@ class TestRoutingHook:
         hook = self._make_hook()
         decision = RoutingDecision(
             model_id="sonnet", backend="claude", confidence=1.0,
-            universe_hash=hook.universe.snapshot_id,
+            reasoning="best fit", universe_hash=hook.universe.snapshot_id,
+            is_exploration=False,
         )
         outcome = RoutingOutcome(success=True, latency_ms=100)
         hook.record_outcome(decision, outcome, token_metrics={"llm_total_tokens": 42.0})
@@ -257,48 +258,51 @@ class TestRoutingHook:
         assert log[0]["outcome"]["success"] is True
         assert log[0]["token_metrics"]["llm_total_tokens"] == 42.0
 
-    def test_select_uses_internal_outcome_history_by_default(self):
+    def test_select_uses_prior_outcomes_for_exploit(self):
         hook = self._make_hook()
         decision = RoutingDecision(
             model_id="gpt-4o",
             backend="codex",
             confidence=1.0,
+            reasoning="best fit",
             universe_hash=hook.universe.snapshot_id,
+            is_exploration=False,
         )
         outcome = RoutingOutcome(
             success=True,
             latency_ms=120,
-            cost=0.1,
-            input_tokens=80,
-            output_tokens=40,
-            extra={"llm_cost_usd": 0.1, "llm_total_tokens": 120, "llm_latency_ms": 120},
+            cost_usd=0.1,
+            token_count=120,
         )
         hook.record_outcome(decision, outcome)
 
-        selected = hook.select_model_for({"task": "test"})
+        prior = [{"model_id": "gpt-4o", "success": True}]
+        selected = hook.select_model_for({"task": "test"}, prior_outcomes=prior)
         assert selected.routing_decision.model_id == "gpt-4o"
 
-    def test_outcome_history_persists_to_sqlite(self, tmp_path: Path):
-        db_path = tmp_path / "harness.db"
-        first = self._make_hook(db_path=db_path)
+    def test_outcome_history_persists_via_event_log(self, tmp_path: Path):
+        hook = self._make_hook()
         decision = RoutingDecision(
             model_id="gpt-4o",
             backend="codex",
             confidence=1.0,
-            universe_hash=first.universe.snapshot_id,
+            reasoning="best fit",
+            universe_hash=hook.universe.snapshot_id,
+            is_exploration=False,
         )
         outcome = RoutingOutcome(
             success=True,
             latency_ms=90,
-            cost=0.05,
-            input_tokens=45,
-            output_tokens=30,
-            extra={"llm_cost_usd": 0.05, "llm_total_tokens": 75, "llm_latency_ms": 90},
+            cost_usd=0.05,
+            token_count=75,
         )
-        first.record_outcome(decision, outcome)
+        hook.record_outcome(decision, outcome)
 
-        second = self._make_hook(db_path=db_path)
-        selected = second.select_model_for({"task": "test"})
+        log = hook.get_event_log()
+        assert len(log) == 1
+        # Use recorded event log as prior_outcomes for next selection
+        prior = [{"model_id": "gpt-4o", "success": True}]
+        selected = hook.select_model_for({"task": "test"}, prior_outcomes=prior)
         assert selected.routing_decision.model_id == "gpt-4o"
 
     def test_fallback_on_unknown_model(self):
@@ -307,7 +311,7 @@ class TestRoutingHook:
         import random
 
         models = [
-            ModelCapability(backend="claude", provider="anthropic", model_id="sonnet"),
+            ModelCapability(backend="claude", provider="anthropic", model_id="sonnet", available=True),
         ]
         universe = ModelUniverseSnapshot(models=models)
 
@@ -319,7 +323,9 @@ class TestRoutingHook:
                         model_id="nonexistent-model",
                         backend="fake",
                         confidence=1.0,
+                        reasoning="bad policy",
                         universe_hash=universe.snapshot_id,
+                        is_exploration=False,
                     ),
                     exploration_flag=False,
                     rationale="bad policy",

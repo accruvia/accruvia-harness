@@ -172,7 +172,8 @@ class QualityGateSkill:
             if lint_result.get("issues"):
                 all_concerns.extend(lint_result["issues"][:10])
         else:
-            checks.append({"name": "lint", "status": "skip", "issues": []})
+            lint_result = {"name": "lint", "status": "skip", "issues": []}
+            checks.append(lint_result)
 
         # 2. Security scan
         secret_findings: list[dict[str, str]] = []

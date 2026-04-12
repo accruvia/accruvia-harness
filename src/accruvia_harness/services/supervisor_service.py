@@ -37,6 +37,7 @@ class SupervisorService:
         heartbeat_failure_escalation_threshold: int = 3,
         sleeper: Callable[[float], None] = _sleep,
         monotonic: Callable[[], float] = _monotonic,
+        decision_service=None,
     ) -> None:
         if heartbeat_failure_escalation_threshold < 1:
             raise ValueError("heartbeat_failure_escalation_threshold must be at least 1")
@@ -46,6 +47,20 @@ class SupervisorService:
         self.heartbeat_failure_escalation_threshold = heartbeat_failure_escalation_threshold
         self._sleep = sleeper
         self._monotonic = monotonic
+        self.decision_service = decision_service
+
+    def _drain_decision_queue(self, emit: Callable[[dict], None]) -> int:
+        """Drain any pending decision queue items. Returns count processed."""
+        if self.decision_service is None:
+            return 0
+        processed = 0
+        while self.decision_service.process_one():
+            processed += 1
+            if processed >= 50:  # safety bound per cycle
+                break
+        if processed > 0:
+            emit({"type": "decision_queue_drained", "count": processed})
+        return processed
 
     def _metrics_snapshot(self, project_id: str | None) -> dict[str, object]:
         return dict(self.store.metrics_snapshot(project_id))
@@ -413,6 +428,7 @@ class SupervisorService:
                 if any(int(count or 0) > 0 for count in recovered.values()):
                     emit({"type": "stale_state_recovered", "recovered": recovered})
 
+            self._drain_decision_queue(emit)
             result = self.queue.process_next_task(
                 project_id=project_id,
                 worker_id=worker_id,

@@ -1630,7 +1630,7 @@ def handle_core_command(args, ctx: CLIContext) -> bool:
             project_id=project.id, title=args.task_title, objective=args.objective,
             priority=100, parent_task_id=None, source_run_id=None,
             external_ref_type=None, external_ref_id=None,
-            validation_profile="generic", strategy="smoke", max_attempts=2,
+            validation_profile="lightweight_operator", strategy="smoke", max_attempts=2,
             required_artifacts=["plan", "report"],
         )
         runs = engine.run_until_stable(task.id)

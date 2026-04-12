@@ -104,11 +104,14 @@ class HarnessEngine:
             heartbeat_timeout_seconds=getattr(self, "heartbeat_timeout_seconds", 1800),
             telemetry=self.telemetry,
         )
+        from .services.decision_service import DecisionService
+        self.decision_service = DecisionService(self.store, decider=self.decider)
         self.supervisor = SupervisorService(
             self.store,
             self.queue,
             self.cognition,
             heartbeat_failure_escalation_threshold=self.heartbeat_failure_escalation_threshold,
+            decision_service=self.decision_service,
         )
         self.review_watcher = ReviewWatcherService(self.store, task_service=self.tasks)
         self.promotions = PromotionService(

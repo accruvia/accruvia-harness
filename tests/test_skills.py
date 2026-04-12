@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -427,12 +428,13 @@ class ValidateSkillTests(unittest.TestCase):
 
     def test_deterministic_execution(self) -> None:
         skill = ValidateSkill()
+        py = sys.executable
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             # Passing
             r = skill.invoke_deterministic(
                 root,
-                [{"name": "probe", "cmd": "python -c \"pass\"", "timeout": 30}],
+                [{"name": "probe", "cmd": f"{py} -c \"pass\"", "timeout": 30}],
                 root / "_run",
             )
             self.assertEqual("pass", r.output["overall"])
@@ -440,9 +442,9 @@ class ValidateSkillTests(unittest.TestCase):
             r = skill.invoke_deterministic(
                 root,
                 [
-                    {"name": "ok", "cmd": "python -c \"pass\"", "timeout": 30},
-                    {"name": "bad", "cmd": "python -c \"import sys; sys.exit(7)\"", "timeout": 30},
-                    {"name": "skipped", "cmd": "python -c \"pass\"", "timeout": 30},
+                    {"name": "ok", "cmd": f"{py} -c \"pass\"", "timeout": 30},
+                    {"name": "bad", "cmd": f"{py} -c \"import sys; sys.exit(7)\"", "timeout": 30},
+                    {"name": "skipped", "cmd": f"{py} -c \"pass\"", "timeout": 30},
                 ],
                 root / "_fail",
             )
@@ -615,12 +617,13 @@ class BenchmarkSkillTests(unittest.TestCase):
             # Simpler: use generic profile with make test which will fail.
             # Best approach: monkeypatch commands_for_profile.
             import accruvia_harness.skills.benchmark as bm
+            py = sys.executable
             original = bm.commands_for_profile
             try:
                 bm.commands_for_profile = lambda _profile: [
-                    {"name": "ok1", "cmd": "python -c \"pass\"", "timeout": 30},
-                    {"name": "bad", "cmd": "python -c \"import sys; sys.exit(3)\"", "timeout": 30},
-                    {"name": "ok2", "cmd": "python -c \"pass\"", "timeout": 30},
+                    {"name": "ok1", "cmd": f"{py} -c \"pass\"", "timeout": 30},
+                    {"name": "bad", "cmd": f"{py} -c \"import sys; sys.exit(3)\"", "timeout": 30},
+                    {"name": "ok2", "cmd": f"{py} -c \"pass\"", "timeout": 30},
                 ]
                 r = skill.invoke_deterministic(
                     workspace_root=root,

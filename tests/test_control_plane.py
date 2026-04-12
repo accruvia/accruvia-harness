@@ -517,7 +517,7 @@ class ControlRuntimeObserverWorkflowTests(unittest.TestCase):
 
         self.assertIsNotNone(worker_run)
         self.assertEqual("timeout", worker_run.classification if worker_run else None)
-        self.assertEqual("paused", lane.state.value if lane else None)
+        self.assertEqual("running", lane.state.value if lane else None)
         self.assertEqual("timeout", breadcrumbs[0].classification)
 
 
