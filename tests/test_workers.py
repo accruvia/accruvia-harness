@@ -434,6 +434,43 @@ class AgentBackendRemovalAsserts(unittest.TestCase):
         self.assertIn("src/accruvia_harness/skills_worker.py", VALIDATION_POLICY_FILES)
         self.assertNotIn("src/accruvia_harness/agent_worker.py", VALIDATION_POLICY_FILES)
 
+    def test_llm_model_config_field_is_gone(self):
+        from accruvia_harness.config import HarnessConfig, PERSISTED_CONFIG_KEYS
+        self.assertNotIn("llm_model", PERSISTED_CONFIG_KEYS)
+        self.assertFalse(hasattr(HarnessConfig, "llm_model"))
+
+    def test_diagnostics_omit_worker_backend_tag(self):
+        """Skills pipeline diagnostics should not carry a redundant worker_backend key."""
+        from accruvia_harness.services.work_orchestrator import SkillsWorkOrchestrator
+        from accruvia_harness.skills.base import SkillResult
+        from accruvia_harness.skills.registry import SkillRegistry
+        from accruvia_harness.skills.scope import ScopeSkill
+        from accruvia_harness.skills.implement import ImplementSkill
+        from accruvia_harness.skills.self_review import SelfReviewSkill
+        from accruvia_harness.skills.validate import ValidateSkill
+        from accruvia_harness.skills.diagnose import DiagnoseSkill
+        from accruvia_harness.skills.commit import CommitSkill
+        from unittest.mock import MagicMock, patch
+
+        registry = SkillRegistry()
+        for s in (ScopeSkill(), ImplementSkill(), SelfReviewSkill(), ValidateSkill(), DiagnoseSkill(), CommitSkill()):
+            registry.register(s)
+        def fake_invoke(skill, invocation, router, **kw):
+            if invocation.skill_name == "scope":
+                return SkillResult(skill_name="scope", success=False, errors=["forced failure"])
+            return SkillResult(skill_name=invocation.skill_name, success=False, errors=["unexpected"])
+
+        orchestrator = SkillsWorkOrchestrator(
+            skill_registry=registry, llm_router=MagicMock(), workspace_root=Path("/fake"),
+        )
+        task = Task(id=new_id("task"), project_id="p", title="T", objective="o")
+        run = Run(id=new_id("run"), task_id=task.id, status=RunStatus.WORKING, attempt=1, summary="")
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("accruvia_harness.services.work_orchestrator.invoke_skill", side_effect=fake_invoke), \
+                 patch("accruvia_harness.services.work_orchestrator._collect_repo_context", return_value="ctx"):
+                result = orchestrator.execute(task, run, Path(tmp), Path(tmp) / "rd")
+        self.assertNotIn("worker_backend", result.diagnostics)
+
 
 if __name__ == "__main__":
     unittest.main()

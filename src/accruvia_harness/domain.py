@@ -450,7 +450,7 @@ class FailureClassification:
 
 
 def serialize_dataclass(value: Any) -> dict[str, Any]:
-    payload = asdict(value)
+    payload = dict(value) if isinstance(value, dict) else asdict(value)
     for key, item in list(payload.items()):
         if isinstance(item, datetime):
             payload[key] = item.isoformat()

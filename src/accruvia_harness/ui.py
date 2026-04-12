@@ -44,12 +44,25 @@ from .services.task_service import TaskService
 from .services.workflow_timing_service import WorkflowTimingService
 from .services.workflow_service import WorkflowService
 from .context_recorder import ContextRecorder
+from .frustration_triage import triage_frustration
 
 # ui_responder and ui_memory deleted — mediation replaced by MCP server.
 # Stubs for types still referenced in method signatures below.
-ConversationTurn = dict  # type: ignore[assignment,misc]
-ResponderResult = dict  # type: ignore[assignment,misc]
-ResponderContextPacket = dict  # type: ignore[assignment,misc]
+# AttrDict supports both dict["key"] and dict.key access so auto-generated
+# code that assumes dataclass-style attribute access works alongside existing
+# dict-consuming code.
+class _AttrDict(dict):
+    def __getattr__(self, key):
+        try:
+            return self[key]
+        except KeyError:
+            raise AttributeError(key)
+    def __setattr__(self, key, value):
+        self[key] = value
+
+ConversationTurn = _AttrDict  # type: ignore[assignment,misc]
+ResponderResult = _AttrDict  # type: ignore[assignment,misc]
+ResponderContextPacket = _AttrDict  # type: ignore[assignment,misc]
 from .domain import (
     ContextRecord,
     IntentModel,
@@ -4633,7 +4646,16 @@ class HarnessUIDataService:
         )
         if llm_result is not None:
             return llm_result
-        return answer_ui_message(packet, comment_text)
+        return ResponderResult(
+            reply="Acknowledged. No LLM backend is available for a detailed response.",
+            recommended_action="",
+            evidence_refs=[],
+            mode_shift="",
+            retrieved_memories=[],
+            llm_backend="",
+            prompt_path="",
+            response_path="",
+        )
 
     def _answer_operator_comment_with_llm(
         self,
@@ -6452,7 +6474,7 @@ class HarnessUIDataService:
             task, run = self._latest_linked_task_and_run(project_id=project_id, objective_id=objective_id)
         run_context = None
         if run is not None:
-            run_context = RunResponderContext(
+            run_context = _AttrDict(
                 run_id=run.id,
                 attempt=run.attempt,
                 status=run.status.value,
@@ -6466,7 +6488,7 @@ class HarnessUIDataService:
         task_context = None
         if task is not None:
             insight = self.task_failure_insight(task.id)
-            task_context = TaskResponderContext(
+            task_context = _AttrDict(
                 task_id=task.id,
                 title=task.title,
                 status=task.status.value,
@@ -6481,7 +6503,7 @@ class HarnessUIDataService:
             )
         objective_context = None
         if objective is not None:
-            objective_context = ObjectiveResponderContext(
+            objective_context = _AttrDict(
                 objective_id=objective.id,
                 title=objective.title,
                 status=objective.status.value,
@@ -6492,12 +6514,14 @@ class HarnessUIDataService:
                 mermaid_status=(mermaid.status.value if mermaid is not None else ""),
                 mermaid_summary=(mermaid.summary if mermaid is not None else ""),
             )
-        retrieved_memories = self.memory_provider.retrieve(
-            project_id=project.id,
-            objective_id=objective_id,
-            query_text=comment_text,
-            limit=4,
-        )
+        retrieved_memories = []
+        if self.memory_provider is not None:
+            retrieved_memories = self.memory_provider.retrieve(
+                project_id=project.id,
+                objective_id=objective_id,
+                query_text=comment_text,
+                limit=4,
+            )
         current_mode = "empty"
         interrogation_question = ""
         interrogation_remaining = 0
@@ -6577,7 +6601,7 @@ class HarnessUIDataService:
                         created_at=record.created_at.isoformat(),
                     )
                 )
-        turns.sort(key=lambda item: item.created_at)
+        turns.sort(key=lambda item: item["created_at"])
         return turns[-10:]
 
     def task_conversation(self, task_id: str) -> dict[str, object]:

@@ -144,7 +144,7 @@ class TestAddOperatorCommentRecorder(unittest.TestCase):
         self.assertIs(self.service.context_recorder.store, self.store)
 
     def test_responder_returns_packet_backed_answer(self) -> None:
-        fake_router = FakeLLMRouter("The next step is to review your mermaid diagram.")
+        fake_router = FakeLLMRouter('{"reply": "The next step is to review your mermaid diagram.", "recommended_action": "review_mermaid", "evidence_refs": [], "mode_shift": "none"}')
         self.ctx.interrogation_service = SimpleNamespace(llm_router=fake_router)
 
         result = self.service.add_operator_comment(
