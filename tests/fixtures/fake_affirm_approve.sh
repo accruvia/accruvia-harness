@@ -3,8 +3,6 @@ set -euo pipefail
 
 response_path="${ACCRUVIA_LLM_RESPONSE_PATH:?}"
 
-{
-  echo "APPROVE"
-  echo
-  echo "The deterministic gates passed and the candidate is acceptable for promotion."
-} > "${response_path}"
+cat > "${response_path}" <<'JSON'
+{"approved": true, "rationale": "The deterministic gates passed and the candidate is acceptable for promotion.", "concerns": [], "summary": "Approved for promotion"}
+JSON

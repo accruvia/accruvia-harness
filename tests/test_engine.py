@@ -974,7 +974,7 @@ class HarnessEngineTests(unittest.TestCase):
                 response_path = Path(invocation.run_dir) / "response.txt"
                 prompt_path = Path(invocation.run_dir) / "prompt.txt"
                 prompt_path.write_text(invocation.prompt, encoding="utf-8")
-                response_text = '{"approved": true, "rationale": "ready"}'
+                response_text = '{"approved": true, "rationale": "ready", "concerns": [], "summary": "ready to merge"}'
                 response_path.write_text(response_text, encoding="utf-8")
                 return _LLMResult(prompt_path, response_path, response_text), "command"
 
@@ -1066,7 +1066,7 @@ class HarnessEngineTests(unittest.TestCase):
                 response_path = Path(invocation.run_dir) / "response.txt"
                 prompt_path = Path(invocation.run_dir) / "prompt.txt"
                 prompt_path.write_text(invocation.prompt, encoding="utf-8")
-                response_text = '{"approved": true, "rationale": "ready"}'
+                response_text = '{"approved": true, "rationale": "ready", "concerns": [], "summary": "ready to merge"}'
                 response_path.write_text(response_text, encoding="utf-8")
                 return _LLMResult(prompt_path, response_path, response_text), "command"
 
