@@ -315,6 +315,60 @@ class ChangedFilesTests(unittest.TestCase):
         self.assertIn("committed_file.txt", files)
 
 
+class LocalWorkerReportContractTests(unittest.TestCase):
+    """Verify LocalArtifactWorker report includes merge-gate-required fields."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.base = Path(self.temp_dir.name)
+        self.task = Task(
+            id=new_id("task"), project_id="project_1",
+            title="Report contract", objective="Verify report fields",
+        )
+        self.run = Run(
+            id=new_id("run"), task_id=self.task.id,
+            status=RunStatus.WORKING, attempt=1, summary="",
+        )
+
+    def test_report_includes_ship_ready(self):
+        worker = LocalArtifactWorker()
+        worker.work(self.task, self.run, self.base)
+        report = json.loads((self.base / "runs" / self.run.id / "report.json").read_text())
+        self.assertIn("ship_ready", report)
+        self.assertTrue(report["ship_ready"])
+
+    def test_report_includes_compile_and_test_check(self):
+        worker = LocalArtifactWorker()
+        worker.work(self.task, self.run, self.base)
+        report = json.loads((self.base / "runs" / self.run.id / "report.json").read_text())
+        self.assertIsInstance(report.get("compile_check"), dict)
+        self.assertIsInstance(report.get("test_check"), dict)
+        self.assertTrue(report["compile_check"]["passed"])
+        self.assertTrue(report["test_check"]["passed"])
+
+
+class BuildWorkerFromConfigTests(unittest.TestCase):
+    """build_worker_from_config must always return SkillsWorker."""
+
+    def test_returns_skills_worker(self):
+        from accruvia_harness.workers import build_worker_from_config
+        from accruvia_harness.skills_worker import SkillsWorker
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = HarnessConfig(
+                db_path=Path(tmp) / "db", workspace_root=Path(tmp),
+                log_path=Path(tmp) / "log",
+                default_project_name="demo", default_repo="x/x",
+                runtime_backend="local", temporal_target="localhost:7233",
+                temporal_namespace="default", temporal_task_queue="q",
+                llm_backend="auto", llm_model=None, llm_command=None,
+                llm_codex_command=None, llm_claude_command=None,
+                llm_accruvia_client_command=None,
+            )
+            worker = build_worker_from_config(cfg)
+            self.assertIsInstance(worker, SkillsWorker)
+
+
 class AgentBackendRemovalAsserts(unittest.TestCase):
     def test_agent_worker_module_is_gone(self):
         with self.assertRaises(ModuleNotFoundError):
@@ -351,6 +405,32 @@ class AgentBackendRemovalAsserts(unittest.TestCase):
                 load_persisted_config(path)
         finally:
             _os.unlink(path)
+
+    def test_sa_watch_direct_repair_returns_blocked(self):
+        from accruvia_harness.sa_watch import SAWatchService
+        from accruvia_harness.domain import Task, Run, RunStatus, new_id
+        from unittest.mock import MagicMock
+        store = MagicMock()
+        control_plane = MagicMock()
+        with tempfile.TemporaryDirectory() as tmp:
+            svc = SAWatchService(
+                store=store, control_plane=control_plane,
+                llm_router=None, workspace_root=Path(tmp),
+            )
+            task = Task(id=new_id("task"), project_id="p", title="repair",
+                        objective="fix", strategy="sa_watch_direct_repair")
+            run = Run(id=new_id("run"), task_id=task.id,
+                      status=RunStatus.WORKING, attempt=1, summary="")
+            result = svc._run_direct_repair(task, run, Path(tmp))
+            self.assertEqual("blocked", result.status)
+            self.assertEqual("agent_backend_removed", result.diagnostics["failure_category"])
+
+    def test_atomicity_control_plane_files_reference_skills_worker(self):
+        from accruvia_harness.atomicity import CONTROL_PLANE_FILES, VALIDATION_POLICY_FILES
+        self.assertIn("src/accruvia_harness/skills_worker.py", CONTROL_PLANE_FILES)
+        self.assertNotIn("src/accruvia_harness/agent_worker.py", CONTROL_PLANE_FILES)
+        self.assertIn("src/accruvia_harness/skills_worker.py", VALIDATION_POLICY_FILES)
+        self.assertNotIn("src/accruvia_harness/agent_worker.py", VALIDATION_POLICY_FILES)
 
 
 if __name__ == "__main__":
