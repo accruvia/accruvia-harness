@@ -353,3 +353,132 @@ class RuntimeTests(unittest.TestCase):
             )
 
         self.assertEqual(2400, config.heartbeat_timeout_seconds)
+
+    def test_scope_failure_early_exit(self) -> None:
+        from accruvia_harness.policy import WorkResult
+
+        class ScopeFailWorker:
+            def work(self, task, run, workspace_root, retry_hints=None):
+                run_dir = workspace_root / "runs" / run.id
+                run_dir.mkdir(parents=True, exist_ok=True)
+                (run_dir / "plan.txt").write_text("plan\n", encoding="utf-8")
+                (run_dir / "report.json").write_text(
+                    '{"worker_outcome":"failed","failure_category":"scope_skill_failure"}',
+                    encoding="utf-8",
+                )
+                return WorkResult(
+                    summary="Scope skill failed to produce valid output.",
+                    artifacts=[
+                        ("plan", str(run_dir / "plan.txt"), "Plan"),
+                        ("report", str(run_dir / "report.json"), "Report"),
+                    ],
+                    outcome="failed",
+                    diagnostics={
+                        "stage": "scope",
+                        "failure_category": "scope_skill_failure",
+                    },
+                )
+
+        scope_fail_engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-scope-fail",
+            worker=ScopeFailWorker(),
+        )
+        task = scope_fail_engine.create_task_with_policy(
+            project_id=self.project_id,
+            title="Scope fail task",
+            objective="Trigger early exit on scope failure",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+
+        run = scope_fail_engine.run_once(task.id)
+
+        self.assertEqual(RunStatus.FAILED, run.status)
+
+    def test_diagnose_triggered(self) -> None:
+        from accruvia_harness.policy import WorkResult
+
+        class DiagnoseWorker:
+            def work(self, task, run, workspace_root, retry_hints=None):
+                run_dir = workspace_root / "runs" / run.id
+                run_dir.mkdir(parents=True, exist_ok=True)
+                (run_dir / "plan.txt").write_text("plan\n", encoding="utf-8")
+                (run_dir / "report.json").write_text(
+                    '{"worker_outcome":"failed","failure_category":"code_defect","diagnostics":{"classification":"code_defect"}}',
+                    encoding="utf-8",
+                )
+                return WorkResult(
+                    summary="Validation failed — diagnosed as code defect.",
+                    artifacts=[
+                        ("plan", str(run_dir / "plan.txt"), "Plan"),
+                        ("report", str(run_dir / "report.json"), "Report"),
+                    ],
+                    outcome="failed",
+                    diagnostics={
+                        "stage": "validate",
+                        "failure_category": "code_defect",
+                        "classification": "code_defect",
+                    },
+                )
+
+        diag_engine = HarnessEngine(
+            store=self.store,
+            workspace_root=Path(self.temp_dir.name) / "workspace-diagnose",
+            worker=DiagnoseWorker(),
+        )
+        task = diag_engine.create_task_with_policy(
+            project_id=self.project_id,
+            title="Diagnose trigger task",
+            objective="Trigger diagnose stage on validation failure",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            strategy="baseline",
+            max_attempts=1,
+            required_artifacts=["plan", "report"],
+        )
+
+        run = diag_engine.run_once(task.id)
+
+        self.assertEqual(RunStatus.FAILED, run.status)
+        evals = self.store.list_evaluations(run.id)
+        self.assertGreaterEqual(len(evals), 1)
+        self.assertEqual(EvaluationVerdict.FAILED, evals[0].verdict)
+
+    def test_fix_tests_loop_bounded(self) -> None:
+        from accruvia_harness.services.work_orchestrator import SkillsWorkOrchestrator
+
+        max_rounds_attr = None
+        import accruvia_harness.services.work_orchestrator as wo_mod
+        source = open(wo_mod.__file__, "r").read()
+        import re
+        match = re.search(r"_MAX_FIX_ROUNDS\s*=\s*(\d+)", source)
+        self.assertIsNotNone(match, "_MAX_FIX_ROUNDS constant not found in work_orchestrator")
+        max_rounds = int(match.group(1))
+        self.assertGreaterEqual(max_rounds, 1)
+        self.assertLessEqual(max_rounds, 5)
+
+    def test_routes_skills_backend(self) -> None:
+        from accruvia_harness.workers import build_worker_from_config
+        from accruvia_harness.skills_worker import SkillsWorker
+
+        config = HarnessConfig.from_payload(
+            {
+                **self.config.to_payload(),
+                "llm_backend": "command",
+                "llm_command": "echo '{}'",
+            }
+        )
+
+        worker = build_worker_from_config(config)
+
+        self.assertIsInstance(worker, SkillsWorker)

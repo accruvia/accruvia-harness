@@ -275,3 +275,47 @@ class TemporalSkillsPipelineTests(unittest.TestCase):
             statuses_seen & {"completed", "failed"},
             f"Expected at least one terminal run, got statuses: {statuses_seen}",
         )
+
+    def test_skills_pipeline_emits_telemetry_spans(self) -> None:
+        from accruvia_harness.telemetry import TelemetrySink
+
+        telemetry_dir = Path(self.temp_dir.name) / "telemetry"
+        telemetry = TelemetrySink(telemetry_dir)
+
+        self.engine.telemetry = telemetry
+        self.engine._build_services()
+
+        project = self.engine.create_project(
+            name="Telemetry Span Project",
+            description="E2E test for telemetry span emission",
+        )
+        task = self.engine.create_task(
+            project_id=project.id,
+            title="Telemetry span test",
+            objective="Verify telemetry spans are emitted during pipeline",
+        )
+
+        from accruvia_harness.runtime import TemporalWorkflowRuntime
+
+        runtime = TemporalWorkflowRuntime(
+            config=self.config,
+            engine=self.engine,
+            target=self.config.temporal_target,
+            namespace=self.config.temporal_namespace,
+            task_queue=self.task_queue,
+        )
+
+        result = runtime.run_task_until_stable(task.id)
+
+        self.assertIn(result["task"].status.value, ("completed", "stable"))
+
+        spans = telemetry.load_spans()
+        span_names = [s["name"] for s in spans]
+        self.assertTrue(
+            len(spans) >= 1,
+            f"Expected at least one telemetry span, got {len(spans)}: {span_names}",
+        )
+        self.assertTrue(
+            any(s["name"] == "run_cycle" for s in spans),
+            f"Expected a 'run_cycle' span; got names: {span_names}",
+        )
