@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 
-from .common import decision_from_row, evaluation_from_row, promotion_from_row, run_from_row, parse_dt
-from ..domain import Artifact, Decision, Evaluation, PromotionRecord, Run
+from .common import decision_from_row, decision_queue_item_from_row, evaluation_from_row, promotion_from_row, run_from_row, parse_dt
+from ..domain import Artifact, Decision, DecisionQueueItem, Evaluation, PromotionRecord, Run
 
 
 class RunRecordsStoreMixin:
@@ -180,3 +180,63 @@ class RunRecordsStoreMixin:
     def latest_promotion(self, task_id: str) -> PromotionRecord | None:
         rows = self.list_promotions(task_id)
         return rows[-1] if rows else None
+
+    def enqueue_decision(self, item: DecisionQueueItem) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO decision_queue (id, run_id, task_id, evaluation_id, priority, created_at, status, started_at, completed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    item.id,
+                    item.run_id,
+                    item.task_id,
+                    item.evaluation_id,
+                    item.priority,
+                    item.created_at.isoformat(),
+                    item.status,
+                    item.started_at.isoformat() if item.started_at else None,
+                    item.completed_at.isoformat() if item.completed_at else None,
+                ),
+            )
+
+    def dequeue_decision(self) -> DecisionQueueItem | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, run_id, task_id, evaluation_id, priority, created_at, status, started_at, completed_at
+                FROM decision_queue
+                WHERE status = 'pending'
+                ORDER BY priority ASC, created_at ASC
+                LIMIT 1
+                """,
+            ).fetchone()
+            if row is None:
+                return None
+            now = parse_dt(connection.execute("SELECT datetime('now') AS now").fetchone()["now"] + "+00:00")
+            connection.execute(
+                "UPDATE decision_queue SET status = 'processing', started_at = ? WHERE id = ?",
+                (now.isoformat(), row["id"]),
+            )
+            item = decision_queue_item_from_row(row)
+            item = DecisionQueueItem(
+                id=item.id,
+                run_id=item.run_id,
+                task_id=item.task_id,
+                evaluation_id=item.evaluation_id,
+                priority=item.priority,
+                created_at=item.created_at,
+                status="processing",
+                started_at=now,
+                completed_at=None,
+            )
+            return item
+
+    def complete_decision(self, item_id: str, status: str) -> None:
+        with self.connect() as connection:
+            now = parse_dt(connection.execute("SELECT datetime('now') AS now").fetchone()["now"] + "+00:00")
+            connection.execute(
+                "UPDATE decision_queue SET status = ?, completed_at = ? WHERE id = ?",
+                (status, now.isoformat(), item_id),
+            )

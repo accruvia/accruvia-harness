@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-04-11 — Add enqueue_decision and dequeue_decision to store
+
+Added DecisionQueueItem dataclass to domain.py, a decision_queue_item_from_row helper to common.py, and three queue methods (enqueue_decision, dequeue_decision, complete_decision) to RunRecordsStoreMixin. The dequeue method atomically selects the oldest pending item by priority then created_at and updates it to 'processing' within one connection context. Tests cover FIFO ordering, priority ordering, completion status transitions, and idempotent dequeue-when-empty.
+
+**Files changed:** src/accruvia_harness/domain.py, src/accruvia_harness/persistence/common.py, src/accruvia_harness/persistence/run_records.py, tests/test_store.py
+
 ## 2026-04-11 — Add decision_queue table migration to store.py
 
 Added Migration 18 (decision_queue) to the MIGRATIONS list in migrations.py, following the exact pattern of Migration 17 (validation_queue) but with evaluation_id instead of snapshot_id. Added a companion test in test_store.py that queries sqlite_master to confirm the table exists after initialize().

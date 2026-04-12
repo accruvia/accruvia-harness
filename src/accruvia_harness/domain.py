@@ -296,6 +296,19 @@ class PromotionRecord:
     created_at: datetime = field(default_factory=utc_now)
 
 
+@dataclass(slots=True)
+class DecisionQueueItem:
+    id: str
+    run_id: str
+    task_id: str
+    evaluation_id: str
+    priority: int = 100
+    created_at: datetime = field(default_factory=utc_now)
+    status: str = "pending"
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+
+
 class FailureCategory(str):
     """String-backed failure category with enum-like `.value` access."""
 
