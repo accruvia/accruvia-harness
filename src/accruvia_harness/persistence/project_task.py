@@ -4,8 +4,8 @@ import json
 import sqlite3
 from datetime import UTC, datetime
 
-from .common import project_from_row, task_from_row, task_lease_from_row
-from ..domain import ObjectiveStatus, Project, Task, TaskLease, TaskStatus, validate_task_transition
+from .common import plan_from_row, project_from_row, task_from_row, task_lease_from_row
+from ..domain import ObjectiveStatus, Plan, Project, Task, TaskLease, TaskStatus, validate_task_transition
 
 
 def _workflow_state_disposition(metadata: dict[str, object]) -> dict[str, object] | None:
@@ -142,17 +142,20 @@ class ProjectTaskStoreMixin:
             connection.execute(
                 """
                 INSERT INTO tasks (
-                    id, project_id, objective_id, title, objective, priority, parent_task_id, source_run_id,
+                    id, project_id, objective_id, plan_id, mermaid_node_id,
+                    title, objective, priority, parent_task_id, source_run_id,
                     external_ref_type, external_ref_id, external_ref_metadata_json,
                     validation_profile, validation_mode, scope_json, strategy, max_attempts, max_branches,
                     required_artifacts_json, attempt_metadata_json, status, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task.id,
                     task.project_id,
                     task.objective_id,
+                    task.plan_id,
+                    task.mermaid_node_id,
                     task.title,
                     task.objective,
                     task.priority,
@@ -179,7 +182,7 @@ class ProjectTaskStoreMixin:
         query = """
             SELECT id, project_id, title, objective, priority, parent_task_id, source_run_id,
                    objective_id,
-                   external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile, validation_mode, scope_json,
+                   plan_id, mermaid_node_id, external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile, validation_mode, scope_json,
                    strategy, max_attempts, max_branches, required_artifacts_json, attempt_metadata_json, status, created_at, updated_at
             FROM tasks
         """
@@ -197,7 +200,7 @@ class ProjectTaskStoreMixin:
             row = connection.execute(
                 """
                 SELECT id, project_id, objective_id, title, objective, priority, parent_task_id, source_run_id,
-                       external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile, validation_mode, scope_json,
+                       plan_id, mermaid_node_id, external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile, validation_mode, scope_json,
                        strategy, max_attempts, max_branches, required_artifacts_json, attempt_metadata_json, status, created_at, updated_at
                 FROM tasks WHERE id = ?
                 """,
@@ -210,7 +213,7 @@ class ProjectTaskStoreMixin:
             row = connection.execute(
                 """
                 SELECT id, project_id, objective_id, title, objective, priority, parent_task_id, source_run_id,
-                       external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile, validation_mode, scope_json,
+                       plan_id, mermaid_node_id, external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile, validation_mode, scope_json,
                        strategy, max_attempts, max_branches, required_artifacts_json, attempt_metadata_json, status, created_at, updated_at
                 FROM tasks
                 WHERE external_ref_type = ? AND external_ref_id = ?
@@ -224,7 +227,7 @@ class ProjectTaskStoreMixin:
     def next_pending_task(self, project_id: str | None = None) -> Task | None:
         query = """
             SELECT id, project_id, title, objective, priority, parent_task_id, source_run_id,
-                   external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile, validation_mode, scope_json,
+                   plan_id, mermaid_node_id, external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile, validation_mode, scope_json,
                    strategy, max_attempts, max_branches, required_artifacts_json, attempt_metadata_json, status, created_at, updated_at
             FROM tasks
             WHERE status = ?
@@ -346,7 +349,7 @@ class ProjectTaskStoreMixin:
             row = connection.execute(
                 """
             SELECT id, project_id, objective_id, title, objective, priority, parent_task_id, source_run_id,
-                   external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile, validation_mode, scope_json,
+                   plan_id, mermaid_node_id, external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile, validation_mode, scope_json,
                    strategy, max_attempts, max_branches, required_artifacts_json, attempt_metadata_json, status, created_at, updated_at
             FROM tasks
                 WHERE parent_task_id = ? AND source_run_id = ?
@@ -362,7 +365,7 @@ class ProjectTaskStoreMixin:
             rows = connection.execute(
                 """
                 SELECT id, project_id, title, objective, priority, parent_task_id, source_run_id,
-                       external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile, validation_mode, scope_json,
+                       plan_id, mermaid_node_id, external_ref_type, external_ref_id, external_ref_metadata_json, validation_profile, validation_mode, scope_json,
                        strategy, max_attempts, max_branches, required_artifacts_json, attempt_metadata_json, status, created_at, updated_at
                 FROM tasks
                 WHERE parent_task_id = ?
@@ -463,3 +466,58 @@ class ProjectTaskStoreMixin:
                 "UPDATE tasks SET external_ref_metadata_json = ?, updated_at = ? WHERE id = ?",
                 (json.dumps(metadata, sort_keys=True), datetime.now(UTC).isoformat(), task_id),
             )
+
+    # ------------------------------------------------------------------
+    # Plans (objective -> plan -> task -> run lineage)
+    # ------------------------------------------------------------------
+    def create_plan(self, plan: Plan) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO plans (
+                    id, objective_id, parent_plan_id, mermaid_node_id,
+                    plan_revision, slice_json, atomicity_assessment_json,
+                    approval_status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    plan.id,
+                    plan.objective_id,
+                    plan.parent_plan_id,
+                    plan.mermaid_node_id,
+                    plan.plan_revision,
+                    json.dumps(plan.slice, sort_keys=True),
+                    json.dumps(plan.atomicity_assessment, sort_keys=True),
+                    plan.approval_status,
+                    plan.created_at.isoformat(),
+                    plan.updated_at.isoformat(),
+                ),
+            )
+
+    def get_plan(self, plan_id: str) -> Plan | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM plans WHERE id = ?", (plan_id,)
+            ).fetchone()
+        return plan_from_row(row) if row else None
+
+    def list_plans_for_objective(self, objective_id: str) -> list[Plan]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM plans WHERE objective_id = ? ORDER BY created_at, id",
+                (objective_id,),
+            ).fetchall()
+        return [plan_from_row(row) for row in rows]
+
+    def get_plan_by_node(self, objective_id: str, mermaid_node_id: str) -> Plan | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM plans
+                 WHERE objective_id = ? AND mermaid_node_id = ?
+                 ORDER BY plan_revision DESC
+                 LIMIT 1
+                """,
+                (objective_id, mermaid_node_id),
+            ).fetchone()
+        return plan_from_row(row) if row else None

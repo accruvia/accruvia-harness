@@ -65,10 +65,13 @@ def _safe_json_loads(value: str | None, fallback: object = None, *, column: str 
 
 
 def task_from_row(row: sqlite3.Row) -> Task:
+    row_keys = row.keys()
     return Task(
         id=row["id"],
         project_id=row["project_id"],
-        objective_id=row["objective_id"] if "objective_id" in row.keys() else None,
+        objective_id=row["objective_id"] if "objective_id" in row_keys else None,
+        plan_id=row["plan_id"] if "plan_id" in row_keys else None,
+        mermaid_node_id=row["mermaid_node_id"] if "mermaid_node_id" in row_keys else None,
         title=row["title"],
         objective=row["objective"],
         priority=int(row["priority"]),
@@ -78,14 +81,30 @@ def task_from_row(row: sqlite3.Row) -> Task:
         external_ref_id=row["external_ref_id"],
         external_ref_metadata=_safe_json_loads(row["external_ref_metadata_json"], {}, column="tasks.external_ref_metadata_json"),
         validation_profile=row["validation_profile"],
-        validation_mode=row["validation_mode"] if "validation_mode" in row.keys() else "default_focused",
+        validation_mode=row["validation_mode"] if "validation_mode" in row_keys else "default_focused",
         scope=_safe_json_loads(row["scope_json"], {}, column="tasks.scope_json"),
         strategy=row["strategy"],
         max_attempts=int(row["max_attempts"]),
-        max_branches=int(row["max_branches"]) if "max_branches" in row.keys() else 1,
+        max_branches=int(row["max_branches"]) if "max_branches" in row_keys else 1,
         required_artifacts=_safe_json_loads(row["required_artifacts_json"], [], column="tasks.required_artifacts_json"),
-        attempt_metadata=_safe_json_loads(row["attempt_metadata_json"], {}, column="tasks.attempt_metadata_json") if "attempt_metadata_json" in row.keys() else {},
+        attempt_metadata=_safe_json_loads(row["attempt_metadata_json"], {}, column="tasks.attempt_metadata_json") if "attempt_metadata_json" in row_keys else {},
         status=TaskStatus(row["status"]),
+        created_at=parse_dt(row["created_at"]),
+        updated_at=parse_dt(row["updated_at"]),
+    )
+
+
+def plan_from_row(row: sqlite3.Row) -> "Plan":  # noqa: F821
+    from ..domain import Plan
+    return Plan(
+        id=row["id"],
+        objective_id=row["objective_id"],
+        parent_plan_id=row["parent_plan_id"],
+        mermaid_node_id=row["mermaid_node_id"],
+        plan_revision=int(row["plan_revision"]),
+        slice=_safe_json_loads(row["slice_json"], {}, column="plans.slice_json"),
+        atomicity_assessment=_safe_json_loads(row["atomicity_assessment_json"], {}, column="plans.atomicity_assessment_json"),
+        approval_status=row["approval_status"],
         created_at=parse_dt(row["created_at"]),
         updated_at=parse_dt(row["updated_at"]),
     )

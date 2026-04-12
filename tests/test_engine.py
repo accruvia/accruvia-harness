@@ -1222,17 +1222,17 @@ class HarnessEngineTests(unittest.TestCase):
         )
         self.assertEqual("gitlab_issue", task_events[0].payload["external_ref_type"])
         self.assertEqual("458", task_events[0].payload["external_ref_id"])
-        # The auto-merge gate fires on PROMOTE decisions for any backend.
-        # LocalArtifactWorker reports ship_ready=True so the policy check
-        # passes, but the merge itself fails (branch doesn't exist in the
-        # test workspace), emitting auto_merge_failed.
+        # Per-task auto-merge is hobbled in run_service.py — the harness
+        # architecture treats tasks as atomic slices of an objective, not
+        # standalone promotable units. Promotion is objective-level only.
+        # See PRODUCT_PLAN.md + specs/plan-to-task-mapping.md. As a result
+        # the auto_merge_failed event is intentionally absent.
         self.assertEqual(
             [
                 "run_created",
                 "project_workspace_prepared",
                 "planned",
                 "worker_completed",
-                "auto_merge_failed",
             ],
             [event.event_type for event in run_events],
         )

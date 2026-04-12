@@ -159,6 +159,8 @@ class Task:
     title: str
     objective: str
     objective_id: str | None = None
+    plan_id: str | None = None
+    mermaid_node_id: str | None = None
     priority: int = 100
     parent_task_id: str | None = None
     source_run_id: str | None = None
@@ -174,6 +176,22 @@ class Task:
     required_artifacts: list[str] = field(default_factory=lambda: ["plan", "report"])
     attempt_metadata: dict[str, Any] = field(default_factory=dict)
     status: TaskStatus = TaskStatus.PENDING
+    created_at: datetime = field(default_factory=utc_now)
+    updated_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
+class Plan:
+    """Approved atomic slice derived from an objective. See specs/atomic-plan-schema.md."""
+
+    id: str
+    objective_id: str
+    mermaid_node_id: str | None = None
+    parent_plan_id: str | None = None
+    plan_revision: int = 1
+    slice: dict[str, Any] = field(default_factory=dict)
+    atomicity_assessment: dict[str, Any] = field(default_factory=dict)
+    approval_status: str = "approved"
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)
 

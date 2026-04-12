@@ -96,6 +96,13 @@ class TaskService:
             existing = self.store.get_task_by_external_ref(task.external_ref_type, task.external_ref_id)
             if existing is not None:
                 return existing
+        # Auto-populate plan_id and mermaid_node_id so every new task joins
+        # the objective -> plan -> task -> run lineage from the moment it
+        # is created. This keeps the plans table and mermaid_node_id columns
+        # consistent as the harness runs, matching the backfill shape for
+        # existing tasks. See specs/atomic-plan-schema.md and
+        # specs/plan-to-task-mapping.md for the intended lineage.
+        task = self._ensure_plan_linkage(task)
         self.store.create_task(task)
         self.store.create_event(
             Event(
@@ -107,6 +114,49 @@ class TaskService:
             )
         )
         return task
+
+    def _ensure_plan_linkage(self, task: Task) -> Task:
+        """Attach a Plan record and mermaid_node_id to a new task.
+
+        Idempotent on re-creation: if plan_id or mermaid_node_id are already
+        set on the incoming task, they are respected. Otherwise we synthesize
+        a stable node id (T_<task-suffix>) and create a 1:1 plan row.
+
+        Tasks without an objective_id get no plan (plans are
+        objective-scoped). Those are typically ad-hoc tasks not part of a
+        decomposition.
+        """
+        from ..domain import Plan
+
+        if not task.objective_id:
+            return task
+        if task.plan_id and task.mermaid_node_id:
+            return task
+
+        suffix = task.id.split("_", 1)[-1][:12] if "_" in task.id else task.id[:12]
+        node_id = task.mermaid_node_id or f"T_{suffix}"
+        plan_id = task.plan_id
+        if not plan_id:
+            plan = Plan(
+                id=new_id("plan"),
+                objective_id=task.objective_id,
+                mermaid_node_id=node_id,
+                slice={
+                    "derived_from": "task_service.create_task",
+                    "task_id": task.id,
+                    "task_title": task.title,
+                    "files": list((task.scope or {}).get("files_to_touch") or []),
+                },
+                atomicity_assessment={
+                    "is_atomic": True,
+                    "violations": [],
+                    "reason": "auto-created 1:1 plan",
+                },
+                approval_status="approved",
+            )
+            self.store.create_plan(plan)
+            plan_id = plan.id
+        return replace(task, plan_id=plan_id, mermaid_node_id=node_id)
 
     def create_task_with_policy(
         self,
