@@ -39,7 +39,6 @@ _GIT_COMMIT = _get_git_commit()
 _SERVER_STARTED_AT = _dt.datetime.now(_dt.timezone.utc).isoformat()
 from .context_control import objective_execution_gate
 from .llm import LLMExecutionError, LLMInvocation
-from .services.red_team_service import RedTeamLoopService
 from .services.task_service import TaskService
 from .services.workflow_timing_service import WorkflowTimingService
 from .services.workflow_service import WorkflowService
@@ -141,7 +140,8 @@ class ObjectiveReviewCoordinator:
 
 _OBJECTIVE_REVIEW = ObjectiveReviewCoordinator()
 _MERMAID_RED_TEAM_MAX_ROUNDS = 20
-_RED_TEAM_LOOP = RedTeamLoopService()
+_INTERROGATION_RED_TEAM_MAX_ROUNDS = 4
+_ATOMIC_DECOMP_RED_TEAM_MAX_ROUNDS = 4
 
 _OBJECTIVE_REVIEW_DIMENSIONS = frozenset(
     {
@@ -2362,6 +2362,17 @@ class HarnessUIDataService:
                 pass
         return registry
 
+    def _red_team_loop_orchestrator(self, llm_router):
+        """Build a RedTeamLoopOrchestrator wired to this request's context."""
+        from .services.red_team_loop import RedTeamLoopOrchestrator
+        return RedTeamLoopOrchestrator(
+            skill_registry=self._skill_registry(),
+            llm_router=llm_router,
+            store=self.store,
+            workspace_root=self.workspace_root,
+            telemetry=getattr(self.ctx, "telemetry", None),
+        )
+
     def _objective_review_usage_details(
         self,
         diagnostics: dict[str, object],
@@ -3097,28 +3108,9 @@ class HarnessUIDataService:
         replaced by a single well-prompted skill invocation per the skills
         manager discipline. The skill's validate_output enforces minimum
         unit shape; if it fails the caller returns []."""
-        from .skills import SkillInvocation, invoke_skill
         if not generation_id:
             generation_id = new_id("atomic_gen")
-        run_dir = self.workspace_root / "ui_atomic" / objective.id / generation_id
-        run_dir.mkdir(parents=True, exist_ok=True)
         diagram_version = int(getattr(mermaid, "version", 0))
-        task_stub = Task(
-            id=new_id("ui_atomic_task"),
-            project_id=objective.project_id,
-            objective_id=objective.id,
-            title=f"Generate atomic units for {objective.title}",
-            objective="Derive atomic units from accepted Mermaid.",
-            strategy="ui_atomic_generation",
-            status=TaskStatus.COMPLETED,
-        )
-        run_stub = Run(
-            id=new_id("ui_atomic_run"),
-            task_id=task_stub.id,
-            status=RunStatus.COMPLETED,
-            attempt=1,
-            summary="Atomic decomposition skill invocation",
-        )
         self.store.create_context_record(
             ContextRecord(
                 id=new_id("context"),
@@ -3140,25 +3132,41 @@ class HarnessUIDataService:
                 },
             )
         )
-        skill = self._skill_registry().get("atomic_decomposition")
-        invocation = SkillInvocation(
-            skill_name="atomic_decomposition",
-            inputs={
-                "objective_title": objective.title,
-                "objective_summary": objective.summary,
-                "intent_summary": intent_model.intent_summary if intent_model else "",
-                "success_definition": intent_model.success_definition if intent_model else "",
-                "non_negotiables": list(intent_model.non_negotiables) if intent_model else [],
-                "mermaid_content": mermaid.content if mermaid else "",
-                "recent_comments": [r.content for r in comments],
-                "repo_context": repo_context,
-            },
-            task=task_stub,
-            run=run_stub,
-            run_dir=run_dir,
+        orchestrator = self._red_team_loop_orchestrator(llm_router)
+        initial_inputs = {
+            "objective_title": objective.title,
+            "objective_summary": objective.summary,
+            "intent_summary": intent_model.intent_summary if intent_model else "",
+            "success_definition": intent_model.success_definition if intent_model else "",
+            "non_negotiables": list(intent_model.non_negotiables) if intent_model else [],
+            "mermaid_content": mermaid.content if mermaid else "",
+            "recent_comments": [r.content for r in comments],
+            "repo_context": repo_context,
+        }
+
+        def stopping_predicate(output, reviewer_results, round_number):
+            reviewer = reviewer_results.get("review_atomic_fidelity")
+            if reviewer is None or not reviewer.success:
+                return True
+            verdict = str(reviewer.output.get("verdict") or "").lower()
+            return verdict == "pass"
+
+        loop_result = orchestrator.execute(
+            generator_skill_name="atomic_decomposition",
+            reviewer_skill_names=["review_atomic_fidelity"],
+            initial_inputs=initial_inputs,
+            stopping_predicate=stopping_predicate,
+            max_rounds=_ATOMIC_DECOMP_RED_TEAM_MAX_ROUNDS,
+            project_id=objective.project_id,
+            loop_label="atomic_decomposition",
+            loop_key=objective.id,
         )
-        skill_result = invoke_skill(skill, invocation, llm_router, telemetry=getattr(self.ctx, "telemetry", None))
-        units_raw = list(skill_result.output.get("units") or []) if skill_result.success else []
+        skill_result = loop_result.history[-1].generator_result if loop_result.history else None
+        units_raw = (
+            list(loop_result.final_output.get("units") or [])
+            if loop_result.success and loop_result.final_output
+            else []
+        )
         units: list[dict[str, str]] = []
         for item in units_raw:
             title = str(item.get("title") or "").strip()
@@ -3194,8 +3202,10 @@ class HarnessUIDataService:
                     "generation_id": generation_id,
                     "diagram_version": diagram_version,
                     "event_type": "session_end",
-                    "skill_success": skill_result.success,
-                    "skill_errors": skill_result.errors,
+                    "skill_success": bool(skill_result.success) if skill_result else False,
+                    "skill_errors": list(skill_result.errors) if skill_result else [],
+                    "red_team_rounds": loop_result.rounds_completed,
+                    "red_team_stop_reason": loop_result.stop_reason,
                     "final_unit_count": len(units),
                     "final_unit_titles": [u.get("title", "") for u in units],
                 },
@@ -4250,55 +4260,50 @@ class HarnessUIDataService:
         if llm_router is None:
             return deterministic
 
-        prompt = self._build_interrogation_prompt(objective_id, deterministic)
-        run_dir = self.workspace_root / "interrogation" / "objective" / objective_id / new_id("redteam")
-        run_dir.mkdir(parents=True, exist_ok=True)
-        task = Task(
-            id=new_id("interrogation_task"),
-            project_id=objective.project_id,
-            title=f"Interrogate objective {objective.title}",
-            objective="Interrogate and red-team the objective before Mermaid review.",
-            status=TaskStatus.COMPLETED,
-        )
-        run = Run(
-            id=new_id("interrogation_run"),
-            task_id=task.id,
-            status=RunStatus.COMPLETED,
-            attempt=1,
-            summary=f"LLM red-team for objective {objective.id}",
-        )
-        from .skills import SkillInvocation, invoke_skill
-        skill = self._skill_registry().get("interrogation")
         intent_model = self.store.latest_intent_model(objective_id)
         comments = self.store.list_context_records(objective_id=objective_id, record_type="operator_comment")[-6:]
-        invocation = SkillInvocation(
-            skill_name="interrogation",
-            inputs={
-                "objective_title": objective.title,
-                "objective_summary": objective.summary,
-                "intent_summary": intent_model.intent_summary if intent_model else "",
-                "success_definition": intent_model.success_definition if intent_model else "",
-                "non_negotiables": list(intent_model.non_negotiables) if intent_model else [],
-                "recent_comments": [r.content for r in comments],
-                "deterministic_review": deterministic,
-            },
-            task=task,
-            run=run,
-            run_dir=run_dir,
+        orchestrator = self._red_team_loop_orchestrator(llm_router)
+        initial_inputs = {
+            "objective_title": objective.title,
+            "objective_summary": objective.summary,
+            "intent_summary": intent_model.intent_summary if intent_model else "",
+            "success_definition": intent_model.success_definition if intent_model else "",
+            "non_negotiables": list(intent_model.non_negotiables) if intent_model else [],
+            "recent_comments": [r.content for r in comments],
+            "deterministic_review": deterministic,
+        }
+
+        def stopping_predicate(output, reviewer_results, round_number):
+            if bool(output.get("ready_for_mermaid_review")):
+                return True
+            findings = list(output.get("red_team_findings") or [])
+            return not findings
+
+        loop_result = orchestrator.execute(
+            generator_skill_name="interrogation",
+            reviewer_skill_names=None,
+            initial_inputs=initial_inputs,
+            stopping_predicate=stopping_predicate,
+            max_rounds=_INTERROGATION_RED_TEAM_MAX_ROUNDS,
+            project_id=objective.project_id,
+            loop_label="interrogation",
+            loop_key=objective_id,
         )
-        skill_result = invoke_skill(skill, invocation, llm_router, telemetry=getattr(self.ctx, "telemetry", None))
-        if not skill_result.success:
+        if not loop_result.success or not loop_result.final_output:
             return deterministic
-        parsed = skill_result.output
+        parsed = loop_result.final_output
+        last_round = loop_result.history[-1] if loop_result.history else None
         return {
             "completed": False,
             "summary": str(parsed.get("summary") or ""),
             "plan_elements": list(parsed.get("plan_elements") or []),
             "questions": list(parsed.get("questions") or []),
             "generated_by": "llm",
-            "backend": skill_result.llm_backend or "",
-            "prompt_path": skill_result.prompt_path or "",
-            "response_path": skill_result.response_path or "",
+            "backend": last_round.generator_result.llm_backend if last_round else "",
+            "prompt_path": last_round.generator_result.prompt_path if last_round else "",
+            "response_path": last_round.generator_result.response_path if last_round else "",
+            "red_team_rounds": loop_result.rounds_completed,
+            "red_team_stop_reason": loop_result.stop_reason,
         }
 
     def _deterministic_interrogation_review(self, objective_id: str) -> dict[str, object]:
@@ -4968,85 +4973,97 @@ class HarnessUIDataService:
         intent_model = self.store.latest_intent_model(objective_id)
         mermaid = self.store.latest_mermaid_artifact(objective_id, "workflow_control")
         comments = self.store.list_context_records(objective_id=objective_id, record_type="operator_comment")[-12:]
-        run_dir = self.workspace_root / "ui_mermaid" / objective_id / new_id("proposal")
-        run_dir.mkdir(parents=True, exist_ok=True)
         anchor_match = re.search(r"\[Mermaid anchor:\s*([^\]]+)\]", directive)
         anchor_label = anchor_match.group(1).strip() if anchor_match else ""
         rewrite_requested = bool(
             re.search(r"\b(rewrite|regenerate|redo|rebuild|start over|restructure|replace the diagram|full rewrite)\b", directive, flags=re.IGNORECASE)
         )
-        edit_mode_instruction = (
-            f"This is an anchored local edit request around the Mermaid element labeled '{anchor_label}'. "
-            "Preserve the rest of the diagram unless the operator explicitly asks for broader restructuring. "
-            "Make the smallest viable patch that satisfies the comment."
-            if anchor_label and not rewrite_requested
-            else "You may revise the full diagram as needed to satisfy the operator's requested process change."
-        )
-        base_prompt = (
-            "You are updating a Mermaid flowchart for the accrivia-harness UI.\n"
-            "Revise the workflow_control Mermaid to reflect the operator's requested process changes.\n"
-            "Preserve valid parts of the current diagram, and avoid unnecessary rewrites.\n"
-            f"{edit_mode_instruction}\n"
-            "Return JSON only with keys: summary, content.\n"
-            "summary: one short sentence explaining what changed\n"
-            "content: full Mermaid flowchart text\n\n"
-            f"Objective title: {objective.title}\n"
-            f"Objective summary: {objective.summary}\n"
-            f"Intent summary: {intent_model.intent_summary if intent_model else ''}\n"
-            f"Success definition: {intent_model.success_definition if intent_model else ''}\n"
-            f"Non-negotiables: {json.dumps(intent_model.non_negotiables if intent_model else [])}\n"
-            f"Current Mermaid:\n{mermaid.content if mermaid else ''}\n\n"
-            f"Operator directive: {directive}\n"
-            f"Recent operator comments: {json.dumps([record.content for record in comments], indent=2)}\n"
-        )
-        task = Task(
-            id=new_id("ui_mermaid_task"),
+        orchestrator = self._red_team_loop_orchestrator(llm_router)
+        initial_inputs = {
+            "objective_title": objective.title,
+            "objective_summary": objective.summary,
+            "intent_summary": intent_model.intent_summary if intent_model else "",
+            "success_definition": intent_model.success_definition if intent_model else "",
+            "non_negotiables": list(intent_model.non_negotiables) if intent_model else [],
+            "current_mermaid": mermaid.content if mermaid else "",
+            "directive": directive,
+            "anchor_label": anchor_label,
+            "rewrite_requested": rewrite_requested,
+            "recent_comments": [r.content for r in comments],
+        }
+        latest_review_box: dict[str, object] = {"review": None}
+
+        def run_mermaid_review(proposed_text: str) -> dict[str, object]:
+            try:
+                return interrogation_service.red_team_mermaid_text(
+                    proposed_text,
+                    source_label=f"mermaid_proposal_{objective_id}",
+                    include_llm=False,
+                )
+            except Exception as exc:  # noqa: BLE001
+                return {
+                    "ready_for_human_review": False,
+                    "deterministic_review": {"findings": [
+                        {"severity": "critical", "message": f"mermaid review failed: {exc}"}
+                    ]},
+                    "llm_review": {"findings": []},
+                }
+
+        def stopping_predicate(output, reviewer_results, round_number):
+            proposed = str(output.get("proposed_content") or "")
+            if not proposed:
+                return True  # bail — nothing to review, let loop record failure
+            review = run_mermaid_review(proposed)
+            latest_review_box["review"] = review
+            deterministic_findings = list((review.get("deterministic_review") or {}).get("findings") or [])
+            major = [
+                f for f in deterministic_findings
+                if str(f.get("severity") or "").lower() in {"critical", "major"}
+            ]
+            return bool(review.get("ready_for_human_review")) and not major
+
+        def findings_extractor(generator_output, reviewer_results):
+            review = latest_review_box.get("review") or {}
+            findings: list[str] = []
+            for item in list((review.get("deterministic_review") or {}).get("findings") or []):
+                summary = str(item.get("summary") or item.get("message") or item.get("finding") or "").strip()
+                patch_hint = str(item.get("patch_hint") or "").strip()
+                severity = str(item.get("severity") or "info").strip()
+                if summary or patch_hint:
+                    line = f"[deterministic:{severity}] {summary}"
+                    if patch_hint:
+                        line += f" — fix: {patch_hint}"
+                    findings.append(line)
+            return findings
+
+        loop_result = orchestrator.execute(
+            generator_skill_name="mermaid_update_proposal",
+            reviewer_skill_names=None,
+            initial_inputs=initial_inputs,
+            stopping_predicate=stopping_predicate,
+            max_rounds=_MERMAID_RED_TEAM_MAX_ROUNDS,
             project_id=objective.project_id,
-            title=f"Propose Mermaid update for {objective.title}",
-            objective="Generate a revised Mermaid diagram proposal from operator guidance.",
-            strategy="ui_mermaid_proposal",
-            status=TaskStatus.COMPLETED,
+            loop_label="mermaid_update_proposal",
+            loop_key=objective.id,
+            findings_extractor=findings_extractor,
         )
-        run = Run(
-            id=new_id("ui_mermaid_run"),
-            task_id=task.id,
-            status=RunStatus.COMPLETED,
-            attempt=1,
-            summary=f"Mermaid proposal for {objective.id}",
-        )
-        from .skills import SkillInvocation, invoke_skill
-        skill = self._skill_registry().get("mermaid_update_proposal")
-        invocation = SkillInvocation(
-            skill_name="mermaid_update_proposal",
-            inputs={
-                "objective_title": objective.title,
-                "objective_summary": objective.summary,
-                "intent_summary": intent_model.intent_summary if intent_model else "",
-                "success_definition": intent_model.success_definition if intent_model else "",
-                "non_negotiables": list(intent_model.non_negotiables) if intent_model else [],
-                "current_mermaid": mermaid.content if mermaid else "",
-                "directive": directive,
-                "anchor_label": anchor_label,
-                "rewrite_requested": rewrite_requested,
-                "recent_comments": [r.content for r in comments],
-            },
-            task=task,
-            run=run,
-            run_dir=run_dir,
-        )
-        skill_result = invoke_skill(skill, invocation, llm_router, telemetry=getattr(self.ctx, "telemetry", None))
-        if not skill_result.success:
+        if not loop_result.success or not loop_result.final_output:
             return None
-        proposed_content = str(skill_result.output.get("proposed_content") or "")
-        rationale = str(skill_result.output.get("rationale") or "")
+        proposed_content = str(loop_result.final_output.get("proposed_content") or "")
+        rationale = str(loop_result.final_output.get("rationale") or "")
         if not proposed_content:
             return None
+        last_round = loop_result.history[-1] if loop_result.history else None
+        last_review = latest_review_box.get("review") or {}
         return {
             "summary": rationale,
             "content": proposed_content,
-            "backend": skill_result.llm_backend or "",
-            "prompt_path": skill_result.prompt_path or "",
-            "response_path": skill_result.response_path or "",
+            "backend": last_round.generator_result.llm_backend if last_round else "",
+            "prompt_path": last_round.generator_result.prompt_path if last_round else "",
+            "response_path": last_round.generator_result.response_path if last_round else "",
+            "red_team_rounds": loop_result.rounds_completed,
+            "red_team_stop_reason": loop_result.stop_reason,
+            "red_team_review": json.dumps(last_review, indent=2, sort_keys=True),
         }
 
     def _parse_mermaid_update_response(self, text: str) -> dict[str, str] | None:

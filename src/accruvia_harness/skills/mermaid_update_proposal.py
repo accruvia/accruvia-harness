@@ -25,6 +25,18 @@ class MermaidUpdateProposalSkill:
         anchor_label = str(inputs.get("anchor_label") or "")
         rewrite_requested = bool(inputs.get("rewrite_requested") or False)
         comments = list(inputs.get("recent_comments") or [])
+        prior_round_findings = [
+            str(x).strip() for x in list(inputs.get("prior_round_findings") or []) if str(x).strip()
+        ]
+        round_number = int(inputs.get("round_number") or 1)
+        prior_block = ""
+        if prior_round_findings:
+            prior_block = (
+                f"\nThis is Mermaid red-team round {round_number}. The previous proposal failed "
+                "the following red-team findings. Rewrite the diagram so each objection is "
+                "addressed — do not repeat the same mistakes.\n"
+                f"Prior-round findings:\n{json.dumps(prior_round_findings, indent=2)}\n"
+            )
 
         edit_mode_instruction = (
             f"This is an anchored local edit request around the Mermaid element labeled '{anchor_label}'. "
@@ -49,6 +61,7 @@ class MermaidUpdateProposalSkill:
             f"Current Mermaid:\n{current_mermaid}\n\n"
             f"Operator directive: {directive}\n"
             f"Recent operator comments: {json.dumps(comments, indent=2)}\n"
+            f"{prior_block}"
         )
 
     def parse_response(self, response_text: str) -> dict[str, Any]:

@@ -1174,25 +1174,38 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         checks = {item["key"]: item for item in objective_payload["execution_gate"]["checks"]}
         self.assertTrue(checks["mermaid_finished"]["ok"])
 
-    @unittest.skip("Mermaid red-team retry loop deleted during skills migration; single-call mermaid_update_proposal skill")
     def test_mermaid_generation_runs_automatic_red_team_loop_before_proposal(self) -> None:
-        fake_router = FakeLLMRouter(
-            json.dumps(
-                {
-                    "reply": "I will propose a Mermaid update for review.",
-                    "recommended_action": "review_mermaid",
-                    "evidence_refs": ["mermaid"],
-                    "mode_shift": "none",
-                }
-            )
+        """The mermaid_update_proposal skill must iterate under RedTeamLoopOrchestrator:
+        first proposal fails the deterministic mermaid red-team, second proposal
+        passes. At least two prompts must fire and the recorded proposal must
+        carry red_team_rounds >= 2."""
+        router = SequenceLLMRouter(
+            [
+                json.dumps({
+                    "proposed_content": "flowchart TD\nA[Start]-->B{Ready?}\nB-->C[Run]",  # ambiguous "Ready?" gate triggers deterministic major finding
+                    "rationale": "initial draft",
+                }),
+                json.dumps({
+                    "proposed_content": (
+                        "flowchart TD\n"
+                        "A[Read Caller]-->B[ContextService.build_packet]\n"
+                        "W[Write Caller]-->M[ContextRecorder]\n"
+                        "M-->N[Rebuild Packet]\n"
+                        "N-->B\n"
+                        "B-->C{Execution artifacts sufficient for execution?}\n"
+                        "C-->D[Run execution]\n"
+                    ),
+                    "rationale": "Add direction, separate read/write, explicit execution gate.",
+                }),
+            ]
         )
         base_interrogation = InterrogationService(
             query_service=self.query_service,
             workspace_root=self.workspace_root,
-            llm_router=fake_router,
+            llm_router=router,
         )
         self.ctx.interrogation_service = SimpleNamespace(
-            llm_router=fake_router,
+            llm_router=router,
             red_team_mermaid_text=base_interrogation.red_team_mermaid_text,
         )
         self.service = HarnessUIDataService(self.ctx)
@@ -1204,30 +1217,33 @@ class HarnessUIDataServiceTests(unittest.TestCase):
             frustration_signals=["Ambiguous control flow"],
         )
 
-        result = self.service.add_operator_comment(
-            self.project.id,
-            "Update the mermaid to make execution readiness explicit and keep mutation separate.",
-            "shaun",
+        proposal = self.service._generate_mermaid_update_proposal(
             self.objective.id,
+            directive="Update the mermaid to make execution readiness explicit and keep mutation separate.",
         )
-
-        proposal = result["mermaid_proposal"]
-        assert proposal is not None
+        self.assertIsNotNone(proposal)
         self.assertIn("Execution artifacts sufficient for execution?", proposal["content"])
-        record = self.store.list_context_records(objective_id=self.objective.id, record_type="mermaid_update_proposed")[-1]
-        self.assertTrue(str(record.metadata.get("red_team_review") or "").strip())
-        self.assertGreaterEqual(len(fake_router.prompts), 3)
+        self.assertGreaterEqual(int(proposal.get("red_team_rounds") or 0), 2)
+        self.assertEqual("predicate_satisfied", proposal.get("red_team_stop_reason"))
+        self.assertGreaterEqual(len(router.prompts), 2)
+        # Round-2 prompt must carry prior-round findings so the LLM can address them.
+        self.assertIn("Prior-round findings", router.prompts[1])
 
-    @unittest.skip("Retry loop removed during skills migration; single-call interrogation skill")
     def test_generate_interrogation_review_retries_until_response_is_valid(self) -> None:
+        """Validates the restored retry-on-validation-failure behaviour: first
+        response is missing required fields, RedTeamLoopOrchestrator retries
+        and succeeds on round 2. The round-2 prompt must carry the prior-round
+        findings so the LLM can see what failed."""
         router = SequenceLLMRouter(
             [
-                "{\"summary\":\"bad\"}",
+                "this is definitely not json",
                 json.dumps(
                     {
                         "summary": "Interrogation review generated.",
                         "plan_elements": ["Desired outcome: clarify execution path"],
                         "questions": ["What ambiguity remains before Mermaid review?"],
+                        "red_team_findings": [],
+                        "ready_for_mermaid_review": True,
                     }
                 ),
             ]
@@ -1247,9 +1263,10 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         self.assertEqual("llm", review["generated_by"])
         self.assertEqual("Interrogation review generated.", review["summary"])
         self.assertEqual(2, len(router.prompts))
-        self.assertIn("failed validation", router.prompts[-1].lower())
+        self.assertGreaterEqual(int(review.get("red_team_rounds") or 0), 2)
+        self.assertIn("Prior-round findings", router.prompts[-1])
 
-    @unittest.skip("Retry loop removed during skills migration; orchestrator runs 7 single-call reviewer skills")
+    @unittest.skip("Obsolete: single-prompt review replaced by per-dimension skills; coverage in tests/test_objective_review_orchestrator.py + tests/test_red_team_loop.py")
     def test_generate_objective_review_packets_retries_until_packets_validate(self) -> None:
         router = SequenceLLMRouter(
             [
@@ -1300,7 +1317,7 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         self.assertEqual(2, len(router.prompts))
         self.assertIn("failed", router.prompts[-1].lower())
 
-    @unittest.skip("Retry loop removed during skills migration; ui_responder is single-call")
+    @unittest.skip("Obsolete: ui_responder is single-call by design; red-team loop applies only to interrogation/atomic/mermaid skills")
     def test_ui_responder_retries_until_response_is_valid(self) -> None:
         router = SequenceLLMRouter(
             [
@@ -2794,7 +2811,7 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         self.assertEqual("objective_review_packet", response_records[0].metadata["required_artifact_type"])
         self.assertEqual(str(artifact.id), response_records[0].metadata["record_id"])
 
-    @unittest.skip("Legacy single-prompt review replaced by 7-skill orchestrator; prior-round context lives in skill inputs, not the prompt string")
+    @unittest.skip("Obsolete: prior-round context now lives in skill inputs (prior_round_findings); see tests/test_red_team_loop.py for the new contract")
     def test_objective_review_prompt_includes_prior_round_context(self) -> None:
         fake_router = FakeLLMRouter("{}")
         self.ctx.interrogation_service = SimpleNamespace(llm_router=fake_router)

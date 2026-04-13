@@ -7,7 +7,12 @@ from .github_task_service import GitHubTaskService
 from .gitlab_task_service import GitLabTaskService
 from .promotion_service import PromotionReviewResult, PromotionService
 from .queue_service import QueueService
-from .red_team_service import RedTeamLoopResult, RedTeamLoopService, RedTeamRound
+from .red_team_loop import (
+    RedTeamLoopOrchestrator,
+    RedTeamLoopResult,
+    RedTeamRound,
+    default_findings_extractor,
+)
 from .review_watcher_service import ReviewWatcherResult, ReviewWatcherService
 from .run_service import RunService
 from .supervisor_service import SupervisorResult, SupervisorService
@@ -26,9 +31,10 @@ __all__ = [
     "PromotionReviewResult",
     "PromotionService",
     "QueueService",
+    "RedTeamLoopOrchestrator",
     "RedTeamLoopResult",
-    "RedTeamLoopService",
     "RedTeamRound",
+    "default_findings_extractor",
     "ReviewWatcherResult",
     "ReviewWatcherService",
     "RunService",

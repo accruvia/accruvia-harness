@@ -28,6 +28,18 @@ class AtomicDecompositionSkill:
         mermaid_content = str(inputs.get("mermaid_content") or "")
         repo_context = str(inputs.get("repo_context") or "")
         comments = list(inputs.get("recent_comments") or [])
+        prior_round_findings = [
+            str(x).strip() for x in list(inputs.get("prior_round_findings") or []) if str(x).strip()
+        ]
+        round_number = int(inputs.get("round_number") or 1)
+        prior_block = ""
+        if prior_round_findings:
+            prior_block = (
+                f"\nThis is decomposition round {round_number}. The previous candidate failed "
+                "the following red-team findings. Rework the units so each objection is "
+                "addressed — do not repeat the same mistakes.\n"
+                f"Prior-round findings:\n{json.dumps(prior_round_findings, indent=2)}\n"
+            )
         return (
             "You are decomposing a software objective into ATOMIC implementation units.\n\n"
             "DEFINITION OF ATOMIC:\n"
@@ -53,6 +65,7 @@ class AtomicDecompositionSkill:
             f"Accepted Mermaid:\n{mermaid_content}\n\n"
             f"Recent operator comments:\n{json.dumps(comments, indent=2)}\n\n"
             f"Repo context:\n{repo_context}\n"
+            f"{prior_block}"
         )
 
     def parse_response(self, response_text: str) -> dict[str, Any]:
