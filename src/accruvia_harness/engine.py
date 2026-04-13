@@ -54,7 +54,15 @@ class HarnessEngine:
         self.workspace_root = Path(workspace_root)
         self.workspace_root.mkdir(parents=True, exist_ok=True)
         self.planner = planner or DefaultPlanner()
-        self.worker = worker or LocalArtifactWorker()
+        if worker is None:
+            raise ValueError(
+                "HarnessEngine requires an explicit worker. "
+                "For production, use build_engine_from_config() which wires SkillsWorker. "
+                "For tests, pass worker=LocalArtifactWorker() explicitly. "
+                "The silent default was removed to prevent production runs from "
+                "falling back to the stub adapter and producing fake artifacts."
+            )
+        self.worker = worker
         self.analyzer = analyzer or DefaultAnalyzer()
         self.decider = decider or DefaultDecider()
         self.llm_router = llm_router

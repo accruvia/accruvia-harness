@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from accruvia_harness.domain import Project, TaskStatus, new_id
 from accruvia_harness.engine import HarnessEngine
+from accruvia_harness.workers import LocalArtifactWorker
 from accruvia_harness.gitlab import GitLabCLI, _default_runner
 from accruvia_harness.services.issue_policy import IssueStatePolicy
 from accruvia_harness.store import SQLiteHarnessStore
@@ -93,6 +94,7 @@ class GitLabIntegrationTests(unittest.TestCase):
         self.store = SQLiteHarnessStore(base / "harness.db")
         self.store.initialize()
         self.engine = HarnessEngine(
+            worker=LocalArtifactWorker(),
             store=self.store,
             workspace_root=base / "workspace",
         )
@@ -210,6 +212,7 @@ class GitLabIntegrationTests(unittest.TestCase):
 
     def test_completed_gitlab_task_can_stay_open_until_promotion_approved(self) -> None:
         engine = HarnessEngine(
+            worker=LocalArtifactWorker(),
             store=self.store,
             workspace_root=Path(self.temp_dir.name) / "workspace-policy",
             issue_state_policy=IssueStatePolicy(close_only_on_approved_promotion=True),

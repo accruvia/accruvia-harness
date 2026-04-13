@@ -37,6 +37,7 @@ class HarnessQueryServiceTests(unittest.TestCase):
         self.store.initialize()
         self.telemetry = TelemetrySink(base / "telemetry")
         self.engine = HarnessEngine(
+            worker=LocalArtifactWorker(),
             store=self.store,
             workspace_root=base / "workspace",
             telemetry=self.telemetry,

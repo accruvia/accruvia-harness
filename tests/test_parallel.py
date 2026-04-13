@@ -32,6 +32,7 @@ class ConcurrencyLimitTests(unittest.TestCase):
         self.store = SQLiteHarnessStore(base / "harness.db")
         self.store.initialize()
         self.engine = HarnessEngine(
+            worker=LocalArtifactWorker(),
             store=self.store,
             workspace_root=base / "workspace",
         )
@@ -163,6 +164,7 @@ class SpeculativeBranchTests(unittest.TestCase):
 
     def test_create_branches_produces_parallel_runs(self) -> None:
         engine = HarnessEngine(
+            worker=LocalArtifactWorker(),
             store=self.store,
             workspace_root=Path(self.temp_dir.name) / "workspace",
         )
@@ -189,6 +191,7 @@ class SpeculativeBranchTests(unittest.TestCase):
 
     def test_create_branches_respects_max_branches(self) -> None:
         engine = HarnessEngine(
+            worker=LocalArtifactWorker(),
             store=self.store,
             workspace_root=Path(self.temp_dir.name) / "workspace-limit",
         )
@@ -210,6 +213,7 @@ class SpeculativeBranchTests(unittest.TestCase):
 
     def test_create_branches_rejects_single_branch_tasks(self) -> None:
         engine = HarnessEngine(
+            worker=LocalArtifactWorker(),
             store=self.store,
             workspace_root=Path(self.temp_dir.name) / "workspace-single",
         )
@@ -230,6 +234,7 @@ class SpeculativeBranchTests(unittest.TestCase):
 
     def test_branch_events_are_recorded(self) -> None:
         engine = HarnessEngine(
+            worker=LocalArtifactWorker(),
             store=self.store,
             workspace_root=Path(self.temp_dir.name) / "workspace-events",
         )
@@ -269,6 +274,7 @@ class WinnerSelectionTests(unittest.TestCase):
 
     def test_select_winner_promotes_best_branch(self) -> None:
         engine = HarnessEngine(
+            worker=LocalArtifactWorker(),
             store=self.store,
             workspace_root=Path(self.temp_dir.name) / "workspace",
         )
@@ -294,6 +300,7 @@ class WinnerSelectionTests(unittest.TestCase):
 
     def test_disposed_runs_are_marked(self) -> None:
         engine = HarnessEngine(
+            worker=LocalArtifactWorker(),
             store=self.store,
             workspace_root=Path(self.temp_dir.name) / "workspace-dispose",
         )
@@ -319,6 +326,7 @@ class WinnerSelectionTests(unittest.TestCase):
 
     def test_winner_decision_is_recorded(self) -> None:
         engine = HarnessEngine(
+            worker=LocalArtifactWorker(),
             store=self.store,
             workspace_root=Path(self.temp_dir.name) / "workspace-decision",
         )
@@ -342,6 +350,7 @@ class WinnerSelectionTests(unittest.TestCase):
 
     def test_winner_selection_events_are_recorded(self) -> None:
         engine = HarnessEngine(
+            worker=LocalArtifactWorker(),
             store=self.store,
             workspace_root=Path(self.temp_dir.name) / "workspace-winner-events",
         )
@@ -431,6 +440,7 @@ class BranchDecisionTests(unittest.TestCase):
 
     def test_max_branches_round_trip(self) -> None:
         engine = HarnessEngine(
+            worker=LocalArtifactWorker(),
             store=self.store,
             workspace_root=Path(self.temp_dir.name) / "workspace-roundtrip",
         )

@@ -46,9 +46,11 @@ def build_engine_from_config(
 ) -> HarnessEngine:
     resolved_store = store or build_store(config)
     resolved_telemetry = telemetry or build_telemetry(config)
+    real_worker = build_worker_from_config(config, telemetry=resolved_telemetry)
     engine = HarnessEngine(
         store=resolved_store,
         workspace_root=config.workspace_root,
+        worker=real_worker,
         project_adapter_registry=build_project_adapter_registry(config.project_adapter_modules),
         validator_registry=build_validator_registry(config.validator_modules),
         cognition_registry=build_cognition_registry(config.cognition_modules),
@@ -58,5 +60,4 @@ def build_engine_from_config(
         issue_state_policy=build_issue_state_policy(config),
     )
     engine.set_llm_router(build_llm_router(config, telemetry=resolved_telemetry))
-    engine.set_worker(build_worker_from_config(config, telemetry=resolved_telemetry))
     return engine

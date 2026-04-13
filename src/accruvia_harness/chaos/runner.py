@@ -14,6 +14,7 @@ from accruvia_harness.config import HarnessConfig
 from accruvia_harness.domain import Event, new_id
 from accruvia_harness.engine import HarnessEngine
 from accruvia_harness.store import SQLiteHarnessStore
+from accruvia_harness.workers import LocalArtifactWorker
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +139,7 @@ class ChaosRunner:
         return HarnessEngine(
             store=sandbox.store,
             workspace_root=workspace,
+            worker=LocalArtifactWorker(),
         )
 
 

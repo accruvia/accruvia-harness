@@ -471,6 +471,40 @@ class AgentBackendRemovalAsserts(unittest.TestCase):
                 result = orchestrator.execute(task, run, Path(tmp), Path(tmp) / "rd")
         self.assertNotIn("worker_backend", result.diagnostics)
 
+    def test_harness_engine_refuses_default_stub_worker(self):
+        """Constructing HarnessEngine without an explicit worker must fail.
+
+        The old default was LocalArtifactWorker, which silently produced fake
+        artifacts and contaminated the dogfood corpus with 'completed' tasks
+        that never touched real files. Any future caller must either pass a
+        real worker or go through build_engine_from_config (which wires
+        SkillsWorker). Regression guard: this test fails if someone re-adds
+        the silent stub default."""
+        from accruvia_harness.engine import HarnessEngine
+        from accruvia_harness.store import SQLiteHarnessStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteHarnessStore(Path(tmp) / "harness.db")
+            store.initialize()
+            with self.assertRaises(ValueError) as ctx:
+                HarnessEngine(store=store, workspace_root=Path(tmp) / "ws")
+            self.assertIn("explicit worker", str(ctx.exception))
+            self.assertIn("SkillsWorker", str(ctx.exception))
+
+    def test_build_engine_from_config_wires_skills_worker(self):
+        """Regression guard: build_engine_from_config must produce an engine
+        whose worker is SkillsWorker. If the bootstrap path drifts back to
+        LocalArtifactWorker (as happened historically and contaminated 91
+        tasks with stub-mode outputs), this test fails."""
+        from accruvia_harness.bootstrap import build_engine_from_config
+        from accruvia_harness.skills_worker import SkillsWorker
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _minimal_config(Path(tmp))
+            engine = build_engine_from_config(config)
+            self.assertIsInstance(engine.worker, SkillsWorker)
+            self.assertNotIsInstance(engine.worker, LocalArtifactWorker)
+
 
 if __name__ == "__main__":
     unittest.main()

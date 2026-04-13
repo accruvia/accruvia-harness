@@ -21,6 +21,7 @@ from accruvia_harness.temporal_backend import (
 )
 from accruvia_harness.runtime import LocalWorkflowRuntime, build_runtime
 from accruvia_harness.store import SQLiteHarnessStore
+from accruvia_harness.workers import LocalArtifactWorker
 
 
 class RuntimeTests(unittest.TestCase):
@@ -31,6 +32,7 @@ class RuntimeTests(unittest.TestCase):
         self.store = SQLiteHarnessStore(base / "harness.db")
         self.store.initialize()
         self.engine = HarnessEngine(
+            worker=LocalArtifactWorker(),
             store=self.store,
             workspace_root=base / "workspace",
         )

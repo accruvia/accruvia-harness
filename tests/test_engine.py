@@ -354,6 +354,7 @@ class HarnessEngineTests(unittest.TestCase):
         self.store = SQLiteHarnessStore(base / "harness.db")
         self.store.initialize()
         self.engine = HarnessEngine(
+            worker=LocalArtifactWorker(),
             store=self.store,
             workspace_root=base / "workspace",
         )
@@ -517,6 +518,7 @@ class HarnessEngineTests(unittest.TestCase):
         registry = ProjectAdapterRegistry()
         registry.register(ManifestProjectAdapter())
         engine = HarnessEngine(
+            worker=LocalArtifactWorker(),
             store=self.store,
             workspace_root=Path(self.temp_dir.name) / "workspace-manifest",
             project_adapter_registry=registry,
@@ -853,6 +855,7 @@ class HarnessEngineTests(unittest.TestCase):
         registry = ProjectAdapterRegistry()
         registry.register(OverrideProjectAdapter())
         engine = HarnessEngine(
+            worker=LocalArtifactWorker(),
             store=self.store,
             workspace_root=Path(self.temp_dir.name) / "workspace-override",
             project_adapter_registry=registry,
@@ -888,6 +891,7 @@ class HarnessEngineTests(unittest.TestCase):
         registry = ProjectAdapterRegistry()
         registry.register(SharedRepoAdapter(repo_root))
         engine = HarnessEngine(
+            worker=LocalArtifactWorker(),
             store=self.store,
             workspace_root=Path(self.temp_dir.name) / "workspace-shared",
             project_adapter_registry=registry,
@@ -938,6 +942,7 @@ class HarnessEngineTests(unittest.TestCase):
         )
         self.store.create_project(project)
         engine = HarnessEngine(
+            worker=LocalArtifactWorker(),
             store=self.store,
             workspace_root=Path(self.temp_dir.name) / "workspace-promote",
             project_adapter_registry=registry,
@@ -1014,6 +1019,7 @@ class HarnessEngineTests(unittest.TestCase):
         )
         self.store.create_project(project)
         engine = HarnessEngine(
+            worker=LocalArtifactWorker(),
             store=self.store,
             workspace_root=Path(self.temp_dir.name) / "workspace-remediate",
             project_adapter_registry=registry,
@@ -1142,6 +1148,7 @@ class HarnessEngineTests(unittest.TestCase):
 
     def test_run_until_stable_resolves_branching_without_infinite_loop(self) -> None:
         branching_engine = HarnessEngine(
+            worker=LocalArtifactWorker(),
             store=self.store,
             workspace_root=Path(self.temp_dir.name) / "workspace-branching",
             decider=BranchOnceDecider(),
@@ -1981,6 +1988,7 @@ class HarnessEngineTests(unittest.TestCase):
             llm_accruvia_client_command=None,
         )
         engine = HarnessEngine(
+            worker=LocalArtifactWorker(),
             store=self.store,
             workspace_root=Path(self.temp_dir.name) / "workspace-affirm",
             llm_router=build_llm_router(config),
@@ -2934,6 +2942,7 @@ class HarnessEngineTests(unittest.TestCase):
         assert remediation_task is not None
 
         remediation_engine = HarnessEngine(
+            worker=LocalArtifactWorker(),
             store=self.store,
             workspace_root=Path(self.temp_dir.name) / "workspace-rereview-remediation",
         )
@@ -2968,6 +2977,7 @@ class HarnessEngineTests(unittest.TestCase):
             llm_accruvia_client_command=None,
         )
         engine = HarnessEngine(
+            worker=LocalArtifactWorker(),
             store=self.store,
             workspace_root=Path(self.temp_dir.name) / "workspace-reject-affirm",
             llm_router=build_llm_router(config),

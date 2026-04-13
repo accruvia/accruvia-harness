@@ -31,6 +31,7 @@ from accruvia_harness.chaos.sandbox import ChaosSandbox
 from accruvia_harness.config import HarnessConfig
 from accruvia_harness.domain import Event, Project, TaskStatus, new_id
 from accruvia_harness.engine import HarnessEngine
+from accruvia_harness.workers import LocalArtifactWorker
 from accruvia_harness.store import SQLiteHarnessStore
 
 
@@ -58,7 +59,7 @@ def _make_config(base: Path) -> HarnessConfig:
 def _setup_engine(base: Path) -> tuple[SQLiteHarnessStore, HarnessEngine, str]:
     store = SQLiteHarnessStore(base / "harness.db")
     store.initialize()
-    engine = HarnessEngine(store=store, workspace_root=base / "workspace")
+    engine = HarnessEngine(worker=LocalArtifactWorker(), store=store, workspace_root=base / "workspace")
     project = Project(id=new_id("project"), name="chaos-test", description="Chaos test project")
     store.create_project(project)
     return store, engine, project.id
@@ -595,7 +596,7 @@ class ChaosRunnerTests(unittest.TestCase):
             store.initialize()
             project = Project(id=new_id("project"), name="runner-test", description="test")
             store.create_project(project)
-            engine = HarnessEngine(store=store, workspace_root=base / "workspace")
+            engine = HarnessEngine(worker=LocalArtifactWorker(), store=store, workspace_root=base / "workspace")
             _create_pending_task(engine, project.id)
 
             config = _make_config(base)
@@ -618,7 +619,7 @@ class ChaosRunnerTests(unittest.TestCase):
             store.initialize()
             project = Project(id=new_id("project"), name="feed-test", description="test")
             store.create_project(project)
-            engine = HarnessEngine(store=store, workspace_root=base / "workspace")
+            engine = HarnessEngine(worker=LocalArtifactWorker(), store=store, workspace_root=base / "workspace")
             _create_pending_task(engine, project.id)
 
             config = _make_config(base)

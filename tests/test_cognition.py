@@ -10,6 +10,7 @@ from pathlib import Path
 from accruvia_harness.cognition import BrainSource, GenericCognitionAdapter, build_cognition_registry
 from accruvia_harness.config import HarnessConfig
 from accruvia_harness.engine import HarnessEngine
+from accruvia_harness.workers import LocalArtifactWorker
 from accruvia_harness.project_adapters import build_project_adapter_registry
 from accruvia_harness.store import SQLiteHarnessStore
 
@@ -134,6 +135,7 @@ class CognitionTests(unittest.TestCase):
             }
         )
         engine = HarnessEngine(
+            worker=LocalArtifactWorker(),
             store=store,
             workspace_root=config.workspace_root,
             project_adapter_registry=build_project_adapter_registry(config.project_adapter_modules),
@@ -196,6 +198,7 @@ class CognitionTests(unittest.TestCase):
             }
         )
         engine = HarnessEngine(
+            worker=LocalArtifactWorker(),
             store=store,
             workspace_root=config.workspace_root,
             project_adapter_registry=build_project_adapter_registry(config.project_adapter_modules),
@@ -262,6 +265,7 @@ class CognitionTests(unittest.TestCase):
             }
         )
         engine = HarnessEngine(
+            worker=LocalArtifactWorker(),
             store=store,
             workspace_root=config.workspace_root,
             project_adapter_registry=build_project_adapter_registry(config.project_adapter_modules),
@@ -295,6 +299,7 @@ class CognitionTests(unittest.TestCase):
             }
         )
         engine = HarnessEngine(
+            worker=LocalArtifactWorker(),
             store=store,
             workspace_root=config.workspace_root,
             project_adapter_registry=build_project_adapter_registry(config.project_adapter_modules),
@@ -347,6 +352,7 @@ class CognitionTests(unittest.TestCase):
 
         router = TimeoutCapturingRouter()
         engine = HarnessEngine(
+            worker=LocalArtifactWorker(),
             store=store,
             workspace_root=config.workspace_root,
             project_adapter_registry=build_project_adapter_registry(config.project_adapter_modules),
@@ -399,6 +405,7 @@ class CognitionTests(unittest.TestCase):
             }
         )
         engine = HarnessEngine(
+            worker=LocalArtifactWorker(),
             store=store,
             workspace_root=config.workspace_root,
             project_adapter_registry=build_project_adapter_registry(config.project_adapter_modules),
