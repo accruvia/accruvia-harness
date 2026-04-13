@@ -6302,31 +6302,21 @@ class HarnessUIDataService:
         return "\n".join(lines)
 
     def _default_objective_mermaid(self, objective: Objective) -> str:
-        """Generate an objective decomposition diagram.
+        """Generate an objective decomposition diagram from the plan set.
 
-        One node per task linked to the objective, labeled with its title and
-        status. If there are no tasks yet, emits a placeholder indicating the
-        objective is awaiting decomposition. This is what the objective-bench
-        and the objective review flow read to check decomposition coverage —
-        every node should eventually have a completed task.
+        Delegates to `mermaid.render_mermaid_from_plans`, the single canonical
+        renderer. Plans are the source of truth; node IDs are `P_<plan_hash>`
+        (stable across revisions). Falls back to the "awaiting decomposition"
+        placeholder when no plans exist yet.
 
-        See specs/plan-to-task-mapping.md and specs/atomic-plan-schema.md for
-        the intended lineage: objective -> plan -> task -> run. For now,
-        tasks stand in for plans (1:1) until the plans table is fully wired
-        into task creation.
+        The previous implementation rendered from tasks using
+        `_mermaid_node_id_for_task(task.id)` which produced `T_<task_suffix>`
+        IDs. That path is removed — task IDs and plan IDs are no longer
+        conflated. See Query #3 findings + the canonical ID design notes.
         """
-        tasks = [t for t in self.store.list_tasks(objective.project_id) if t.objective_id == objective.id]
-        lines = ["flowchart TD", f'    O["Objective: {self._mermaid_label(objective.title)}"]']
-        if not tasks:
-            lines.append('    O --> AWAITING["awaiting decomposition"]')
-            return "\n".join(lines)
-        sorted_tasks = sorted(tasks, key=lambda t: (t.created_at, t.id))
-        for task in sorted_tasks:
-            node_id = _mermaid_node_id_for_task(task.id)
-            label = f"{task.title}\\n{task.status.value}"
-            lines.append(f'    {node_id}["{self._mermaid_label(label)}"]')
-            lines.append(f"    O --> {node_id}")
-        return "\n".join(lines)
+        from .mermaid import render_mermaid_from_plans
+        plans = self.store.list_plans_for_objective(objective.id)
+        return render_mermaid_from_plans(plans, objective)
 
     @staticmethod
     def _mermaid_label(value: str) -> str:

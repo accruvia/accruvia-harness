@@ -116,35 +116,41 @@ class TaskService:
         return task
 
     def _ensure_plan_linkage(self, task: Task) -> Task:
-        """Attach a Plan record and mermaid_node_id to a new task.
+        """Attach a canonical Plan record and mermaid_node_id to a new task.
 
-        Idempotent on re-creation: if plan_id or mermaid_node_id are already
-        set on the incoming task, they are respected. Otherwise we synthesize
-        a stable node id (T_<task-suffix>) and create a 1:1 plan row.
+        Path 1 — task already has a plan_id: respect both values (idempotent).
+
+        Path 2 — task has no plan_id: create a 1:1 plan row, then derive the
+        task's mermaid_node_id from that plan via `canonical_node_id(plan)`.
+        This guarantees task.mermaid_node_id == plan.mermaid_node_id == a
+        stable P_<hash> that matches what `render_mermaid_from_plans` emits.
+
+        The prior synthetic `T_<task-suffix>` fallback is removed: task IDs
+        and plan IDs are no longer conflated. See `mermaid/render.py` and the
+        Query #3 findings for the invariant this enforces.
 
         Tasks without an objective_id get no plan (plans are
         objective-scoped). Those are typically ad-hoc tasks not part of a
         decomposition.
         """
         from ..domain import Plan
+        from ..mermaid import canonical_node_id
 
         if not task.objective_id:
             return task
         if task.plan_id and task.mermaid_node_id:
             return task
 
-        suffix = task.id.split("_", 1)[-1][:12] if "_" in task.id else task.id[:12]
-        node_id = task.mermaid_node_id or f"T_{suffix}"
         plan_id = task.plan_id
         if not plan_id:
             plan = Plan(
                 id=new_id("plan"),
                 objective_id=task.objective_id,
-                mermaid_node_id=node_id,
                 slice={
                     "derived_from": "task_service.create_task",
                     "task_id": task.id,
                     "task_title": task.title,
+                    "label": task.title,
                     "files": list((task.scope or {}).get("files_to_touch") or []),
                 },
                 atomicity_assessment={
@@ -154,8 +160,18 @@ class TaskService:
                 },
                 approval_status="approved",
             )
+            # Canonical mermaid_node_id derives from plan.id deterministically.
+            plan.mermaid_node_id = canonical_node_id(plan)
             self.store.create_plan(plan)
             plan_id = plan.id
+            node_id = plan.mermaid_node_id
+        else:
+            # Existing plan — look up its canonical id
+            existing_plan = self.store.get_plan(plan_id) if hasattr(self.store, "get_plan") else None
+            node_id = (
+                existing_plan.mermaid_node_id if existing_plan is not None
+                else task.mermaid_node_id
+            )
         return replace(task, plan_id=plan_id, mermaid_node_id=node_id)
 
     def create_task_with_policy(
