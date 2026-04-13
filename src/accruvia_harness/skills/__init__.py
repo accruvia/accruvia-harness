@@ -30,6 +30,7 @@ from .interrogation import InterrogationSkill
 from .mermaid_update_proposal import MermaidUpdateProposalSkill
 from .plan_draft import PlanDraftSkill, PlanDraftTrioSkill, materialize_plans_from_skill_output
 from .quality_gate import QualityGateSkill
+from .review_plan_atomicity import ReviewPlanAtomicitySkill
 from .post_merge_check import PostMergeCheckSkill
 from .promotion_apply import PromotionApplySkill
 from .promotion_review import PromotionReviewSkill
@@ -72,6 +73,7 @@ def build_default_registry() -> SkillRegistry:
     registry.register(MermaidUpdateProposalSkill())
     registry.register(PlanDraftSkill())
     registry.register(PlanDraftTrioSkill())
+    registry.register(ReviewPlanAtomicitySkill())
     registry.register(UIResponderSkill())
     registry.register(CognitionHeartbeatSkill())
     registry.register(SAWatchTriageSkill())
@@ -85,6 +87,7 @@ __all__ = [
     "BenchmarkSkill",
     "PlanDraftSkill",
     "PlanDraftTrioSkill",
+    "ReviewPlanAtomicitySkill",
     "materialize_plans_from_skill_output",
     "CognitionHeartbeatSkill",
     "CommitSkill",
