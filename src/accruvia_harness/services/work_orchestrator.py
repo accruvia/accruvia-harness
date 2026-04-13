@@ -493,6 +493,7 @@ class SkillsWorkOrchestrator:
         _self_review_start = time.perf_counter()
         self._emit("self_review", "running", "staff engineer reviewing diff")
         diff_text = _git_diff(workspace)
+        non_negotiables = list((task.scope or {}).get("non_negotiables") or [])
         self_review_result = invoke_skill(
             self_review_skill,
             SkillInvocation(
@@ -503,6 +504,7 @@ class SkillsWorkOrchestrator:
                     "approach": scope.get("approach", ""),
                     "risks": scope.get("risks") or [],
                     "diff": diff_text,
+                    "non_negotiables": non_negotiables,
                 },
                 task=task,
                 run=run,
@@ -511,6 +513,14 @@ class SkillsWorkOrchestrator:
             self.llm_router,
             telemetry=self.telemetry,
         )
+        # Deterministic non-negotiable enforcement runs AFTER the LLM self-review
+        # and overrides its verdict if a forbidden file is touched or a required
+        # file is missing from the diff. The LLM can't argue out of this check.
+        if self_review_result.success and non_negotiables:
+            enforced = self_review_skill.enforce_non_negotiables(
+                self_review_result.output, non_negotiables, diff_text,
+            )
+            self_review_result.output.update(enforced)
         artifacts.append(
             _write_artifact(
                 run_dir, "self_review_output",

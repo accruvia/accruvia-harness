@@ -37,11 +37,22 @@ class SelfReviewSkill:
         approach = str(inputs.get("approach") or "").strip()
         risks = list(inputs.get("risks") or [])
         diff = str(inputs.get("diff") or "").strip()
+        non_negotiables = [
+            str(item).strip() for item in list(inputs.get("non_negotiables") or [])
+            if str(item).strip()
+        ]
 
         risks_block = ""
         if risks:
             risks_block = "Scope flagged these risks — check the diff against them:\n" + "\n".join(
                 f"  - {r}" for r in risks
+            )
+        non_negotiables_block = ""
+        if non_negotiables:
+            non_negotiables_block = (
+                "NON-NEGOTIABLES (operator contract from the intent model — any "
+                "violation is an automatic blocker):\n"
+                + "\n".join(f"  - {n}" for n in non_negotiables)
             )
 
         return "\n\n".join(
@@ -53,19 +64,24 @@ class SelfReviewSkill:
                     "code reaches validation. You are NOT reviewing for promotion — "
                     "tests will run next. Focus on: does the diff actually satisfy the "
                     "objective? Are there obvious bugs, type errors, missing imports, "
-                    "or mis-scoped changes?",
+                    "or mis-scoped changes? Does the diff violate any non-negotiable?",
                     f"Task title: {title}",
                     f"Task objective: {objective}",
                     f"Approach: {approach}",
                     risks_block,
+                    non_negotiables_block,
                     "Diff under review:\n" + (diff or "(empty diff)"),
                     "Return strict JSON with keys:\n"
                     "  issues (list of objects, each with 'severity', 'file', 'description'; "
                     f"severity must be one of: {', '.join(_SEVERITIES)}; file may be empty "
-                    "string if the issue is diff-wide)\n"
-                    "  ship_ready (bool; true only if there are NO blocker or major issues)\n"
+                    "string if the issue is diff-wide. For a non-negotiable violation, "
+                    "set severity='blocker' and prefix the description with "
+                    "'NON_NEGOTIABLE VIOLATED: ')\n"
+                    "  ship_ready (bool; true only if there are NO blocker or major issues "
+                    "AND no non-negotiable is violated)\n"
                     "  summary (string, 1-2 sentences)",
-                    "Guidance: mark as blocker anything that WILL break tests or runtime. "
+                    "Guidance: mark as blocker anything that WILL break tests or runtime, "
+                    "OR anything that violates a non-negotiable. "
                     "Mark as major anything that likely breaks a non-obvious code path. "
                     "Minor and nitpick should NOT flip ship_ready to false.",
                 ],
@@ -111,6 +127,76 @@ class SelfReviewSkill:
             # auto-fix: downgrade ship_ready rather than reject
             parsed["ship_ready"] = False
         return True, []
+
+    @staticmethod
+    def enforce_non_negotiables(
+        parsed: dict[str, Any],
+        non_negotiables: list[str],
+        diff_text: str,
+    ) -> dict[str, Any]:
+        """Deterministic post-check that cannot be talked out of by the LLM.
+
+        For each non-negotiable string, try to extract file-path constraints
+        of the form "Must [not] ... <file>" or "... in <file>". If the diff
+        touches a forbidden file, or fails to touch a required file, this
+        forces ship_ready=False and appends a blocker issue. The check runs
+        AFTER the LLM self-review and overrides its verdict — the LLM cannot
+        ship a diff that plainly violates the contract by arguing around it.
+        """
+        if not non_negotiables:
+            return parsed
+        import re as _re
+
+        changed_files: set[str] = set()
+        for line in (diff_text or "").splitlines():
+            if line.startswith("+++ b/"):
+                changed_files.add(line[6:].strip())
+            elif line.startswith("--- a/"):
+                changed_files.add(line[6:].strip())
+
+        issues = list(parsed.get("issues") or [])
+        any_violation = False
+        for nn in non_negotiables:
+            text = str(nn or "").strip()
+            if not text:
+                continue
+            lowered = text.lower()
+            # Extract a file path token from the non-negotiable
+            path_matches = _re.findall(r"`?([A-Za-z0-9_./-]+\.(?:py|ts|js|tsx|jsx|md|yaml|yml|toml|txt))`?", text)
+            if not path_matches:
+                continue
+            for path in path_matches:
+                path = path.strip()
+                if not path:
+                    continue
+                # Forbidden file heuristic: phrasing mentions "not" or "must not" or "forbidden" or "outside"
+                forbidden = any(
+                    w in lowered for w in ("must not", "should not", "forbidden", "outside", "never", "do not touch")
+                )
+                required = any(
+                    w in lowered for w in ("must be in", "must have", "must add", "add to", "must modify", "in this file", "only modify", "in ")
+                )
+                if forbidden and path in changed_files:
+                    any_violation = True
+                    issues.append({
+                        "severity": "blocker",
+                        "file": path,
+                        "description": f"NON_NEGOTIABLE VIOLATED: diff touches forbidden path '{path}' ({text})",
+                    })
+                if required and not forbidden:
+                    # "must have at least one unit test in tests/test_plan_linkage.py"
+                    # Only trigger if the diff doesn't touch the required file
+                    if path not in changed_files:
+                        any_violation = True
+                        issues.append({
+                            "severity": "blocker",
+                            "file": path,
+                            "description": f"NON_NEGOTIABLE VIOLATED: diff does not touch required path '{path}' ({text})",
+                        })
+        parsed["issues"] = issues
+        if any_violation:
+            parsed["ship_ready"] = False
+        return parsed
 
     def materialize(
         self,

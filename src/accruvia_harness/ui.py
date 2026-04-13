@@ -2849,6 +2849,16 @@ class HarnessUIDataService:
                 content="Deriving candidate atomic units from the accepted flowchart.",
             )
             units = self._derive_atomic_units(objective_id, generation_id=generation_id, diagram_version=diagram_version)
+            # Extract mermaid node ids so each generated task carries the
+            # node it fulfills. Without this, tasks auto-synthesize T_<suffix>
+            # ids and the decomposition-coverage join in bench.py sees orphan
+            # tasks + uncovered gaps even when every node has a task. Mapping
+            # is index-based (1:1 with nodes in declaration order) because the
+            # LLM currently generates units in mermaid-node order. If the unit
+            # count exceeds the node count the tail falls back to auto-synth.
+            mermaid_now = self.store.latest_mermaid_artifact(objective_id, "workflow_control")
+            from .bench import extract_mermaid_nodes  # library import
+            mermaid_nodes = extract_mermaid_nodes(mermaid_now.content if mermaid_now else "")
             self._record_atomic_generation_progress(
                 objective,
                 generation_id,
@@ -2857,6 +2867,8 @@ class HarnessUIDataService:
                 content=f"Publishing {len(units)} atomic units to the objective.",
             )
             for index, unit in enumerate(units, start=1):
+                node_index = index - 1
+                unit_node_id = mermaid_nodes[node_index] if node_index < len(mermaid_nodes) else None
                 task = self.task_service.create_task_with_policy(
                     project_id=objective.project_id,
                     objective_id=objective.id,
@@ -2873,6 +2885,7 @@ class HarnessUIDataService:
                     strategy=str(unit.get("strategy") or "atomic_from_mermaid"),
                     max_attempts=3,
                     required_artifacts=["plan", "report"],
+                    mermaid_node_id=unit_node_id,
                 )
                 self.store.create_context_record(
                     ContextRecord(

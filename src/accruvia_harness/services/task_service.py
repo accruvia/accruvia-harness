@@ -177,6 +177,7 @@ class TaskService:
         max_attempts: int = 3,
         max_branches: int = 1,
         required_artifacts: list[str] | None = None,
+        mermaid_node_id: str | None = None,
     ) -> Task:
         if objective_id is not None:
             linked_objective = self.store.get_objective(objective_id)
@@ -184,6 +185,18 @@ class TaskService:
                 raise ValueError(f"Unknown objective: {objective_id}")
             if linked_objective.project_id != project_id:
                 raise ValueError(f"Objective {objective_id} does not belong to project {project_id}")
+            # Copy non_negotiables from the objective's latest intent model into
+            # task.scope so the self_review skill can enforce them on the diff.
+            # Without this, the harness generates code that technically satisfies
+            # the task title but violates explicit operator constraints (e.g.,
+            # "test must be in file X, not file Y"). The contract is frozen at
+            # task creation time so later intent revisions don't change the
+            # contract for in-flight work.
+            if scope is None or "non_negotiables" not in scope:
+                intent = self.store.latest_intent_model(objective_id)
+                if intent is not None and intent.non_negotiables:
+                    scope = dict(scope or {})
+                    scope["non_negotiables"] = [str(n).strip() for n in intent.non_negotiables if str(n).strip()]
         amended_objective, amended_metadata = self._apply_task_amendment(
             objective=objective,
             strategy=strategy,
@@ -199,6 +212,7 @@ class TaskService:
                 id=new_id("task"),
                 project_id=project_id,
                 objective_id=objective_id,
+                mermaid_node_id=mermaid_node_id,
                 title=title,
                 objective=amended_objective,
                 priority=priority,

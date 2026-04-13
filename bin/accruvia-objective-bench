@@ -1,16 +1,9 @@
 #!/usr/bin/env python3
 """Objective bench: one-screen view of objective + task + review state.
 
-Reads the harness DB directly (no CLI wiring) and prints one block per
-open objective with:
-  - status, priority
-  - task counts: pending / active / completed / failed
-  - latest objective review round: verdict, round status, remediation counts
-  - "ready to promote" signal (all tasks done + review clear + nothing unapplied)
-  - mermaid diagram presence
-
-Intended for hobble-mode verification: watch objectives pile up tasks until
-they're ready for review, without per-task merges landing on main.
+Thin CLI wrapper over ``accruvia_harness.bench``. The library module
+holds all the query logic and is unit-tested; this script just formats
+output for the terminal.
 
 Usage:
     ./bin/accruvia-objective-bench                       # all open objectives
@@ -21,84 +14,22 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
-import re
 import sqlite3
 import sys
 from pathlib import Path
 
-_NODE_RE = re.compile(r'^\s*([A-Za-z_][A-Za-z0-9_]*)\[')
+# Add src/ to sys.path so the library import works from a checkout
+_repo = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_repo / "src"))
 
-
-def _extract_mermaid_nodes(content: str) -> list[str]:
-    """Parse node ids from a mermaid flowchart. Returns ids in declaration order.
-
-    A node declaration looks like 'T_abc123["label"]' at the start of a line.
-    Edges are ignored. The objective's own 'O' node is filtered out — we only
-    care about decomposition children.
-    """
-    if not content:
-        return []
-    nodes: list[str] = []
-    seen: set[str] = set()
-    for line in content.splitlines():
-        m = _NODE_RE.match(line)
-        if not m:
-            continue
-        node = m.group(1)
-        if node == "O" or node in seen:
-            continue
-        seen.add(node)
-        nodes.append(node)
-    return nodes
-
-
-def _decomposition_coverage(conn: sqlite3.Connection, objective_id: str) -> dict:
-    """Compute node-level coverage from mermaid + tasks.
-
-    Returns:
-        total_nodes: nodes in the latest mermaid flowchart
-        nodes_with_plans: distinct nodes referenced by existing plan rows
-        nodes_with_tasks: distinct nodes referenced by existing tasks (any status)
-        nodes_completed: distinct nodes whose task is completed
-        gaps: node ids in the mermaid but not referenced by any task
-        orphan_tasks: tasks whose mermaid_node_id is not in the mermaid
-    """
-    row = conn.execute(
-        """
-        SELECT content FROM mermaid_artifacts
-         WHERE objective_id = ? AND diagram_type = 'workflow_control'
-         ORDER BY version DESC LIMIT 1
-        """,
-        (objective_id,),
-    ).fetchone()
-    nodes = _extract_mermaid_nodes(row["content"] if row else "")
-    node_set = set(nodes)
-
-    task_rows = conn.execute(
-        "SELECT id, mermaid_node_id, status FROM tasks WHERE objective_id = ?",
-        (objective_id,),
-    ).fetchall()
-    plan_rows = conn.execute(
-        "SELECT mermaid_node_id FROM plans WHERE objective_id = ? AND mermaid_node_id IS NOT NULL",
-        (objective_id,),
-    ).fetchall()
-
-    nodes_with_tasks = {t["mermaid_node_id"] for t in task_rows if t["mermaid_node_id"]}
-    nodes_completed = {t["mermaid_node_id"] for t in task_rows if t["mermaid_node_id"] and t["status"] == "completed"}
-    nodes_with_plans = {p["mermaid_node_id"] for p in plan_rows if p["mermaid_node_id"]}
-
-    gaps = [n for n in nodes if n not in nodes_with_tasks]
-    orphan_tasks = [t["id"] for t in task_rows if t["mermaid_node_id"] and t["mermaid_node_id"] not in node_set]
-
-    return {
-        "total_nodes": len(nodes),
-        "nodes_with_plans": len(nodes_with_plans & node_set) if node_set else len(nodes_with_plans),
-        "nodes_with_tasks": len(nodes_with_tasks & node_set),
-        "nodes_completed": len(nodes_completed & node_set),
-        "gaps": gaps,
-        "orphan_tasks": orphan_tasks,
-    }
+from accruvia_harness.bench import (  # noqa: E402
+    ReviewStatus,
+    decomposition_coverage,
+    latest_review_status,
+    mermaid_for_objective,
+    ready_to_promote,
+    task_counts_for_objective,
+)
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
@@ -107,104 +38,23 @@ def _connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
-def _task_counts_for_objective(conn: sqlite3.Connection, objective_id: str) -> dict[str, int]:
-    rows = conn.execute(
-        "SELECT status, COUNT(*) AS c FROM tasks WHERE objective_id = ? GROUP BY status",
-        (objective_id,),
-    ).fetchall()
-    counts = {"pending": 0, "active": 0, "completed": 0, "failed": 0}
-    for r in rows:
-        counts[r["status"]] = r["c"]
-    counts["total"] = sum(counts.values())
-    return counts
-
-
-def _latest_review_round(conn: sqlite3.Connection, objective_id: str) -> dict | None:
-    """Pull the latest objective_review_round context record if present."""
-    rows = conn.execute(
-        """
-        SELECT metadata_json, created_at
-          FROM context_records
-         WHERE objective_id = ?
-           AND record_type = 'objective_review_round'
-         ORDER BY created_at DESC
-         LIMIT 1
-        """,
-        (objective_id,),
-    ).fetchall()
-    if not rows:
-        return None
-    try:
-        payload = json.loads(rows[0]["metadata_json"] or "{}")
-    except json.JSONDecodeError:
-        return None
-    payload["_created_at"] = rows[0]["created_at"]
-    return payload
-
-
-def _review_packet_count(conn: sqlite3.Connection, objective_id: str) -> int:
-    r = conn.execute(
-        """
-        SELECT COUNT(*) FROM context_records
-         WHERE objective_id = ?
-           AND record_type = 'objective_review_packet'
-        """,
-        (objective_id,),
-    ).fetchone()
-    return int(r[0] or 0)
-
-
-def _mermaid_for_objective(conn: sqlite3.Connection, objective_id: str) -> dict | None:
-    r = conn.execute(
-        """
-        SELECT id, diagram_type, status, version, required_for_execution,
-               LENGTH(content) AS clen
-          FROM mermaid_artifacts
-         WHERE objective_id = ?
-         ORDER BY version DESC
-         LIMIT 1
-        """,
-        (objective_id,),
-    ).fetchone()
-    return dict(r) if r is not None else None
-
-
-def _ready_to_promote(counts: dict[str, int], review: dict | None) -> tuple[bool, str]:
-    if counts["total"] == 0:
-        return False, "no tasks"
-    if counts["pending"] or counts["active"]:
-        return False, f"{counts['pending']}p/{counts['active']}a still in flight"
-    if counts["failed"]:
-        return False, f"{counts['failed']} failed"
-    if review is None:
-        return False, "no review round recorded"
-    if review.get("needs_remediation"):
-        rc = review.get("remediation_counts") or {}
-        return False, f"remediation: {rc.get('pending', 0)}p/{rc.get('active', 0)}a"
-    if not review.get("review_clear"):
-        return False, f"review status: {review.get('status') or '?'}"
-    return True, "clear"
-
-
 def _format_row(
     objective: sqlite3.Row,
     counts: dict[str, int],
-    review: dict | None,
-    packet_count: int,
+    review: ReviewStatus,
     mermaid: dict | None,
     coverage: dict,
 ) -> str:
-    ready, reason = _ready_to_promote(counts, review)
+    ready, reason = ready_to_promote(counts, review, coverage)
     ready_marker = "READY" if ready else ".....".ljust(5)
 
-    if review is None:
+    if review.status == "none":
         review_blurb = "no round yet"
+    elif review.status == "running":
+        review_blurb = f"running {review.pass_count}p/{review.fail_count}f"
     else:
-        rstatus = review.get("status") or "?"
-        verdict = review.get("verdict") or "?"
-        review_blurb = f"{rstatus}/{verdict}"
+        review_blurb = f"{'CLEAR' if review.review_clear else 'BLOCKED'} {review.pass_count}p/{review.fail_count}f"
 
-    # Decomposition coverage: <completed>/<with_tasks>/<total_nodes>
     if coverage["total_nodes"] == 0:
         dec_blurb = "no decomp"
     else:
@@ -221,21 +71,16 @@ def _format_row(
         f"{objective['status']:<9} "
         f"| tasks: {counts['pending']}p {counts['active']}a {counts['completed']}c {counts['failed']}f "
         f"| decomp: {dec_blurb:<18} "
-        f"| review: {review_blurb:<22} "
-        f"| pkts:{packet_count:<2} "
+        f"| review: {review_blurb:<24} "
         f"| {title}"
         + ("" if ready else f"  -- {reason}")
     )
 
 
 def cmd_list(conn: sqlite3.Connection, show_all: bool) -> None:
-    q = """
-        SELECT id, title, status, priority
-          FROM objectives
-         WHERE status != 'abandoned'
-    """
+    q = "SELECT id, title, status, priority FROM objectives WHERE status != 'abandoned'"
     if not show_all:
-        q += " AND status NOT IN ('completed', 'resolved')"
+        q += " AND status NOT IN ('completed')"
     q += " ORDER BY priority DESC, created_at"
     objectives = conn.execute(q).fetchall()
 
@@ -245,21 +90,16 @@ def cmd_list(conn: sqlite3.Connection, show_all: bool) -> None:
 
     print(f"{len(objectives)} objective(s):")
     print()
+    ready_count = 0
     for obj in objectives:
-        counts = _task_counts_for_objective(conn, obj["id"])
-        review = _latest_review_round(conn, obj["id"])
-        packet_count = _review_packet_count(conn, obj["id"])
-        mermaid = _mermaid_for_objective(conn, obj["id"])
-        coverage = _decomposition_coverage(conn, obj["id"])
-        print(_format_row(obj, counts, review, packet_count, mermaid, coverage))
+        counts = task_counts_for_objective(conn, obj["id"])
+        review = latest_review_status(conn, obj["id"])
+        mermaid = mermaid_for_objective(conn, obj["id"])
+        coverage = decomposition_coverage(conn, obj["id"])
+        print(_format_row(obj, counts, review, mermaid, coverage))
+        if ready_to_promote(counts, review, coverage)[0]:
+            ready_count += 1
 
-    ready_count = sum(
-        1 for obj in objectives
-        if _ready_to_promote(
-            _task_counts_for_objective(conn, obj["id"]),
-            _latest_review_round(conn, obj["id"]),
-        )[0]
-    )
     print()
     print(f"READY: {ready_count} of {len(objectives)}")
 
@@ -269,12 +109,11 @@ def cmd_detail(conn: sqlite3.Connection, objective_id: str) -> None:
     if obj is None:
         print(f"Unknown objective: {objective_id}", file=sys.stderr)
         sys.exit(2)
-    counts = _task_counts_for_objective(conn, objective_id)
-    review = _latest_review_round(conn, objective_id)
-    packet_count = _review_packet_count(conn, objective_id)
-    mermaid = _mermaid_for_objective(conn, objective_id)
-    coverage = _decomposition_coverage(conn, objective_id)
-    ready, reason = _ready_to_promote(counts, review)
+    counts = task_counts_for_objective(conn, objective_id)
+    review = latest_review_status(conn, objective_id)
+    coverage = decomposition_coverage(conn, objective_id)
+    mermaid = mermaid_for_objective(conn, objective_id)
+    ready, reason = ready_to_promote(counts, review, coverage)
 
     print(f"OBJECTIVE {obj['id']}")
     print(f"  title:   {obj['title']}")
@@ -283,40 +122,36 @@ def cmd_detail(conn: sqlite3.Connection, objective_id: str) -> None:
     print(f"  summary: {(obj['summary'] or '')[:200]}")
     print()
     print(
-        f"TASKS: {counts['total']} total"
-        f" -- pending={counts['pending']} active={counts['active']}"
+        f"TASKS: {counts['total']} total -- pending={counts['pending']} active={counts['active']}"
         f" completed={counts['completed']} failed={counts['failed']}"
     )
     print()
     print("TASK DETAIL:")
     rows = conn.execute(
-        "SELECT id, title, status, strategy FROM tasks WHERE objective_id = ? ORDER BY created_at",
+        "SELECT id, title, status, strategy, mermaid_node_id FROM tasks WHERE objective_id = ? ORDER BY created_at",
         (objective_id,),
     ).fetchall()
     for r in rows:
-        print(f"  [{r['status']:<10}] {r['id'][-12:]} {r['strategy']:<25} {r['title'][:70]}")
+        node = r["mermaid_node_id"] or "-"
+        print(f"  [{r['status']:<10}] {r['id'][-12:]} node={node:<15} {r['strategy']:<25} {r['title'][:60]}")
     print()
     print("REVIEW:")
-    if review is None:
-        print("  (no review round recorded)")
-    else:
-        print(f"  created: {review.get('_created_at','?')}")
-        print(f"  status:  {review.get('status','?')}")
-        print(f"  verdict: {review.get('verdict','?')}")
-        print(f"  review_clear: {review.get('review_clear', False)}")
-        print(f"  needs_remediation: {review.get('needs_remediation', False)}")
-        rc = review.get("remediation_counts") or {}
-        if rc:
-            print(f"  remediation_counts: {rc}")
-        print(f"  packet records in DB: {packet_count}")
+    print(f"  status:  {review.status}")
+    print(f"  review_id: {review.review_id or '-'}")
+    print(f"  packets: {review.packet_count} (pass={review.pass_count}, fail={review.fail_count})")
+    print(f"  review_clear: {review.review_clear}")
+    if review.completed_at:
+        print(f"  completed: {review.completed_at[:19]}")
     print()
     print("MERMAID:")
     if mermaid is None:
         print("  (none)")
     else:
-        print(f"  id: {mermaid['id']}  type: {mermaid['diagram_type']}  "
-              f"v{mermaid['version']}  status: {mermaid['status']}  "
-              f"content: {mermaid['clen']} bytes")
+        print(
+            f"  id: {mermaid['id']}  type: {mermaid['diagram_type']}  "
+            f"v{mermaid['version']}  status: {mermaid['status']}  "
+            f"content: {mermaid['clen']} bytes"
+        )
     print()
     print("DECOMPOSITION COVERAGE:")
     print(f"  nodes in mermaid:     {coverage['total_nodes']}")
@@ -327,8 +162,6 @@ def cmd_detail(conn: sqlite3.Connection, objective_id: str) -> None:
         print(f"  decomposition gaps (nodes with no task): {len(coverage['gaps'])}")
         for g in coverage["gaps"][:10]:
             print(f"    - {g}")
-        if len(coverage["gaps"]) > 10:
-            print(f"    ... and {len(coverage['gaps']) - 10} more")
     if coverage["orphan_tasks"]:
         print(f"  orphan tasks (mermaid_node_id not in diagram): {len(coverage['orphan_tasks'])}")
         for t in coverage["orphan_tasks"][:10]:
@@ -339,20 +172,9 @@ def cmd_detail(conn: sqlite3.Connection, objective_id: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Objective verification bench.")
-    parser.add_argument(
-        "--db",
-        default=".accruvia-harness/harness.db",
-        help="path to harness.db",
-    )
-    parser.add_argument(
-        "--all",
-        action="store_true",
-        help="include resolved/completed objectives (default: skip them)",
-    )
-    parser.add_argument(
-        "--objective",
-        help="show full detail for a single objective id",
-    )
+    parser.add_argument("--db", default=".accruvia-harness/harness.db")
+    parser.add_argument("--all", action="store_true", help="include resolved/completed objectives")
+    parser.add_argument("--objective", help="show full detail for a single objective id")
     args = parser.parse_args()
     db_path = Path(args.db)
     if not db_path.exists():

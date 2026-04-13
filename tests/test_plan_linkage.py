@@ -103,6 +103,35 @@ class PlanLinkageTests(unittest.TestCase):
         self.assertIsNotNone(plan)
         self.assertEqual(plan.id, task.plan_id)
 
+    def test_explicit_mermaid_node_id_is_honored(self) -> None:
+        """Atomic generation passes a mermaid_node_id matching a real mermaid
+        node (e.g. 'A', 'B'). TaskService must preserve that id instead of
+        synthesizing a T_<suffix> fallback. Without this, the bench's
+        decomposition-coverage join breaks because the node-id spaces don't
+        match between the mermaid content and the tasks table.
+        """
+        task = self.task_service.create_task_with_policy(
+            project_id=self.project.id,
+            title="Explicit node task",
+            objective="test",
+            priority=100,
+            parent_task_id=None,
+            source_run_id=None,
+            external_ref_type=None,
+            external_ref_id=None,
+            objective_id=self.objective_id,
+            strategy="atomic_from_mermaid",
+            max_attempts=3,
+            mermaid_node_id="A",
+        )
+        self.assertEqual("A", task.mermaid_node_id)
+        # The plan created for the task must share the same node id
+        plan = self.store.get_plan(task.plan_id)
+        self.assertEqual("A", plan.mermaid_node_id)
+        # And the DB round-trip preserves it
+        fetched = self.store.get_task(task.id)
+        self.assertEqual("A", fetched.mermaid_node_id)
+
 
 if __name__ == "__main__":
     unittest.main()
