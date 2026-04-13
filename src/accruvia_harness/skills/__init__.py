@@ -17,23 +17,30 @@ from .base import (
     make_skill_context,
     validate_against_schema,
 )
+from .atomic_decomposition import AtomicDecompositionSkill
 from .benchmark import BenchmarkSkill
+from .cognition_heartbeat import CognitionHeartbeatSkill
 from .commit import CommitSkill
 from .diagnose import DiagnoseSkill
 from .explain_failure import ExplainFailureSkill
 from .fix_tests import FixTestsSkill
 from .follow_on import FollowOnSkill
 from .implement import ImplementSkill, apply_changes
+from .interrogation import InterrogationSkill
+from .mermaid_update_proposal import MermaidUpdateProposalSkill
 from .quality_gate import QualityGateSkill
 from .post_merge_check import PostMergeCheckSkill
 from .promotion_apply import PromotionApplySkill
 from .promotion_review import PromotionReviewSkill
 from .registry import SkillRegistry
+from .reviewers import REVIEWER_SKILLS
+from .sa_watch_triage import SAWatchTriageSkill
 from .scope import ScopeSkill
 from .self_review import SelfReviewSkill
 from .summarize_run import SummarizeRunSkill
 from .test_health import TestHealthSkill
 from .translate_intent import TranslateIntentSkill
+from .ui_responder import UIResponderSkill
 from .validate import ValidateSkill, commands_for_profile
 from .verify_acceptance import VerifyAcceptanceSkill
 
@@ -59,12 +66,27 @@ def build_default_registry() -> SkillRegistry:
     registry.register(TranslateIntentSkill())
     registry.register(QualityGateSkill())
     registry.register(VerifyAcceptanceSkill())
+    registry.register(AtomicDecompositionSkill())
+    registry.register(InterrogationSkill())
+    registry.register(MermaidUpdateProposalSkill())
+    registry.register(UIResponderSkill())
+    registry.register(CognitionHeartbeatSkill())
+    registry.register(SAWatchTriageSkill())
+    for reviewer_cls in REVIEWER_SKILLS:
+        registry.register(reviewer_cls())
     return registry
 
 
 __all__ = [
+    "AtomicDecompositionSkill",
     "BenchmarkSkill",
+    "CognitionHeartbeatSkill",
     "CommitSkill",
+    "InterrogationSkill",
+    "MermaidUpdateProposalSkill",
+    "REVIEWER_SKILLS",
+    "SAWatchTriageSkill",
+    "UIResponderSkill",
     "Skill",
     "SkillError",
     "SkillInvocation",

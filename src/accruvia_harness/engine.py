@@ -25,6 +25,7 @@ from .services import (
     TaskService,
 )
 from .services.repository_promotion_service import RepositoryPromotionService
+from .skills import SkillRegistry, build_default_registry
 from .store import SQLiteHarnessStore
 from .validation import PromotionValidatorRegistry, build_validator_registry
 from .workers import LocalArtifactWorker, WorkerBackend
@@ -47,6 +48,7 @@ class HarnessEngine:
         heartbeat_timeout_seconds: int = 1800,
         heartbeat_failure_escalation_threshold: int = 3,
         telemetry=None,
+        skill_registry: SkillRegistry | None = None,
     ) -> None:
         self.store = store
         self.workspace_root = Path(workspace_root)
@@ -63,6 +65,7 @@ class HarnessEngine:
         self.heartbeat_timeout_seconds = heartbeat_timeout_seconds
         self.heartbeat_failure_escalation_threshold = heartbeat_failure_escalation_threshold
         self.telemetry = telemetry
+        self.skill_registry = skill_registry or build_default_registry()
         self.repository_promotions = RepositoryPromotionService()
 
         self.tasks = TaskService(self.store)
@@ -103,6 +106,7 @@ class HarnessEngine:
             llm_router=self.llm_router,
             heartbeat_timeout_seconds=getattr(self, "heartbeat_timeout_seconds", 1800),
             telemetry=self.telemetry,
+            skill_registry=self.skill_registry,
         )
         from .services.decision_service import DecisionService
         self.decision_service = DecisionService(self.store, decider=self.decider)

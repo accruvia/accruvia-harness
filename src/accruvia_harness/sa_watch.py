@@ -23,8 +23,9 @@ from .domain import (
     TaskStatus,
     new_id,
 )
-from .llm import LLMExecutionError, LLMInvocation, LLMRouter
+from .llm import LLMExecutionError, LLMRouter
 from .services.task_service import TaskService
+from .skills import SkillInvocation, SkillRegistry, build_default_registry, invoke_skill
 from .store import SQLiteHarnessStore
 
 if TYPE_CHECKING:
@@ -76,6 +77,7 @@ class SAWatchService:
         post_repair_callback: Callable[[Task], None] | None = None,
         restart_stack: Callable[[dict[str, object]], dict[str, object] | None] | None = None,
         repair_runner: Callable[[Task, Run, Path], SAWatchRepairResult] | None = None,
+        skill_registry: SkillRegistry | None = None,
     ) -> None:
         self.store = store
         self.control_plane = control_plane
@@ -85,6 +87,9 @@ class SAWatchService:
         self._last_invoked_at = 0.0
         self.engine = engine
         self.tasks = TaskService(store)
+        self.skill_registry = skill_registry or (
+            getattr(engine, "skill_registry", None) if engine is not None else None
+        ) or build_default_registry()
         self.structural_progress_callback = structural_progress_callback
         self.post_repair_callback = post_repair_callback
         self.restart_stack = restart_stack
@@ -257,10 +262,18 @@ class SAWatchService:
             json.dumps(packet.get("evidence_manifest", {}), indent=2, sort_keys=True),
             encoding="utf-8",
         )
-        result, _backend = self.llm_router.execute(
-            LLMInvocation(task=task, run=run, prompt=self._build_prompt(packet, evidence_manifest_path=evidence_manifest_path), run_dir=run_dir)
+        triage_skill = self.skill_registry.get("sa_watch_triage")
+        invocation = SkillInvocation(
+            skill_name="sa_watch_triage",
+            inputs={"prompt": self._build_prompt(packet, evidence_manifest_path=evidence_manifest_path)},
+            task=task,
+            run=run,
+            run_dir=run_dir,
         )
-        report = result.response_text.strip()
+        skill_result = invoke_skill(triage_skill, invocation, self.llm_router)
+        if not skill_result.success:
+            raise LLMExecutionError("; ".join(skill_result.errors) or "sa_watch_triage failed")
+        report = str(skill_result.output.get("report") or "").strip()
         report_path = run_dir / "sa_watch_report.txt"
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(report, encoding="utf-8")

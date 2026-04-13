@@ -6,7 +6,8 @@ from pathlib import Path
 
 from ..cognition import BrainSource, CognitionAdapterRegistry, HeartbeatResult
 from ..domain import Event, Project, Run, RunStatus, Task, TaskStatus, new_id, serialize_dataclass
-from ..llm import LLMInvocation, LLMRouter
+from ..llm import LLMRouter
+from ..skills import SkillInvocation, SkillRegistry, build_default_registry, invoke_skill
 
 
 class CognitionService:
@@ -24,6 +25,7 @@ class CognitionService:
         llm_router: LLMRouter | None = None,
         heartbeat_timeout_seconds: int = 1800,
         telemetry=None,
+        skill_registry: SkillRegistry | None = None,
     ) -> None:
         self.store = store
         self.query_service = query_service
@@ -33,6 +35,7 @@ class CognitionService:
         self.llm_router = llm_router
         self.heartbeat_timeout_seconds = heartbeat_timeout_seconds
         self.telemetry = telemetry
+        self.skill_registry = skill_registry or build_default_registry()
 
     def heartbeat(self, project_id: str) -> HeartbeatResult:
         project = self.store.get_project(project_id)
@@ -83,32 +86,26 @@ class CognitionService:
                 attempt=1,
                 summary=f"Heartbeat analysis for {project.name}",
             )
+            heartbeat_skill = self.skill_registry.get("cognition_heartbeat")
+            invocation = SkillInvocation(
+                skill_name="cognition_heartbeat",
+                inputs={"prompt": prompt},
+                task=task,
+                run=run,
+                run_dir=run_dir,
+                timeout_seconds_override=self.heartbeat_timeout_seconds,
+            )
             if self.telemetry is not None:
                 with self.telemetry.timed("heartbeat_analysis", project_id=project.id, adapter_name=adapter.name):
-                    result, llm_backend = self.llm_router.execute(
-                        LLMInvocation(
-                            task=task,
-                            run=run,
-                            prompt=prompt,
-                            run_dir=run_dir,
-                            timeout_seconds_override=self.heartbeat_timeout_seconds,
-                        ),
-                        telemetry=self.telemetry,
-                    )
+                    skill_result = invoke_skill(heartbeat_skill, invocation, self.llm_router, telemetry=self.telemetry)
             else:
-                result, llm_backend = self.llm_router.execute(
-                    LLMInvocation(
-                        task=task,
-                        run=run,
-                        prompt=prompt,
-                        run_dir=run_dir,
-                        timeout_seconds_override=self.heartbeat_timeout_seconds,
-                    ),
-                    telemetry=self.telemetry,
-                )
-            prompt_path = result.prompt_path
-            response_path = result.response_path
-            analysis = adapter.parse_response(result.response_text)
+                skill_result = invoke_skill(heartbeat_skill, invocation, self.llm_router, telemetry=self.telemetry)
+            llm_backend = skill_result.llm_backend
+            prompt_path = Path(skill_result.prompt_path) if skill_result.prompt_path else None
+            response_path = Path(skill_result.response_path) if skill_result.response_path else None
+            # Adapter parses its own response shape — use the raw response so
+            # adapter-specific schemas survive the skill envelope.
+            analysis = adapter.parse_response(skill_result.raw_response)
             analysis_path = run_dir / "heartbeat_analysis.json"
             analysis_path.write_text(json.dumps(analysis, indent=2, sort_keys=True), encoding="utf-8")
 

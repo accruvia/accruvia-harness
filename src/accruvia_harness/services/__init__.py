@@ -1,4 +1,5 @@
 from .objective_promotion_service import ObjectivePromotionService
+from .objective_review_orchestrator import ObjectiveReviewOrchestrator
 from .branch_service import BranchResult, BranchService, WinnerResult
 from .cognition_service import CognitionService
 from .decision_service import DecisionService
@@ -21,6 +22,7 @@ __all__ = [
     "GitHubTaskService",
     "GitLabTaskService",
     "ObjectivePromotionService",
+    "ObjectiveReviewOrchestrator",
     "PromotionReviewResult",
     "PromotionService",
     "QueueService",

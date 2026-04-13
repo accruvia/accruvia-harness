@@ -907,17 +907,23 @@ class ExplainFailureSkillTests(unittest.TestCase):
 
 
 class SkillRegistryTests(unittest.TestCase):
-    def test_default_registry_has_all_eighteen(self) -> None:
+    def test_default_registry_has_all_skills(self) -> None:
         registry = build_default_registry()
-        self.assertEqual(18, len(registry))
         expected = {
             "scope", "implement", "self_review", "validate", "diagnose",
             "explain_failure", "fix_tests", "promotion_review",
             "promotion_apply", "post_merge_check", "follow_on",
             "benchmark", "commit", "summarize_run", "test_health",
             "translate_intent", "quality_gate", "verify_acceptance",
+            # Skills migration additions:
+            "atomic_decomposition", "interrogation", "mermaid_update_proposal",
+            "ui_responder", "cognition_heartbeat", "sa_watch_triage",
+            "review_intent_fidelity", "review_unit_test_coverage",
+            "review_integration_e2e_coverage", "review_security",
+            "review_devops", "review_atomic_fidelity", "review_code_structure",
         }
         self.assertEqual(expected, set(registry.names()))
+        self.assertEqual(len(expected), len(registry))
 
     def test_duplicate_registration_rejected(self) -> None:
         registry = SkillRegistry()
