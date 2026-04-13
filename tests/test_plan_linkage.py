@@ -59,10 +59,26 @@ class PlanLinkageTests(unittest.TestCase):
         )
 
     def test_new_task_has_plan_and_node_id(self) -> None:
+        """A newly-created task must carry a plan_id and a canonical
+        mermaid_node_id derived from that plan via canonical_node_id().
+
+        Prefix changed from T_ to P_ when Model C replaced the synthetic
+        task-id-derived fallback with the canonical plan-derived id. The
+        P_ prefix visually marks plan-anchored nodes in rendered diagrams.
+        """
+        from accruvia_harness.mermaid import canonical_node_id
+
         task = self._create_task()
         self.assertIsNotNone(task.plan_id)
         self.assertIsNotNone(task.mermaid_node_id)
-        self.assertTrue(task.mermaid_node_id.startswith("T_"))
+        self.assertTrue(
+            task.mermaid_node_id.startswith("P_"),
+            f"expected canonical P_ prefix, got {task.mermaid_node_id}",
+        )
+        # The invariant: task.mermaid_node_id == canonical_node_id(plan)
+        plan = self.store.get_plan(task.plan_id)
+        self.assertEqual(canonical_node_id(plan), task.mermaid_node_id)
+        self.assertEqual(plan.mermaid_node_id, task.mermaid_node_id)
 
     def test_plan_row_is_persisted_with_matching_node(self) -> None:
         task = self._create_task()
@@ -103,16 +119,30 @@ class PlanLinkageTests(unittest.TestCase):
         self.assertIsNotNone(plan)
         self.assertEqual(plan.id, task.plan_id)
 
-    def test_explicit_mermaid_node_id_is_honored(self) -> None:
-        """Atomic generation passes a mermaid_node_id matching a real mermaid
-        node (e.g. 'A', 'B'). TaskService must preserve that id instead of
-        synthesizing a T_<suffix> fallback. Without this, the bench's
-        decomposition-coverage join breaks because the node-id spaces don't
-        match between the mermaid content and the tasks table.
+    def test_explicit_mermaid_node_id_is_overwritten_by_canonical(self) -> None:
+        """Under Model C, an explicit mermaid_node_id passed into
+        create_task_with_policy is NOT honored — it is overwritten by
+        canonical_node_id(plan) so that the invariant
+        task.mermaid_node_id == plan.mermaid_node_id == P_<hash> holds
+        unconditionally.
+
+        The old contract (pre-Model C) was that atomic decomposition
+        could pass flowchart aliases like 'A', 'B' and have them stored
+        verbatim. That contract created the exact bug Query #3 found:
+        when the mermaid was regenerated (or LLM-rewritten) the node id
+        'A' no longer referred to any node, and the join between
+        tasks.mermaid_node_id and mermaid_artifacts.content broke.
+
+        The new contract: node id derivation is plan-scoped and
+        deterministic. LLM/operator Mermaid proposals that use different
+        aliases get normalized by canonicalize_mermaid() before
+        persistence; they never reach task creation with their own ids.
         """
+        from accruvia_harness.mermaid import canonical_node_id
+
         task = self.task_service.create_task_with_policy(
             project_id=self.project.id,
-            title="Explicit node task",
+            title="Task with doomed explicit id",
             objective="test",
             priority=100,
             parent_task_id=None,
@@ -122,15 +152,14 @@ class PlanLinkageTests(unittest.TestCase):
             objective_id=self.objective_id,
             strategy="atomic_from_mermaid",
             max_attempts=3,
-            mermaid_node_id="A",
+            mermaid_node_id="A",  # will be ignored
         )
-        self.assertEqual("A", task.mermaid_node_id)
-        # The plan created for the task must share the same node id
+        # The 'A' was overwritten; the stored id is canonical.
+        self.assertNotEqual("A", task.mermaid_node_id)
+        self.assertTrue(task.mermaid_node_id.startswith("P_"))
         plan = self.store.get_plan(task.plan_id)
-        self.assertEqual("A", plan.mermaid_node_id)
-        # And the DB round-trip preserves it
-        fetched = self.store.get_task(task.id)
-        self.assertEqual("A", fetched.mermaid_node_id)
+        self.assertEqual(canonical_node_id(plan), task.mermaid_node_id)
+        self.assertEqual(plan.mermaid_node_id, task.mermaid_node_id)
 
 
 if __name__ == "__main__":
