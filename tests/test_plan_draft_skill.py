@@ -11,6 +11,7 @@ from accruvia_harness.domain import Objective, ObjectiveStatus, Project, new_id
 from accruvia_harness.mermaid import canonical_node_id
 from accruvia_harness.skills.plan_draft import (
     PlanDraftSkill,
+    PlanDraftTrioSkill,
     materialize_plans_from_skill_output,
 )
 from accruvia_harness.store import SQLiteHarnessStore
@@ -236,6 +237,257 @@ class MaterializePlansTests(unittest.TestCase):
             self.store, self.objective_id, plans_data, author_tag="test_tag"
         )
         self.assertEqual("test_tag", persisted[0].slice["derived_from"])
+
+
+_VALID_TRIO_PLANS_JSON = json.dumps(
+    {
+        "plans": [
+            {
+                "local_id": "p1",
+                "label": "Add Plan.summary() returning one-line repr",
+                "depends_on": [],
+                "target_impl": "src/accruvia_harness/domain.py::Plan.summary",
+                "target_test": "tests/test_domain.py::test_plan_summary",
+                "transformation": "Return a formatted string of id, objective_id, status",
+                "input_samples": [
+                    {"id": "plan_abc", "objective_id": "obj_xyz", "status": "approved"}
+                ],
+                "output_samples": ["plan_abc -> obj_xyz (approved)"],
+                "resources": [],
+            },
+            {
+                "local_id": "p2",
+                "label": "Add Plan.summary() usage in bench view",
+                "depends_on": ["p1"],
+                "target_impl": "bin/accruvia-objective-bench",
+                "target_test": "tests/test_bench.py::test_bench_shows_plan_summary",
+                "transformation": "Call plan.summary() for each plan and print",
+                "input_samples": [{"plan_count": 3}],
+                "output_samples": ["3 plan summaries printed"],
+            },
+        ]
+    }
+)
+
+
+class PlanDraftTrioSkillTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.skill = PlanDraftTrioSkill()
+
+    def test_registered_with_trio_name(self):
+        self.assertEqual("plan_draft_trio", self.skill.name)
+
+    def test_prompt_includes_trio_instructions(self):
+        prompt = self.skill.build_prompt(
+            {
+                "objective_title": "x",
+                "intent_summary": "y",
+                "success_definition": "z",
+            }
+        )
+        # Base prompt still there
+        self.assertIn("DEFINITION OF ATOMIC", prompt)
+        # TRIO addendum
+        self.assertIn("target_impl", prompt)
+        self.assertIn("target_test", prompt)
+        self.assertIn("transformation", prompt)
+        self.assertIn("input_samples", prompt)
+        self.assertIn("output_samples", prompt)
+
+    def test_valid_trio_output_parses_and_validates(self):
+        parsed = self.skill.parse_response(_VALID_TRIO_PLANS_JSON)
+        self.assertEqual(2, len(parsed["plans"]))
+        # Base fields present
+        self.assertEqual("p1", parsed["plans"][0]["local_id"])
+        # TRIO fields threaded through
+        self.assertEqual(
+            "src/accruvia_harness/domain.py::Plan.summary",
+            parsed["plans"][0]["target_impl"],
+        )
+        self.assertEqual(1, len(parsed["plans"][0]["input_samples"]))
+        self.assertEqual(1, len(parsed["plans"][0]["output_samples"]))
+        ok, errors = self.skill.validate_output(parsed)
+        self.assertTrue(ok, msg=errors)
+
+    def test_rejects_plan_with_neither_impl_nor_test(self):
+        plans = [
+            {
+                "local_id": "p1",
+                "label": "Orphan plan",
+                "depends_on": [],
+                "transformation": "x",
+                "input_samples": [{"a": 1}],
+                "output_samples": [{"b": 2}],
+            }
+        ]
+        ok, errors = self.skill.validate_output({"plans": plans})
+        self.assertFalse(ok)
+        self.assertTrue(any("neither target_impl nor target_test" in e for e in errors))
+
+    def test_rejects_duplicate_target_impl_across_plans(self):
+        plans = [
+            {
+                "local_id": "p1",
+                "label": "First",
+                "depends_on": [],
+                "target_impl": "src/foo.py::bar",
+                "target_test": "tests/test_foo.py::test_bar_a",
+                "transformation": "do a",
+                "input_samples": [{}],
+                "output_samples": [{}],
+            },
+            {
+                "local_id": "p2",
+                "label": "Second",
+                "depends_on": [],
+                "target_impl": "src/foo.py::bar",  # collision
+                "target_test": "tests/test_foo.py::test_bar_b",
+                "transformation": "do b",
+                "input_samples": [{}],
+                "output_samples": [{}],
+            },
+        ]
+        ok, errors = self.skill.validate_output({"plans": plans})
+        self.assertFalse(ok)
+        self.assertTrue(any("already claimed" in e for e in errors))
+
+    def test_rejects_duplicate_target_test_across_plans(self):
+        plans = [
+            {
+                "local_id": "p1",
+                "label": "First",
+                "depends_on": [],
+                "target_impl": "src/a.py",
+                "target_test": "tests/test_shared.py::test_shared",
+                "transformation": "do a",
+                "input_samples": [{}],
+                "output_samples": [{}],
+            },
+            {
+                "local_id": "p2",
+                "label": "Second",
+                "depends_on": [],
+                "target_impl": "src/b.py",
+                "target_test": "tests/test_shared.py::test_shared",  # collision
+                "transformation": "do b",
+                "input_samples": [{}],
+                "output_samples": [{}],
+            },
+        ]
+        ok, errors = self.skill.validate_output({"plans": plans})
+        self.assertFalse(ok)
+        self.assertTrue(any("target_test" in e and "already claimed" in e for e in errors))
+
+    def test_rejects_missing_transformation(self):
+        plans = [
+            {
+                "local_id": "p1",
+                "label": "x",
+                "depends_on": [],
+                "target_impl": "src/a.py",
+                "transformation": "",
+                "input_samples": [{}],
+                "output_samples": [{}],
+            }
+        ]
+        ok, errors = self.skill.validate_output({"plans": plans})
+        self.assertFalse(ok)
+        self.assertTrue(any("missing transformation" in e for e in errors))
+
+    def test_rejects_empty_input_samples(self):
+        plans = [
+            {
+                "local_id": "p1",
+                "label": "x",
+                "depends_on": [],
+                "target_impl": "src/a.py",
+                "transformation": "do a",
+                "input_samples": [],
+                "output_samples": [],
+            }
+        ]
+        ok, errors = self.skill.validate_output({"plans": plans})
+        self.assertFalse(ok)
+        self.assertTrue(any("input_samples" in e and "non-empty" in e for e in errors))
+
+    def test_rejects_input_output_sample_length_mismatch(self):
+        plans = [
+            {
+                "local_id": "p1",
+                "label": "x",
+                "depends_on": [],
+                "target_impl": "src/a.py",
+                "transformation": "do a",
+                "input_samples": [{"a": 1}, {"a": 2}],
+                "output_samples": [{"b": 1}],
+            }
+        ]
+        ok, errors = self.skill.validate_output({"plans": plans})
+        self.assertFalse(ok)
+        self.assertTrue(any("length mismatch" in e for e in errors))
+
+    def test_test_only_plan_is_allowed(self):
+        plans = [
+            {
+                "local_id": "p1",
+                "label": "Add test for existing function",
+                "depends_on": [],
+                "target_test": "tests/test_existing.py::test_new_case",
+                "transformation": "Assert existing function handles edge case",
+                "input_samples": [{"x": 0}],
+                "output_samples": [{"raises": "ValueError"}],
+            }
+        ]
+        ok, errors = self.skill.validate_output({"plans": plans})
+        self.assertTrue(ok, msg=errors)
+
+    def test_materialize_persists_trio_fields_into_slice(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store = SQLiteHarnessStore(Path(tmp.name) / "harness.db")
+        store.initialize()
+        store.create_project(
+            Project(id=new_id("project"), name="demo", description="")
+        )
+        project = store.list_projects()[0]
+        objective_id = new_id("objective")
+        store.create_objective(
+            Objective(
+                id=objective_id,
+                project_id=project.id,
+                title="Test",
+                summary="test",
+                status=ObjectiveStatus.OPEN,
+            )
+        )
+
+        plans_data = [
+            {
+                "local_id": "p1",
+                "label": "Add X",
+                "depends_on": [],
+                "target_impl": "src/foo.py::bar",
+                "target_test": "tests/test_foo.py::test_bar",
+                "transformation": "Return 42",
+                "input_samples": [{"a": 1}],
+                "output_samples": [42],
+                "resources": ["numpy"],
+            },
+        ]
+        persisted = materialize_plans_from_skill_output(
+            store, objective_id, plans_data, author_tag="plan_draft_trio"
+        )
+        self.assertEqual(1, len(persisted))
+        slice_ = persisted[0].slice
+        self.assertEqual("src/foo.py::bar", slice_["target_impl"])
+        self.assertEqual("tests/test_foo.py::test_bar", slice_["target_test"])
+        self.assertEqual("Return 42", slice_["transformation"])
+        self.assertEqual([{"a": 1}], slice_["input_samples"])
+        self.assertEqual([42], slice_["output_samples"])
+        self.assertEqual(["numpy"], slice_["resources"])
+        # And a round-trip through the store preserves them
+        stored = store.list_plans_for_objective(objective_id)[0]
+        self.assertEqual("src/foo.py::bar", stored.slice["target_impl"])
 
 
 if __name__ == "__main__":

@@ -917,7 +917,7 @@ class SkillRegistryTests(unittest.TestCase):
             "translate_intent", "quality_gate", "verify_acceptance",
             # Skills migration additions:
             "atomic_decomposition", "interrogation", "mermaid_update_proposal",
-            "plan_draft",
+            "plan_draft", "plan_draft_trio",
             "ui_responder", "cognition_heartbeat", "sa_watch_triage",
             "review_intent_fidelity", "review_unit_test_coverage",
             "review_integration_e2e_coverage", "review_security",

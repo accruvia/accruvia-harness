@@ -200,6 +200,9 @@ class PlanDraftSkill:
         return None
 
 
+_TRIO_SLICE_KEYS = ("target_impl", "target_test", "transformation", "input_samples", "output_samples", "resources")
+
+
 def materialize_plans_from_skill_output(
     store: Any,
     objective_id: str,
@@ -207,12 +210,16 @@ def materialize_plans_from_skill_output(
     *,
     author_tag: str = "plan_draft_skill",
 ) -> list[Plan]:
-    """Convert plan_draft skill output into real Plan rows.
+    """Convert plan_draft (or plan_draft_trio) skill output into real Plan rows.
 
     - Assigns canonical `P_<hash>` ids via `mermaid.canonical_node_id`.
     - Resolves `depends_on` local_ids to canonical plan.ids (plans are
       created in order, so earlier local_ids have real ids by the time
       later plans reference them).
+    - Copies TRIO fields (target_impl, target_test, transformation,
+      input_samples, output_samples, resources) into plan.slice when
+      present in the source data. Missing TRIO fields are simply absent
+      from the slice dict — downstream consumers must defensively check.
     - Persists each plan via `store.create_plan`.
 
     Returns the list of persisted Plan rows in creation order.
@@ -228,15 +235,20 @@ def materialize_plans_from_skill_output(
         deps_resolved = [
             local_to_plan_id[d] for d in deps_local if d in local_to_plan_id
         ]
+        slice_dict: dict[str, Any] = {
+            "label": label,
+            "dependencies": deps_resolved,
+            "derived_from": author_tag,
+            "local_id": local_id,
+        }
+        # Carry TRIO fields forward when present
+        for key in _TRIO_SLICE_KEYS:
+            if key in pd and pd[key] not in (None, ""):
+                slice_dict[key] = pd[key]
         plan = Plan(
             id=new_id("plan"),
             objective_id=objective_id,
-            slice={
-                "label": label,
-                "dependencies": deps_resolved,
-                "derived_from": author_tag,
-                "local_id": local_id,
-            },
+            slice=slice_dict,
             atomicity_assessment={
                 "is_atomic": True,
                 "violations": [],
@@ -252,3 +264,190 @@ def materialize_plans_from_skill_output(
         persisted.append(plan)
 
     return persisted
+
+
+# ---------------------------------------------------------------------------
+# TRIO variant
+# ---------------------------------------------------------------------------
+
+
+class PlanDraftTrioSkill(PlanDraftSkill):
+    """plan_draft variant that requires TRIO structured output per plan.
+
+    The flat `plan_draft` skill produces `{local_id, label, depends_on}`
+    per plan — the label does double duty as both display text and as
+    the contract for downstream consumers. That's the gap the A/B is
+    testing: is the LLM producing more atomic decompositions when the
+    schema forces it to name targets + samples explicitly?
+
+    TRIO fields added to each plan:
+      - target_impl: "path/to/file.py::symbol_name" (or just path/to/file.py)
+        Required unless target_test is set. Represents the implementation
+        target the plan will create/modify.
+      - target_test: "tests/path/test_file.py::test_name" (or just the path)
+        Required unless target_impl is set. Represents the test file the
+        plan will create/modify. Plans may have both (the atomic default)
+        or only one (test-only plan, impl-only plan).
+      - transformation: one-sentence description of what the plan's code
+        actually does. Required.
+      - input_samples: list of at least one concrete input example
+        (free-form dict or primitive). Required.
+      - output_samples: list of matching outputs, same length as
+        input_samples. Required.
+      - resources: optional list of external dependencies/services the
+        plan needs (e.g. "AWS S3 SDK", "sqlite3").
+
+    Atomicity invariants (soft, evaluated by structural A/B):
+      - Each target_impl path appears at most once across the plan list
+        (one plan per file; if two plans touch the same file they should
+        be one plan or one should depend on the other).
+      - Each target_test path appears at most once.
+      - output_samples has the same length as input_samples per plan.
+    """
+
+    name = "plan_draft_trio"
+
+    def build_prompt(self, inputs: dict[str, Any]) -> str:
+        base_prompt = super().build_prompt(inputs)
+        trio_addendum = (
+            "\n\nADDITIONAL REQUIREMENT — TRIO structured output:\n"
+            "Each plan MUST also include the following fields:\n"
+            "  - target_impl: the implementation target in the form\n"
+            "    'path/to/file.py::symbol_name' (e.g.\n"
+            "    'src/accruvia_harness/domain.py::Plan.summary').\n"
+            "    Required unless the plan is test-only (then set this to null).\n"
+            "  - target_test: the test target in the form\n"
+            "    'tests/path/test_file.py::test_name'. Required unless the plan\n"
+            "    is impl-only (then set this to null).\n"
+            "  - transformation: one imperative sentence describing what the\n"
+            "    plan's code does. Example: 'Return a one-line string showing\n"
+            "    plan id, objective id, and status.'\n"
+            "  - input_samples: list of at least one concrete input example.\n"
+            "    Each element is a dict (or scalar) representing a real input\n"
+            "    the function/test will see. Include edge cases where the\n"
+            "    objective's non-negotiables would force them.\n"
+            "  - output_samples: list of matching outputs, one per input_sample,\n"
+            "    in the same order. Same shape as whatever the impl returns.\n"
+            "  - resources: optional list of external deps (libraries, services,\n"
+            "    env vars). Empty list if none.\n\n"
+            "INVARIANTS:\n"
+            "  - Plans may have target_impl + target_test, only target_impl, or\n"
+            "    only target_test — at least one is required.\n"
+            "  - Every target_impl path is unique across plans.\n"
+            "  - Every target_test path is unique across plans.\n"
+            "  - len(output_samples) == len(input_samples) per plan.\n\n"
+            "Example plan entry with TRIO:\n"
+            "{\n"
+            '  "local_id": "p1",\n'
+            '  "label": "Add Plan.summary() returning human-readable repr",\n'
+            '  "depends_on": [],\n'
+            '  "target_impl": "src/accruvia_harness/domain.py::Plan.summary",\n'
+            '  "target_test": "tests/test_domain.py::test_plan_summary",\n'
+            '  "transformation": "Return f\'{plan.id} -> {plan.objective_id} ({plan.status})\'",\n'
+            '  "input_samples": [\n'
+            '    {"id": "plan_abc123", "objective_id": "obj_def456", "status": "approved"}\n'
+            "  ],\n"
+            '  "output_samples": [\n'
+            '    "plan_abc123 -> obj_def456 (approved)"\n'
+            "  ],\n"
+            '  "resources": []\n'
+            "}\n"
+        )
+        return base_prompt + trio_addendum
+
+    def parse_response(self, response_text: str) -> dict[str, Any]:
+        base_parsed = super().parse_response(response_text)
+        raw = extract_json_payload(response_text) or {}
+        raw_plans = raw.get("plans") if isinstance(raw, dict) else None
+        if not isinstance(raw_plans, list):
+            return base_parsed
+
+        # Enrich each already-parsed plan with TRIO fields from the raw payload.
+        # Match by local_id to be resilient to dropped malformed entries.
+        raw_by_id = {}
+        for item in raw_plans:
+            if isinstance(item, dict):
+                lid = str(item.get("local_id") or "").strip()
+                if lid:
+                    raw_by_id[lid] = item
+
+        for plan in base_parsed.get("plans") or []:
+            src = raw_by_id.get(plan["local_id"]) or {}
+            for key in ("target_impl", "target_test", "transformation"):
+                val = src.get(key)
+                if isinstance(val, str) and val.strip():
+                    plan[key] = val.strip()
+            for key in ("input_samples", "output_samples"):
+                val = src.get(key)
+                if isinstance(val, list):
+                    plan[key] = val
+            resources = src.get("resources")
+            if isinstance(resources, list):
+                plan["resources"] = [str(r).strip() for r in resources if str(r).strip()]
+        return base_parsed
+
+    def validate_output(self, parsed: dict[str, Any]) -> tuple[bool, list[str]]:
+        ok, errors = super().validate_output(parsed)
+        if not ok:
+            return False, errors
+
+        plans = parsed.get("plans") or []
+        trio_errors: list[str] = []
+        seen_impl: dict[str, str] = {}
+        seen_test: dict[str, str] = {}
+
+        for plan in plans:
+            local_id = plan["local_id"]
+            target_impl = plan.get("target_impl")
+            target_test = plan.get("target_test")
+
+            if not target_impl and not target_test:
+                trio_errors.append(
+                    f"plan {local_id!r} has neither target_impl nor target_test — "
+                    "at least one is required"
+                )
+                continue
+
+            if target_impl:
+                if target_impl in seen_impl:
+                    trio_errors.append(
+                        f"plan {local_id!r} target_impl {target_impl!r} already claimed "
+                        f"by plan {seen_impl[target_impl]!r}"
+                    )
+                else:
+                    seen_impl[target_impl] = local_id
+
+            if target_test:
+                if target_test in seen_test:
+                    trio_errors.append(
+                        f"plan {local_id!r} target_test {target_test!r} already claimed "
+                        f"by plan {seen_test[target_test]!r}"
+                    )
+                else:
+                    seen_test[target_test] = local_id
+
+            transformation = plan.get("transformation")
+            if not transformation or not str(transformation).strip():
+                trio_errors.append(f"plan {local_id!r} missing transformation")
+
+            input_samples = plan.get("input_samples")
+            output_samples = plan.get("output_samples")
+            if not isinstance(input_samples, list) or not input_samples:
+                trio_errors.append(
+                    f"plan {local_id!r} missing input_samples (must be non-empty list)"
+                )
+            if not isinstance(output_samples, list) or not output_samples:
+                trio_errors.append(
+                    f"plan {local_id!r} missing output_samples (must be non-empty list)"
+                )
+            if (
+                isinstance(input_samples, list)
+                and isinstance(output_samples, list)
+                and len(input_samples) != len(output_samples)
+            ):
+                trio_errors.append(
+                    f"plan {local_id!r} input_samples ({len(input_samples)}) and "
+                    f"output_samples ({len(output_samples)}) length mismatch"
+                )
+
+        return (not trio_errors, trio_errors)
