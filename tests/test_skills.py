@@ -907,24 +907,46 @@ class ExplainFailureSkillTests(unittest.TestCase):
 
 
 class SkillRegistryTests(unittest.TestCase):
-    def test_default_registry_has_all_skills(self) -> None:
+    # plan_draft_trio is context-aware: it requires a SkillContext to
+    # construct. When build_default_registry() is called without a
+    # skill_context, it is not registered (the legacy default).
+    _LEGACY_DEFAULT_SKILLS = {
+        "scope", "implement", "self_review", "validate", "diagnose",
+        "explain_failure", "fix_tests", "promotion_review",
+        "promotion_apply", "post_merge_check", "follow_on",
+        "benchmark", "commit", "summarize_run", "test_health",
+        "translate_intent", "quality_gate", "verify_acceptance",
+        "atomic_decomposition", "interrogation", "mermaid_update_proposal",
+        "plan_draft", "review_plan_atomicity",
+        "ui_responder", "cognition_heartbeat", "sa_watch_triage",
+        "review_intent_fidelity", "review_unit_test_coverage",
+        "review_integration_e2e_coverage", "review_security",
+        "review_devops", "review_atomic_fidelity", "review_code_structure",
+    }
+
+    def test_default_registry_without_context_has_legacy_skills(self) -> None:
+        """Without a SkillContext, plan_draft_trio is absent; every other
+        skill is still registered so legacy callers keep working."""
         registry = build_default_registry()
-        expected = {
-            "scope", "implement", "self_review", "validate", "diagnose",
-            "explain_failure", "fix_tests", "promotion_review",
-            "promotion_apply", "post_merge_check", "follow_on",
-            "benchmark", "commit", "summarize_run", "test_health",
-            "translate_intent", "quality_gate", "verify_acceptance",
-            # Skills migration additions:
-            "atomic_decomposition", "interrogation", "mermaid_update_proposal",
-            "plan_draft", "plan_draft_trio", "review_plan_atomicity",
-            "ui_responder", "cognition_heartbeat", "sa_watch_triage",
-            "review_intent_fidelity", "review_unit_test_coverage",
-            "review_integration_e2e_coverage", "review_security",
-            "review_devops", "review_atomic_fidelity", "review_code_structure",
-        }
+        self.assertEqual(self._LEGACY_DEFAULT_SKILLS, set(registry.names()))
+        self.assertEqual(len(self._LEGACY_DEFAULT_SKILLS), len(registry))
+        with self.assertRaises(KeyError):
+            registry.get("plan_draft_trio")
+
+    def test_default_registry_with_context_includes_plan_draft_trio(self) -> None:
+        """When a SkillContext is supplied, plan_draft_trio joins the
+        registry fully wired and ready to enforce repo-grounded paths."""
+        from pathlib import Path
+        from accruvia_harness.skills import build_default_skill_context
+
+        context = build_default_skill_context(Path(".").resolve())
+        registry = build_default_registry(skill_context=context)
+        expected = self._LEGACY_DEFAULT_SKILLS | {"plan_draft_trio"}
         self.assertEqual(expected, set(registry.names()))
         self.assertEqual(len(expected), len(registry))
+        # And the registered skill carries the context
+        trio = registry.get("plan_draft_trio")
+        self.assertIsNotNone(trio.context)
 
     def test_duplicate_registration_rejected(self) -> None:
         registry = SkillRegistry()

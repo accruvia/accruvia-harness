@@ -28,6 +28,7 @@ from .follow_on import FollowOnSkill
 from .implement import ImplementSkill, apply_changes
 from .interrogation import InterrogationSkill
 from .mermaid_update_proposal import MermaidUpdateProposalSkill
+from .context import SkillContext, RepoInventoryProvider, build_default_skill_context
 from .plan_draft import PlanDraftSkill, PlanDraftTrioSkill, materialize_plans_from_skill_output
 from .quality_gate import QualityGateSkill
 from .review_plan_atomicity import ReviewPlanAtomicitySkill
@@ -47,8 +48,17 @@ from .validate import ValidateSkill, commands_for_profile
 from .verify_acceptance import VerifyAcceptanceSkill
 
 
-def build_default_registry() -> SkillRegistry:
-    """Register all built-in skills."""
+def build_default_registry(
+    *, skill_context: SkillContext | None = None
+) -> SkillRegistry:
+    """Register all built-in skills.
+
+    skill_context is required for context-aware skills (currently
+    PlanDraftTrioSkill). If absent, the registry still returns but
+    attempting to register PlanDraftTrioSkill will raise. This keeps
+    legacy callers (tests, CLI tools that don't use TRIO) working
+    while forcing new callers that need TRIO to supply a context.
+    """
     registry = SkillRegistry()
     registry.register(ScopeSkill())
     registry.register(ImplementSkill())
@@ -72,7 +82,8 @@ def build_default_registry() -> SkillRegistry:
     registry.register(InterrogationSkill())
     registry.register(MermaidUpdateProposalSkill())
     registry.register(PlanDraftSkill())
-    registry.register(PlanDraftTrioSkill())
+    if skill_context is not None:
+        registry.register(PlanDraftTrioSkill(context=skill_context))
     registry.register(ReviewPlanAtomicitySkill())
     registry.register(UIResponderSkill())
     registry.register(CognitionHeartbeatSkill())
@@ -87,7 +98,10 @@ __all__ = [
     "BenchmarkSkill",
     "PlanDraftSkill",
     "PlanDraftTrioSkill",
+    "RepoInventoryProvider",
     "ReviewPlanAtomicitySkill",
+    "SkillContext",
+    "build_default_skill_context",
     "materialize_plans_from_skill_output",
     "CognitionHeartbeatSkill",
     "CommitSkill",

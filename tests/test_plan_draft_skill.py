@@ -9,12 +9,52 @@ from pathlib import Path
 
 from accruvia_harness.domain import Objective, ObjectiveStatus, Project, new_id
 from accruvia_harness.mermaid import canonical_node_id
+from accruvia_harness.skills.context import RepoInventoryProvider, SkillContext
 from accruvia_harness.skills.plan_draft import (
     PlanDraftSkill,
     PlanDraftTrioSkill,
     materialize_plans_from_skill_output,
 )
 from accruvia_harness.store import SQLiteHarnessStore
+
+
+class _FakeRepoInventoryProvider(RepoInventoryProvider):
+    """Test double: hand-seeded file set, no git ls-files call."""
+
+    def __init__(
+        self,
+        files: set[str],
+        impl_roots: tuple[str, ...] = ("src/accruvia_harness/",),
+        test_roots: tuple[str, ...] = ("tests/",),
+    ) -> None:
+        super().__init__(Path("/tmp"))  # dummy root, never accessed
+        self._files = set(files)
+        self._impl_roots = impl_roots
+        self._test_roots = test_roots
+
+    @property
+    def impl_root_candidates(self) -> tuple[str, ...]:  # type: ignore[override]
+        return self._impl_roots
+
+    @property
+    def test_root_candidates(self) -> tuple[str, ...]:  # type: ignore[override]
+        return self._test_roots
+
+    def symbols_in_file(self, path: str) -> set[str]:  # type: ignore[override]
+        return set()  # tests don't need real symbol extraction
+
+    def get_prompt_block(self, focus_prefixes: tuple[str, ...] = ()) -> str:  # type: ignore[override]
+        files = sorted(self.files)
+        return "REPOSITORY INVENTORY (existing files):\n" + "\n".join(f"  {f}" for f in files)
+
+
+def _fake_skill_context(
+    files: set[str] | None = None,
+    impl_roots: tuple[str, ...] = ("src/accruvia_harness/",),
+    test_roots: tuple[str, ...] = ("tests/",),
+) -> SkillContext:
+    provider = _FakeRepoInventoryProvider(files or set(), impl_roots, test_roots)
+    return SkillContext(repo=provider)
 
 
 _VALID_PLANS_JSON = json.dumps(
@@ -271,13 +311,41 @@ _VALID_TRIO_PLANS_JSON = json.dumps(
 
 
 class PlanDraftTrioSkillTests(unittest.TestCase):
+    """PlanDraftTrioSkill now requires a SkillContext. Every test builds a
+    fake context pre-seeded with the files its plan fixtures reference."""
+
+    # Common seeded file set used across most tests. Includes the files
+    # referenced by _VALID_TRIO_PLANS_JSON plus the hand-written fixtures.
+    _SEEDED_FILES = {
+        "src/accruvia_harness/domain.py",
+        "tests/test_domain.py",
+        "bin/accruvia-objective-bench",
+        "tests/test_bench.py",
+        "src/foo.py",
+        "tests/test_foo.py",
+        "tests/test_existing.py",
+        "src/a.py",
+        "src/b.py",
+        "tests/test_shared.py",
+    }
+
     def setUp(self) -> None:
-        self.skill = PlanDraftTrioSkill()
+        self.context = _fake_skill_context(
+            files=self._SEEDED_FILES,
+            impl_roots=("src/accruvia_harness/", "src/", "bin/"),
+            test_roots=("tests/",),
+        )
+        self.skill = PlanDraftTrioSkill(context=self.context)
+
+    def test_requires_context_at_construction(self):
+        with self.assertRaises(ValueError) as cm:
+            PlanDraftTrioSkill()
+        self.assertIn("requires a SkillContext", str(cm.exception))
 
     def test_registered_with_trio_name(self):
         self.assertEqual("plan_draft_trio", self.skill.name)
 
-    def test_prompt_includes_trio_instructions(self):
+    def test_prompt_includes_trio_instructions_and_inventory(self):
         prompt = self.skill.build_prompt(
             {
                 "objective_title": "x",
@@ -293,21 +361,109 @@ class PlanDraftTrioSkillTests(unittest.TestCase):
         self.assertIn("transformation", prompt)
         self.assertIn("input_samples", prompt)
         self.assertIn("output_samples", prompt)
+        self.assertIn("creates_new_file", prompt)
+        # Repo inventory rendered
+        self.assertIn("REPOSITORY INVENTORY", prompt)
+        self.assertIn("src/accruvia_harness/domain.py", prompt)
+        # Hallucination warning
+        self.assertIn("Hallucinated paths", prompt)
 
     def test_valid_trio_output_parses_and_validates(self):
         parsed = self.skill.parse_response(_VALID_TRIO_PLANS_JSON)
         self.assertEqual(2, len(parsed["plans"]))
-        # Base fields present
         self.assertEqual("p1", parsed["plans"][0]["local_id"])
-        # TRIO fields threaded through
         self.assertEqual(
             "src/accruvia_harness/domain.py::Plan.summary",
             parsed["plans"][0]["target_impl"],
         )
-        self.assertEqual(1, len(parsed["plans"][0]["input_samples"]))
-        self.assertEqual(1, len(parsed["plans"][0]["output_samples"]))
         ok, errors = self.skill.validate_output(parsed)
         self.assertTrue(ok, msg=errors)
+
+    def test_rejects_hallucinated_target_impl_path(self):
+        """A plan referencing a file not in the repo and not marked as
+        creates_new_file must be rejected as hallucination."""
+        plans = [
+            {
+                "local_id": "p1",
+                "label": "Invent a fictional file",
+                "depends_on": [],
+                "target_impl": "src/accruvia_harness/invented.py::Nonexistent",
+                "target_test": "tests/test_domain.py::test_something",
+                "transformation": "Do something",
+                "input_samples": [{"a": 1}],
+                "output_samples": [{"b": 2}],
+                "creates_new_file": False,
+            }
+        ]
+        ok, errors = self.skill.validate_output({"plans": plans})
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("Hallucinated path" in e and "invented.py" in e for e in errors),
+            errors,
+        )
+
+    def test_rejects_hallucinated_target_test_path(self):
+        plans = [
+            {
+                "local_id": "p1",
+                "label": "Test against ghost test file",
+                "depends_on": [],
+                "target_impl": "src/accruvia_harness/domain.py::Plan",
+                "target_test": "tests/test_phantom.py::test_ghost",
+                "transformation": "Do something",
+                "input_samples": [{"a": 1}],
+                "output_samples": [{"b": 2}],
+                "creates_new_file": False,
+            }
+        ]
+        ok, errors = self.skill.validate_output({"plans": plans})
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("Hallucinated path" in e and "test_phantom.py" in e for e in errors),
+            errors,
+        )
+
+    def test_creates_new_file_true_allows_nonexistent_path_under_impl_root(self):
+        plans = [
+            {
+                "local_id": "p1",
+                "label": "Legitimately create a new module",
+                "depends_on": [],
+                "target_impl": "src/accruvia_harness/new_module.py::NewClass",
+                "target_test": "tests/test_new_module.py::test_new_class",
+                "transformation": "Introduce a new module under src",
+                "input_samples": [{"x": 1}],
+                "output_samples": [{"y": 2}],
+                "creates_new_file": True,
+            }
+        ]
+        ok, errors = self.skill.validate_output({"plans": plans})
+        self.assertTrue(ok, msg=errors)
+
+    def test_creates_new_file_true_rejected_outside_impl_conventions(self):
+        """creates_new_file=true still fails if the path is outside the
+        project's impl-root convention (e.g. under /tmp or a wild path)."""
+        plans = [
+            {
+                "local_id": "p1",
+                "label": "Illegal new file location",
+                "depends_on": [],
+                "target_impl": "/etc/passwd::hack",
+                "target_test": "tests/test_x.py::test_y",  # prevent duplicate error
+                "transformation": "Do something",
+                "input_samples": [{}],
+                "output_samples": [{}],
+                "creates_new_file": True,
+            }
+        ]
+        # Need a test-root file in the inventory
+        self.context.repo._files.add("tests/test_x.py")
+        ok, errors = self.skill.validate_output({"plans": plans})
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("does not match an impl-root convention" in e for e in errors),
+            errors,
+        )
 
     def test_rejects_plan_with_neither_impl_nor_test(self):
         plans = [
@@ -341,7 +497,7 @@ class PlanDraftTrioSkillTests(unittest.TestCase):
                 "label": "Second",
                 "depends_on": [],
                 "target_impl": "src/foo.py::bar",  # collision
-                "target_test": "tests/test_foo.py::test_bar_b",
+                "target_test": "tests/test_shared.py::test_bar_b",
                 "transformation": "do b",
                 "input_samples": [{}],
                 "output_samples": [{}],

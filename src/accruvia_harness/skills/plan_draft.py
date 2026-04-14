@@ -29,11 +29,14 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..domain import Plan, new_id
 from ..mermaid import canonical_node_id
 from .base import SkillResult, extract_json_payload, validate_against_schema
+
+if TYPE_CHECKING:
+    from .context import SkillContext
 
 
 _MAX_PLANS = 15
@@ -276,39 +279,61 @@ class PlanDraftTrioSkill(PlanDraftSkill):
 
     The flat `plan_draft` skill produces `{local_id, label, depends_on}`
     per plan — the label does double duty as both display text and as
-    the contract for downstream consumers. That's the gap the A/B is
-    testing: is the LLM producing more atomic decompositions when the
-    schema forces it to name targets + samples explicitly?
+    the contract for downstream consumers. TRIO forces the schema to
+    expose those structural commitments as named fields.
 
-    TRIO fields added to each plan:
-      - target_impl: "path/to/file.py::symbol_name" (or just path/to/file.py)
-        Required unless target_test is set. Represents the implementation
-        target the plan will create/modify.
-      - target_test: "tests/path/test_file.py::test_name" (or just the path)
-        Required unless target_impl is set. Represents the test file the
-        plan will create/modify. Plans may have both (the atomic default)
-        or only one (test-only plan, impl-only plan).
-      - transformation: one-sentence description of what the plan's code
-        actually does. Required.
-      - input_samples: list of at least one concrete input example
-        (free-form dict or primitive). Required.
-      - output_samples: list of matching outputs, same length as
-        input_samples. Required.
-      - resources: optional list of external dependencies/services the
-        plan needs (e.g. "AWS S3 SDK", "sqlite3").
+    CRITICAL: this skill REQUIRES a SkillContext at construction time.
+    Without a context it would produce target_impl paths against an
+    imaginary repo layout (the hallucination failure mode Query #3
+    documented and the 2025-04-13 sanity A/B confirmed). The context
+    supplies the repo inventory (real files + symbols) that gets
+    rendered into the prompt AND enforced by validate_output. A skill
+    produced without context raises at construction time.
 
-    Atomicity invariants (soft, evaluated by structural A/B):
-      - Each target_impl path appears at most once across the plan list
-        (one plan per file; if two plans touch the same file they should
-        be one plan or one should depend on the other).
-      - Each target_test path appears at most once.
-      - output_samples has the same length as input_samples per plan.
+    TRIO fields per plan:
+      - target_impl: "path/to/file.py::symbol_name". MUST reference a
+        real file in the repo OR be paired with creates_new_file=true
+        and match the project's impl-root convention.
+      - target_test: "tests/path/test_file.py::test_name". Same rules
+        as target_impl but against the test-root convention.
+      - creates_new_file: optional bool, default false. Opt-in flag for
+        plans that genuinely create a new file (vs modifying an
+        existing one). Validated: if true, path must match convention;
+        if false, path must exist in the repo inventory.
+      - transformation: one-sentence imperative description. Required.
+      - input_samples: non-empty list of concrete input examples.
+      - output_samples: non-empty list, length matches input_samples.
+      - resources: optional external deps list.
+
+    Atomicity invariants (all enforced by validate_output):
+      - Each target_impl path unique across plans.
+      - Each target_test path unique across plans.
+      - output_samples length == input_samples length per plan.
+      - Every target_impl either exists in repo_inventory OR is marked
+        creates_new_file=true AND matches an impl_root convention.
+      - Same rule for target_test against test_root convention.
     """
 
     name = "plan_draft_trio"
 
+    def __init__(self, context: "SkillContext | None" = None) -> None:
+        if context is None:
+            raise ValueError(
+                "PlanDraftTrioSkill requires a SkillContext. Construct via "
+                "`build_default_registry(skill_context=...)` or pass context "
+                "explicitly. The skill cannot produce grounded output without "
+                "the repo inventory."
+            )
+        self.context = context
+
     def build_prompt(self, inputs: dict[str, Any]) -> str:
         base_prompt = super().build_prompt(inputs)
+        # Render the repo inventory block with impl + test roots so the LLM
+        # knows which files already exist.
+        repo = self.context.repo
+        inventory_block = repo.get_prompt_block(
+            focus_prefixes=repo.impl_root_candidates + repo.test_root_candidates
+        )
         trio_addendum = (
             "\n\nADDITIONAL REQUIREMENT — TRIO structured output:\n"
             "Each plan MUST also include the following fields:\n"
@@ -316,9 +341,18 @@ class PlanDraftTrioSkill(PlanDraftSkill):
             "    'path/to/file.py::symbol_name' (e.g.\n"
             "    'src/accruvia_harness/domain.py::Plan.summary').\n"
             "    Required unless the plan is test-only (then set this to null).\n"
+            "    The path MUST be either (a) a file already in the repository\n"
+            "    inventory below, or (b) a new file for which you also set\n"
+            "    creates_new_file=true and whose path starts with an impl\n"
+            f"    root from: {list(repo.impl_root_candidates)}.\n"
             "  - target_test: the test target in the form\n"
             "    'tests/path/test_file.py::test_name'. Required unless the plan\n"
-            "    is impl-only (then set this to null).\n"
+            "    is impl-only. Same existence / creates_new_file rules apply,\n"
+            f"    but against test roots: {list(repo.test_root_candidates)}.\n"
+            "  - creates_new_file: bool, default false. Set to true ONLY when\n"
+            "    the plan legitimately introduces a new file. Must pair with a\n"
+            "    path under the impl-or-test root conventions above. If the\n"
+            "    file already exists in the inventory, leave this false.\n"
             "  - transformation: one imperative sentence describing what the\n"
             "    plan's code does. Example: 'Return a one-line string showing\n"
             "    plan id, objective id, and status.'\n"
@@ -330,12 +364,16 @@ class PlanDraftTrioSkill(PlanDraftSkill):
             "    in the same order. Same shape as whatever the impl returns.\n"
             "  - resources: optional list of external deps (libraries, services,\n"
             "    env vars). Empty list if none.\n\n"
-            "INVARIANTS:\n"
-            "  - Plans may have target_impl + target_test, only target_impl, or\n"
-            "    only target_test — at least one is required.\n"
+            "HARD INVARIANTS (violations cause rejection):\n"
+            "  - Plans must have target_impl + target_test, or only target_impl,\n"
+            "    or only target_test — at least one is required.\n"
             "  - Every target_impl path is unique across plans.\n"
             "  - Every target_test path is unique across plans.\n"
-            "  - len(output_samples) == len(input_samples) per plan.\n\n"
+            "  - len(output_samples) == len(input_samples) per plan.\n"
+            "  - Every target_impl / target_test path MUST either exist in the\n"
+            "    repository inventory below OR be marked creates_new_file=true\n"
+            "    AND match a valid impl/test root. Hallucinated paths are\n"
+            "    REJECTED and you will be asked to try again.\n\n"
             "Example plan entry with TRIO:\n"
             "{\n"
             '  "local_id": "p1",\n'
@@ -343,6 +381,7 @@ class PlanDraftTrioSkill(PlanDraftSkill):
             '  "depends_on": [],\n'
             '  "target_impl": "src/accruvia_harness/domain.py::Plan.summary",\n'
             '  "target_test": "tests/test_domain.py::test_plan_summary",\n'
+            '  "creates_new_file": false,\n'
             '  "transformation": "Return f\'{plan.id} -> {plan.objective_id} ({plan.status})\'",\n'
             '  "input_samples": [\n'
             '    {"id": "plan_abc123", "objective_id": "obj_def456", "status": "approved"}\n'
@@ -351,7 +390,8 @@ class PlanDraftTrioSkill(PlanDraftSkill):
             '    "plan_abc123 -> obj_def456 (approved)"\n'
             "  ],\n"
             '  "resources": []\n'
-            "}\n"
+            "}\n\n"
+            f"{inventory_block}\n"
         )
         return base_prompt + trio_addendum
 
@@ -384,6 +424,10 @@ class PlanDraftTrioSkill(PlanDraftSkill):
             resources = src.get("resources")
             if isinstance(resources, list):
                 plan["resources"] = [str(r).strip() for r in resources if str(r).strip()]
+            # creates_new_file: explicit opt-in for genuinely new files.
+            # Default False so existing-file references must pass the
+            # inventory check in validate_output.
+            plan["creates_new_file"] = bool(src.get("creates_new_file") or False)
         return base_parsed
 
     def validate_output(self, parsed: dict[str, Any]) -> tuple[bool, list[str]]:
@@ -391,6 +435,7 @@ class PlanDraftTrioSkill(PlanDraftSkill):
         if not ok:
             return False, errors
 
+        repo = self.context.repo
         plans = parsed.get("plans") or []
         trio_errors: list[str] = []
         seen_impl: dict[str, str] = {}
@@ -400,6 +445,7 @@ class PlanDraftTrioSkill(PlanDraftSkill):
             local_id = plan["local_id"]
             target_impl = plan.get("target_impl")
             target_test = plan.get("target_test")
+            creates_new_file = bool(plan.get("creates_new_file") or False)
 
             if not target_impl and not target_test:
                 trio_errors.append(
@@ -416,6 +462,25 @@ class PlanDraftTrioSkill(PlanDraftSkill):
                     )
                 else:
                     seen_impl[target_impl] = local_id
+                # Path-existence check. Split `path::symbol` first.
+                impl_path = target_impl.split("::", 1)[0]
+                if repo.file_exists(impl_path):
+                    # File exists. Nothing more to check at the path level.
+                    pass
+                elif creates_new_file:
+                    if not repo.path_matches_impl_convention(impl_path):
+                        trio_errors.append(
+                            f"plan {local_id!r} target_impl {impl_path!r} marked "
+                            f"creates_new_file=true but does not match an impl-root "
+                            f"convention {list(repo.impl_root_candidates)}"
+                        )
+                else:
+                    trio_errors.append(
+                        f"plan {local_id!r} target_impl path {impl_path!r} is not in the "
+                        f"repository inventory and creates_new_file is not set. "
+                        f"Hallucinated path — either reference a real file or set "
+                        f"creates_new_file=true."
+                    )
 
             if target_test:
                 if target_test in seen_test:
@@ -425,6 +490,23 @@ class PlanDraftTrioSkill(PlanDraftSkill):
                     )
                 else:
                     seen_test[target_test] = local_id
+                test_path = target_test.split("::", 1)[0]
+                if repo.file_exists(test_path):
+                    pass
+                elif creates_new_file:
+                    if not repo.path_matches_test_convention(test_path):
+                        trio_errors.append(
+                            f"plan {local_id!r} target_test {test_path!r} marked "
+                            f"creates_new_file=true but does not match a test-root "
+                            f"convention {list(repo.test_root_candidates)}"
+                        )
+                else:
+                    trio_errors.append(
+                        f"plan {local_id!r} target_test path {test_path!r} is not in the "
+                        f"repository inventory and creates_new_file is not set. "
+                        f"Hallucinated path — either reference a real test file or set "
+                        f"creates_new_file=true."
+                    )
 
             transformation = plan.get("transformation")
             if not transformation or not str(transformation).strip():
