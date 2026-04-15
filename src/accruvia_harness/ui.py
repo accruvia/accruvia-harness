@@ -2151,6 +2151,155 @@ class HarnessUIDataService:
             return
         self.queue_objective_review(objective_id, async_mode=self._workflow_async_mode())
 
+    def _maybe_auto_promote_on_clear_review(
+        self,
+        *,
+        objective: Objective,
+        review_id: str,
+        packets: list[dict[str, object]],
+    ) -> None:
+        """Auto-promote an objective when its review round comes back clear.
+
+        Called by `_run_objective_review` after a review completes with no
+        remediation tasks created. The review is "clear" only when every
+        reviewer packet carries verdict=='pass'. Any other verdict (concern,
+        remediation_required) means remediation tasks were created and we
+        would have taken the earlier branch instead of reaching this method.
+
+        Defensive against double-checking: reuses `_promotion_review_for_objective`
+        to fetch the authoritative review_clear state so we never promote
+        against stale data.
+
+        On success: records `objective_auto_promoted` + `action_receipt`.
+        On failure: records `objective_auto_promote_failed` and does NOT
+        re-raise. A failed auto-promotion should never block the review's
+        own completion handling.
+        """
+        # Reconfirm clear via the canonical state source — packets alone
+        # are not enough; `_promotion_review_for_objective` also checks
+        # merge-gate policy, unmerged workspace branches, etc.
+        linked_tasks = [
+            task
+            for task in self.store.list_tasks(objective.project_id)
+            if task.objective_id == objective.id
+        ]
+        promotion_review = self._promotion_review_for_objective(
+            objective.id, linked_tasks
+        )
+        review_clear = bool(promotion_review.get("review_clear"))
+        if not review_clear:
+            self.store.create_context_record(
+                ContextRecord(
+                    id=new_id("context"),
+                    record_type="objective_auto_promote_skipped",
+                    project_id=objective.project_id,
+                    objective_id=objective.id,
+                    visibility="operator_visible",
+                    author_type="system",
+                    content=(
+                        "Auto-promotion skipped: review completed without "
+                        "remediation tasks but canonical review_clear is False."
+                    ),
+                    metadata={
+                        "review_id": review_id,
+                        "reason": "canonical_review_not_clear",
+                        "next_action": promotion_review.get("next_action"),
+                    },
+                )
+            )
+            return
+
+        try:
+            result = self.promote_objective_to_repo(objective.id)
+        except Exception as exc:  # noqa: BLE001 — audit-log any failure
+            self.store.create_context_record(
+                ContextRecord(
+                    id=new_id("context"),
+                    record_type="objective_auto_promote_failed",
+                    project_id=objective.project_id,
+                    objective_id=objective.id,
+                    visibility="operator_visible",
+                    author_type="system",
+                    content=(
+                        f"Auto-promotion on review_clear failed: {exc}. "
+                        "The operator can retry via the manual promote endpoint."
+                    ),
+                    metadata={
+                        "review_id": review_id,
+                        "error": str(exc),
+                    },
+                )
+            )
+            self._emit_workflow_progress(
+                {
+                    "type": "workflow_stage_changed",
+                    "stage_kind": "objective_promotion",
+                    "stage_status": "failed",
+                    "objective_id": objective.id,
+                    "objective_title": objective.title,
+                    "review_id": review_id,
+                    "detail": f"Auto-promotion failed: {exc}",
+                }
+            )
+            return
+
+        # Success — record audit trail
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="objective_auto_promoted",
+                project_id=objective.project_id,
+                objective_id=objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content=(
+                    f"Auto-promoted objective after clean review: "
+                    f"{result.get('applied_task_count', '?')} task(s) merged to repo."
+                ),
+                metadata={
+                    "review_id": review_id,
+                    "trigger": "review_clear",
+                    "applied_task_count": result.get("applied_task_count"),
+                    "promotion_id": result.get("promotion_id"),
+                },
+            )
+        )
+        self.store.create_context_record(
+            ContextRecord(
+                id=new_id("context"),
+                record_type="action_receipt",
+                project_id=objective.project_id,
+                objective_id=objective.id,
+                visibility="operator_visible",
+                author_type="system",
+                content=(
+                    f"Action receipt: Objective auto-promoted on clean review "
+                    f"(no operator action required)."
+                ),
+                metadata={
+                    "kind": "objective_promotion",
+                    "status": "auto_promoted",
+                    "review_id": review_id,
+                    "applied_task_count": result.get("applied_task_count"),
+                },
+            )
+        )
+        self._emit_workflow_progress(
+            {
+                "type": "workflow_stage_changed",
+                "stage_kind": "objective_promotion",
+                "stage_status": "auto_promoted",
+                "objective_id": objective.id,
+                "objective_title": objective.title,
+                "review_id": review_id,
+                "detail": (
+                    f"Auto-promoted "
+                    f"{result.get('applied_task_count', '?')} task(s) to repo "
+                    f"after clean review."
+                ),
+            }
+        )
+
     def _run_objective_review(self, objective_id: str, review_id: str) -> None:
         objective = self.store.get_objective(objective_id)
         if objective is None:
@@ -2280,6 +2429,21 @@ class HarnessUIDataService:
                             "task_ids": created_task_ids,
                         },
                     )
+                )
+            else:
+                # Canonical merge gate: if no remediation was created AND the
+                # review came back clear (all 7 dimensions pass), auto-fire
+                # objective-level promotion. This restores the full promotion
+                # path the hobble in services/run_service.py:642 documented as
+                # the preferred alternative to per-task auto-merge.
+                #
+                # The operator REST endpoint (/api/objectives/{id}/promote)
+                # remains available as a manual override, but for a clean
+                # review there's no reason to wait for operator action.
+                self._maybe_auto_promote_on_clear_review(
+                    objective=objective,
+                    review_id=review_id,
+                    packets=packets,
                 )
         except Exception as exc:
             self.store.create_context_record(

@@ -3736,6 +3736,122 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         checks = {item["key"]: item for item in objective_payload["execution_gate"]["checks"]}
         self.assertTrue(checks["interrogation_complete"]["ok"])
 
+    # ----- Auto-promotion on review_clear -----
+
+    def test_auto_promote_fires_when_review_is_clear(self) -> None:
+        """_maybe_auto_promote_on_clear_review should call promote_objective_to_repo
+        and record objective_auto_promoted when review_clear is True."""
+        from unittest.mock import patch
+
+        calls: list[str] = []
+
+        def fake_review(_oid, _tasks):
+            return {"review_clear": True, "next_action": None}
+
+        def fake_promote(objective_id):
+            calls.append(objective_id)
+            return {"applied_task_count": 3, "promotion_id": "promo_xyz"}
+
+        with patch.object(
+            self.service, "_promotion_review_for_objective", side_effect=fake_review
+        ), patch.object(
+            self.service, "promote_objective_to_repo", side_effect=fake_promote
+        ):
+            self.service._maybe_auto_promote_on_clear_review(
+                objective=self.objective,
+                review_id="review_clean_1",
+                packets=[],
+            )
+
+        self.assertEqual([self.objective.id], calls)
+        records = self.store.list_context_records(
+            objective_id=self.objective.id,
+            record_type="objective_auto_promoted",
+        )
+        self.assertEqual(1, len(records))
+        self.assertEqual("review_clean_1", records[0].metadata["review_id"])
+        self.assertEqual("review_clear", records[0].metadata["trigger"])
+        self.assertEqual(3, records[0].metadata["applied_task_count"])
+
+    def test_auto_promote_skipped_when_canonical_review_not_clear(self) -> None:
+        """Even if the review run creates no remediation tasks, auto-promote
+        must re-check the canonical review_clear state and skip if False."""
+        from unittest.mock import patch
+
+        promote_calls: list[str] = []
+
+        def fake_review(_oid, _tasks):
+            return {
+                "review_clear": False,
+                "next_action": "Objective review is not clear yet.",
+            }
+
+        def fake_promote(objective_id):
+            promote_calls.append(objective_id)
+            return {}
+
+        with patch.object(
+            self.service, "_promotion_review_for_objective", side_effect=fake_review
+        ), patch.object(
+            self.service, "promote_objective_to_repo", side_effect=fake_promote
+        ):
+            self.service._maybe_auto_promote_on_clear_review(
+                objective=self.objective,
+                review_id="review_dirty_1",
+                packets=[],
+            )
+
+        # Promotion must NOT have been called.
+        self.assertEqual([], promote_calls)
+        skipped_records = self.store.list_context_records(
+            objective_id=self.objective.id,
+            record_type="objective_auto_promote_skipped",
+        )
+        self.assertEqual(1, len(skipped_records))
+        self.assertEqual(
+            "canonical_review_not_clear", skipped_records[0].metadata["reason"]
+        )
+        # And no promotion record
+        promoted_records = self.store.list_context_records(
+            objective_id=self.objective.id,
+            record_type="objective_auto_promoted",
+        )
+        self.assertEqual(0, len(promoted_records))
+
+    def test_auto_promote_failure_records_audit_without_raising(self) -> None:
+        """If promote_objective_to_repo raises, the auto-promote helper must
+        record objective_auto_promote_failed and return cleanly so the review
+        flow is not broken."""
+        from unittest.mock import patch
+
+        def fake_review(_oid, _tasks):
+            return {"review_clear": True, "next_action": None}
+
+        def fake_promote(_objective_id):
+            raise RuntimeError("merge gate rejected — dirty workspace")
+
+        with patch.object(
+            self.service, "_promotion_review_for_objective", side_effect=fake_review
+        ), patch.object(
+            self.service, "promote_objective_to_repo", side_effect=fake_promote
+        ):
+            # Must NOT raise
+            self.service._maybe_auto_promote_on_clear_review(
+                objective=self.objective,
+                review_id="review_fail_1",
+                packets=[],
+            )
+
+        failed_records = self.store.list_context_records(
+            objective_id=self.objective.id,
+            record_type="objective_auto_promote_failed",
+        )
+        self.assertEqual(1, len(failed_records))
+        self.assertIn(
+            "merge gate rejected", failed_records[0].content
+        )
+        self.assertEqual("review_fail_1", failed_records[0].metadata["review_id"])
+
 
 class ProofBackedContainerFixtureTests(unittest.TestCase):
     def setUp(self) -> None:
