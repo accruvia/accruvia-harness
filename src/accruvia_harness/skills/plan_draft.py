@@ -203,7 +203,17 @@ class PlanDraftSkill:
         return None
 
 
-_TRIO_SLICE_KEYS = ("target_impl", "target_test", "transformation", "input_samples", "output_samples", "resources")
+_TRIO_SLICE_KEYS = (
+    "target_impl",
+    "target_test",
+    "transformation",
+    "input_samples",
+    "output_samples",
+    "resources",
+    "supersedes",
+    "orphan_strategy",
+    "orphan_acceptance_reason",
+)
 
 
 def materialize_plans_from_skill_output(
@@ -363,7 +373,31 @@ class PlanDraftTrioSkill(PlanDraftSkill):
             "  - output_samples: list of matching outputs, one per input_sample,\n"
             "    in the same order. Same shape as whatever the impl returns.\n"
             "  - resources: optional list of external deps (libraries, services,\n"
-            "    env vars). Empty list if none.\n\n"
+            "    env vars). Empty list if none.\n"
+            "  - supersedes: list of existing 'path::symbol' entries that this\n"
+            "    plan's transformation will replace, deprecate, or obviate.\n"
+            "    Empty list [] if the plan adds new code without displacing\n"
+            "    anything. Every entry MUST reference a real symbol in an\n"
+            "    existing file. Use this to make the plan's cleanup impact\n"
+            "    visible: if you refactor `OldClass.old_method` into a new\n"
+            "    `NewService.run`, list `src/.../old_file.py::OldClass.old_method`\n"
+            "    in supersedes.\n"
+            "  - orphan_strategy: exactly one of 'absorb' | 'follow_up' | 'accept'\n"
+            "    when supersedes is non-empty; null when supersedes is empty.\n"
+            "    Meaning:\n"
+            "      * absorb: this plan's transformation ALSO migrates every\n"
+            "        caller of the superseded symbol. No cleanup plan needed.\n"
+            "        Use when the call graph is small and cleanup fits in the\n"
+            "        same atomic unit.\n"
+            "      * follow_up: a companion plan in the same list handles\n"
+            "        caller migration + dead-code removal. Use when the\n"
+            "        migration scope would make this plan too large.\n"
+            "      * accept: the superseded symbol is intentionally left in\n"
+            "        place (public API, feature flag, save-for-later, dynamic\n"
+            "        dispatch target). The orphan is NOT a bug. Requires\n"
+            "        orphan_acceptance_reason below.\n"
+            "  - orphan_acceptance_reason: one-sentence justification. Required\n"
+            "    iff orphan_strategy == 'accept'.\n\n"
             "HARD INVARIANTS (violations cause rejection):\n"
             "  - Plans must have target_impl + target_test, or only target_impl,\n"
             "    or only target_test — at least one is required.\n"
@@ -373,23 +407,31 @@ class PlanDraftTrioSkill(PlanDraftSkill):
             "  - Every target_impl / target_test path MUST either exist in the\n"
             "    repository inventory below OR be marked creates_new_file=true\n"
             "    AND match a valid impl/test root. Hallucinated paths are\n"
-            "    REJECTED and you will be asked to try again.\n\n"
+            "    REJECTED and you will be asked to try again.\n"
+            "  - Every supersedes entry MUST reference a file AND symbol that\n"
+            "    already exists in the repository.\n"
+            "  - If supersedes is non-empty, orphan_strategy MUST be set.\n"
+            "  - If orphan_strategy == 'accept', orphan_acceptance_reason\n"
+            "    MUST be a non-empty string explaining why the orphan stays.\n\n"
             "Example plan entry with TRIO:\n"
             "{\n"
             '  "local_id": "p1",\n'
-            '  "label": "Add Plan.summary() returning human-readable repr",\n'
+            '  "label": "Replace Plan.__repr__ with Plan.summary",\n'
             '  "depends_on": [],\n'
             '  "target_impl": "src/accruvia_harness/domain.py::Plan.summary",\n'
             '  "target_test": "tests/test_domain.py::test_plan_summary",\n'
             '  "creates_new_file": false,\n'
-            '  "transformation": "Return f\'{plan.id} -> {plan.objective_id} ({plan.status})\'",\n'
+            '  "transformation": "Add Plan.summary() and migrate the 2 call sites in ui.py and bench.py from plan.__repr__() to plan.summary()",\n'
             '  "input_samples": [\n'
             '    {"id": "plan_abc123", "objective_id": "obj_def456", "status": "approved"}\n'
             "  ],\n"
             '  "output_samples": [\n'
             '    "plan_abc123 -> obj_def456 (approved)"\n'
             "  ],\n"
-            '  "resources": []\n'
+            '  "resources": [],\n'
+            '  "supersedes": ["src/accruvia_harness/domain.py::Plan.__repr__"],\n'
+            '  "orphan_strategy": "absorb",\n'
+            '  "orphan_acceptance_reason": null\n'
             "}\n\n"
             f"{inventory_block}\n"
         )
@@ -424,10 +466,64 @@ class PlanDraftTrioSkill(PlanDraftSkill):
             resources = src.get("resources")
             if isinstance(resources, list):
                 plan["resources"] = [str(r).strip() for r in resources if str(r).strip()]
-            # creates_new_file: explicit opt-in for genuinely new files.
-            # Default False so existing-file references must pass the
-            # inventory check in validate_output.
-            plan["creates_new_file"] = bool(src.get("creates_new_file") or False)
+            # supersedes: list of 'path::symbol' entries
+            supersedes = src.get("supersedes")
+            if isinstance(supersedes, list):
+                plan["supersedes"] = [
+                    str(s).strip() for s in supersedes if isinstance(s, str) and s.strip()
+                ]
+            else:
+                plan["supersedes"] = []
+            # orphan_strategy: absorb | follow_up | accept | null
+            strategy = src.get("orphan_strategy")
+            if isinstance(strategy, str) and strategy.strip():
+                normalized = strategy.strip().lower().replace("-", "_")
+                if normalized in ("absorb", "follow_up", "accept"):
+                    plan["orphan_strategy"] = normalized
+                else:
+                    plan["orphan_strategy"] = None
+            else:
+                plan["orphan_strategy"] = None
+            # orphan_acceptance_reason: non-empty string when strategy=accept
+            reason = src.get("orphan_acceptance_reason")
+            plan["orphan_acceptance_reason"] = (
+                str(reason).strip() if isinstance(reason, str) else ""
+            )
+            # creates_new_file starts as whatever the LLM declared.
+            declared = bool(src.get("creates_new_file") or False)
+            plan["creates_new_file"] = declared
+
+            # AUTO-INFERENCE (option 2): the LLM frequently forgets the
+            # creates_new_file flag when its intent is genuinely to create
+            # a new file for a refactor. If the declared flag is False but
+            # at least one of the target paths points at a file that does
+            # not exist in the repo AND the path matches an impl-or-test
+            # root convention, upgrade creates_new_file to True. This
+            # distinguishes two failure modes:
+            #   (a) path missing + matches convention → likely "forgot the
+            #       flag" → auto-correct
+            #   (b) path missing + violates convention → genuine
+            #       hallucination → validator will reject as before
+            if not declared:
+                repo = self.context.repo
+                needs_new = False
+                for tgt_key, is_impl in (("target_impl", True), ("target_test", False)):
+                    val = plan.get(tgt_key)
+                    if not isinstance(val, str) or not val.strip():
+                        continue
+                    path = val.split("::", 1)[0].strip()
+                    if repo.file_exists(path):
+                        continue
+                    # Path missing — does it match a convention?
+                    if is_impl and repo.path_matches_impl_convention(path):
+                        needs_new = True
+                        break
+                    if (not is_impl) and repo.path_matches_test_convention(path):
+                        needs_new = True
+                        break
+                if needs_new:
+                    plan["creates_new_file"] = True
+                    plan.setdefault("_creates_new_file_auto_inferred", True)
         return base_parsed
 
     def validate_output(self, parsed: dict[str, Any]) -> tuple[bool, list[str]]:
@@ -506,6 +602,60 @@ class PlanDraftTrioSkill(PlanDraftSkill):
                         f"repository inventory and creates_new_file is not set. "
                         f"Hallucinated path — either reference a real test file or set "
                         f"creates_new_file=true."
+                    )
+
+            # Orphan invariants — primary line of defense, not red-team loop.
+            supersedes = plan.get("supersedes") or []
+            if not isinstance(supersedes, list):
+                trio_errors.append(
+                    f"plan {local_id!r} supersedes must be a list of 'path::symbol' entries"
+                )
+                supersedes = []
+            strategy = plan.get("orphan_strategy")
+            if supersedes:
+                # Each superseded entry must reference a real file + real symbol
+                for sup in supersedes:
+                    if "::" not in sup:
+                        trio_errors.append(
+                            f"plan {local_id!r} supersedes entry {sup!r} must be in 'path::symbol' form"
+                        )
+                        continue
+                    sup_path, sup_symbol = sup.split("::", 1)
+                    sup_path = sup_path.strip()
+                    sup_symbol = sup_symbol.strip()
+                    if not repo.file_exists(sup_path):
+                        trio_errors.append(
+                            f"plan {local_id!r} supersedes {sup!r}: file does not exist in inventory"
+                        )
+                        continue
+                    # Symbol existence check only applies to Python files we can AST-parse
+                    if sup_path.endswith(".py") and not repo.symbol_exists(sup_path, sup_symbol):
+                        trio_errors.append(
+                            f"plan {local_id!r} supersedes {sup!r}: symbol {sup_symbol!r} not "
+                            f"defined at top level of {sup_path!r}"
+                        )
+                # orphan_strategy must be set
+                if strategy not in ("absorb", "follow_up", "accept"):
+                    trio_errors.append(
+                        f"plan {local_id!r} has supersedes={supersedes!r} but "
+                        f"orphan_strategy is not one of absorb/follow_up/accept"
+                    )
+                # orphan_acceptance_reason required when strategy=accept
+                if strategy == "accept":
+                    reason = (plan.get("orphan_acceptance_reason") or "").strip()
+                    if not reason:
+                        trio_errors.append(
+                            f"plan {local_id!r} orphan_strategy=accept but "
+                            f"orphan_acceptance_reason is empty — explain why "
+                            f"the orphan is intentional"
+                        )
+            else:
+                # No supersedes → strategy must be null
+                if strategy is not None:
+                    trio_errors.append(
+                        f"plan {local_id!r} has no supersedes but declares "
+                        f"orphan_strategy={strategy!r} — set supersedes to a "
+                        f"non-empty list or set orphan_strategy to null"
                     )
 
             transformation = plan.get("transformation")

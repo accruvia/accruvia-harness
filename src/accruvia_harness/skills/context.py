@@ -29,6 +29,7 @@ invocation don't re-walk the filesystem.
 from __future__ import annotations
 
 import ast
+import re
 import subprocess
 from dataclasses import dataclass, field
 from functools import cached_property
@@ -122,6 +123,50 @@ class RepoInventoryProvider:
     def symbol_exists(self, path: str, symbol: str) -> bool:
         """Return True if `symbol` is defined at the top level of `path`."""
         return symbol in self.symbols_in_file(path)
+
+    def callers_of(
+        self,
+        symbol: str,
+        *,
+        defining_file: str | None = None,
+    ) -> set[str]:
+        """Return repo-relative paths that reference `symbol` as a whole word.
+
+        Used by the TRIO validator to determine whether a plan's
+        declared `supersedes` symbol is actually referenced elsewhere
+        in the repo, which decides whether an orphan_strategy is
+        required. Best-effort: regex whole-word match over Python
+        files only. False positives are possible for very common
+        names but acceptable as a signal — the validator treats
+        this as "evidence of callers" not "proof of callers."
+
+        The defining_file, if provided, is excluded from the result
+        (a symbol referencing itself in its own defining module is
+        not a caller).
+        """
+        if not symbol or not symbol.strip():
+            return set()
+        defining = defining_file.strip().lstrip("./") if defining_file else None
+        try:
+            pattern = re.compile(r"\b" + re.escape(symbol) + r"\b")
+        except re.error:
+            return set()
+        callers: set[str] = set()
+        for f in self.files:
+            if not f.endswith(".py"):
+                continue
+            if defining and f == defining:
+                continue
+            abs_path = self.repo_root / f
+            if not abs_path.is_file():
+                continue
+            try:
+                content = abs_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            if pattern.search(content):
+                callers.add(f)
+        return callers
 
     def get_prompt_block(self, focus_prefixes: tuple[str, ...] = ()) -> str:
         """Render a file listing + symbol inventory for inclusion in an LLM prompt.

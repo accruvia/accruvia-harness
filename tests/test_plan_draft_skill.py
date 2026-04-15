@@ -19,18 +19,23 @@ from accruvia_harness.store import SQLiteHarnessStore
 
 
 class _FakeRepoInventoryProvider(RepoInventoryProvider):
-    """Test double: hand-seeded file set, no git ls-files call."""
+    """Test double: hand-seeded file set + optional symbol + caller maps."""
 
     def __init__(
         self,
         files: set[str],
         impl_roots: tuple[str, ...] = ("src/accruvia_harness/",),
         test_roots: tuple[str, ...] = ("tests/",),
+        symbols: dict[str, set[str]] | None = None,
+        callers: dict[str, set[str]] | None = None,
     ) -> None:
         super().__init__(Path("/tmp"))  # dummy root, never accessed
         self._files = set(files)
         self._impl_roots = impl_roots
         self._test_roots = test_roots
+        self._symbols = dict(symbols or {})
+        # callers: map "path::symbol" -> set of caller file paths
+        self._callers = dict(callers or {})
 
     @property
     def impl_root_candidates(self) -> tuple[str, ...]:  # type: ignore[override]
@@ -41,7 +46,16 @@ class _FakeRepoInventoryProvider(RepoInventoryProvider):
         return self._test_roots
 
     def symbols_in_file(self, path: str) -> set[str]:  # type: ignore[override]
-        return set()  # tests don't need real symbol extraction
+        return set(self._symbols.get(path, set()))
+
+    def callers_of(  # type: ignore[override]
+        self,
+        symbol: str,
+        *,
+        defining_file: str | None = None,
+    ) -> set[str]:
+        key = f"{defining_file}::{symbol}" if defining_file else symbol
+        return set(self._callers.get(key, set()))
 
     def get_prompt_block(self, focus_prefixes: tuple[str, ...] = ()) -> str:  # type: ignore[override]
         files = sorted(self.files)
@@ -52,8 +66,16 @@ def _fake_skill_context(
     files: set[str] | None = None,
     impl_roots: tuple[str, ...] = ("src/accruvia_harness/",),
     test_roots: tuple[str, ...] = ("tests/",),
+    symbols: dict[str, set[str]] | None = None,
+    callers: dict[str, set[str]] | None = None,
 ) -> SkillContext:
-    provider = _FakeRepoInventoryProvider(files or set(), impl_roots, test_roots)
+    provider = _FakeRepoInventoryProvider(
+        files or set(),
+        impl_roots,
+        test_roots,
+        symbols=symbols,
+        callers=callers,
+    )
     return SkillContext(repo=provider)
 
 
@@ -329,11 +351,19 @@ class PlanDraftTrioSkillTests(unittest.TestCase):
         "tests/test_shared.py",
     }
 
+    # Seeded symbol inventory for orphan-check tests. Keyed by file path.
+    _SEEDED_SYMBOLS = {
+        "src/accruvia_harness/domain.py": {"Plan", "Objective", "Task", "Run"},
+        "src/foo.py": {"bar", "baz", "OldClass"},
+        "tests/test_foo.py": {"test_bar_a", "test_bar_b"},
+    }
+
     def setUp(self) -> None:
         self.context = _fake_skill_context(
             files=self._SEEDED_FILES,
             impl_roots=("src/accruvia_harness/", "src/", "bin/"),
             test_roots=("tests/",),
+            symbols=self._SEEDED_SYMBOLS,
         )
         self.skill = PlanDraftTrioSkill(context=self.context)
 
@@ -582,6 +612,54 @@ class PlanDraftTrioSkillTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertTrue(any("length mismatch" in e for e in errors))
 
+    def test_parse_auto_infers_creates_new_file_when_path_missing_but_under_impl_root(self):
+        """The LLM often forgets to set creates_new_file=true when its
+        intent is genuinely to create a new file. parse_response should
+        auto-correct when the missing path matches an impl-root
+        convention — the common "forgot the flag" case."""
+        raw = json.dumps({
+            "plans": [{
+                "local_id": "p1",
+                "label": "Create a new service module",
+                "depends_on": [],
+                "target_impl": "src/accruvia_harness/new_service.py::NewService",
+                "target_test": "tests/test_existing.py::test_new_service",
+                "transformation": "Introduce a new service",
+                "input_samples": [{}],
+                "output_samples": [{}],
+                "creates_new_file": False,
+            }]
+        })
+        parsed = self.skill.parse_response(raw)
+        self.assertTrue(parsed["plans"][0]["creates_new_file"])
+        self.assertTrue(parsed["plans"][0]["_creates_new_file_auto_inferred"])
+        # And validate_output should accept it downstream.
+        ok, errors = self.skill.validate_output(parsed)
+        self.assertTrue(ok, msg=errors)
+
+    def test_parse_does_not_auto_infer_when_path_outside_convention(self):
+        """Missing paths that ALSO violate the impl/test root convention
+        are genuine hallucinations. Do not auto-correct them; let the
+        validator reject."""
+        raw = json.dumps({
+            "plans": [{
+                "local_id": "p1",
+                "label": "Hallucinated file outside convention",
+                "depends_on": [],
+                "target_impl": "/etc/passwd::hack",
+                "target_test": "tests/test_existing.py::test_hack",
+                "transformation": "Do a thing",
+                "input_samples": [{}],
+                "output_samples": [{}],
+                "creates_new_file": False,
+            }]
+        })
+        parsed = self.skill.parse_response(raw)
+        self.assertFalse(parsed["plans"][0]["creates_new_file"])
+        self.assertNotIn("_creates_new_file_auto_inferred", parsed["plans"][0])
+        ok, errors = self.skill.validate_output(parsed)
+        self.assertFalse(ok)
+
     def test_test_only_plan_is_allowed(self):
         plans = [
             {
@@ -596,6 +674,133 @@ class PlanDraftTrioSkillTests(unittest.TestCase):
         ]
         ok, errors = self.skill.validate_output({"plans": plans})
         self.assertTrue(ok, msg=errors)
+
+    # ----- Orphan invariant tests -----
+
+    def _valid_base_plan(self) -> dict:
+        """Return a minimal valid plan dict the orphan tests can mutate."""
+        return {
+            "local_id": "p1",
+            "label": "Base plan",
+            "depends_on": [],
+            "target_impl": "src/foo.py::bar",
+            "target_test": "tests/test_foo.py::test_bar_a",
+            "transformation": "Update bar to do the thing",
+            "input_samples": [{"x": 1}],
+            "output_samples": [{"y": 2}],
+            "supersedes": [],
+            "orphan_strategy": None,
+        }
+
+    def test_empty_supersedes_with_null_strategy_accepted(self):
+        plans = [self._valid_base_plan()]
+        ok, errors = self.skill.validate_output({"plans": plans})
+        self.assertTrue(ok, msg=errors)
+
+    def test_supersedes_without_strategy_rejected(self):
+        plan = self._valid_base_plan()
+        plan["supersedes"] = ["src/foo.py::OldClass"]
+        plan["orphan_strategy"] = None
+        ok, errors = self.skill.validate_output({"plans": [plan]})
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("orphan_strategy is not one of" in e for e in errors), errors
+        )
+
+    def test_strategy_without_supersedes_rejected(self):
+        plan = self._valid_base_plan()
+        plan["supersedes"] = []
+        plan["orphan_strategy"] = "absorb"
+        ok, errors = self.skill.validate_output({"plans": [plan]})
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("no supersedes but declares orphan_strategy" in e for e in errors),
+            errors,
+        )
+
+    def test_supersedes_rejects_malformed_entry(self):
+        plan = self._valid_base_plan()
+        plan["supersedes"] = ["no_double_colon_here"]
+        plan["orphan_strategy"] = "absorb"
+        ok, errors = self.skill.validate_output({"plans": [plan]})
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("must be in 'path::symbol' form" in e for e in errors), errors
+        )
+
+    def test_supersedes_rejects_nonexistent_file(self):
+        plan = self._valid_base_plan()
+        plan["supersedes"] = ["src/ghost.py::NotReal"]
+        plan["orphan_strategy"] = "absorb"
+        ok, errors = self.skill.validate_output({"plans": [plan]})
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("file does not exist in inventory" in e for e in errors), errors
+        )
+
+    def test_supersedes_rejects_nonexistent_symbol_in_existing_file(self):
+        plan = self._valid_base_plan()
+        plan["supersedes"] = ["src/foo.py::NotDefinedHere"]
+        plan["orphan_strategy"] = "absorb"
+        ok, errors = self.skill.validate_output({"plans": [plan]})
+        self.assertFalse(ok)
+        self.assertTrue(
+            any(
+                "symbol 'NotDefinedHere' not defined at top level" in e for e in errors
+            ),
+            errors,
+        )
+
+    def test_supersedes_accepts_existing_symbol(self):
+        plan = self._valid_base_plan()
+        plan["supersedes"] = ["src/foo.py::OldClass"]  # OldClass is seeded
+        plan["orphan_strategy"] = "absorb"
+        ok, errors = self.skill.validate_output({"plans": [plan]})
+        self.assertTrue(ok, msg=errors)
+
+    def test_orphan_strategy_accept_without_reason_rejected(self):
+        plan = self._valid_base_plan()
+        plan["supersedes"] = ["src/foo.py::OldClass"]
+        plan["orphan_strategy"] = "accept"
+        plan["orphan_acceptance_reason"] = ""
+        ok, errors = self.skill.validate_output({"plans": [plan]})
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("orphan_acceptance_reason is empty" in e for e in errors), errors
+        )
+
+    def test_orphan_strategy_accept_with_reason_accepted(self):
+        plan = self._valid_base_plan()
+        plan["supersedes"] = ["src/foo.py::OldClass"]
+        plan["orphan_strategy"] = "accept"
+        plan["orphan_acceptance_reason"] = (
+            "OldClass is a documented public API still imported by "
+            "downstream consumers; removal is scheduled for the next major."
+        )
+        ok, errors = self.skill.validate_output({"plans": [plan]})
+        self.assertTrue(ok, msg=errors)
+
+    def test_parse_response_extracts_orphan_fields(self):
+        raw = json.dumps({
+            "plans": [{
+                "local_id": "p1",
+                "label": "Replace OldClass with NewClass",
+                "depends_on": [],
+                "target_impl": "src/foo.py::bar",
+                "target_test": "tests/test_foo.py::test_bar_a",
+                "transformation": "Migrate OldClass callers to NewClass",
+                "input_samples": [{"a": 1}],
+                "output_samples": [{"b": 2}],
+                "supersedes": ["src/foo.py::OldClass"],
+                "orphan_strategy": "absorb",
+                "orphan_acceptance_reason": None,
+            }]
+        })
+        parsed = self.skill.parse_response(raw)
+        p = parsed["plans"][0]
+        self.assertEqual(["src/foo.py::OldClass"], p["supersedes"])
+        self.assertEqual("absorb", p["orphan_strategy"])
+        self.assertEqual("", p["orphan_acceptance_reason"])
 
     def test_materialize_persists_trio_fields_into_slice(self):
         tmp = tempfile.TemporaryDirectory()
