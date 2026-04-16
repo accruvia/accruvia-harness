@@ -532,6 +532,143 @@ class SkillsWorkOrchestrator:
 
         self._emit("self_review", "done", "ship_ready" if ship_ready else "NOT ship_ready")
         self._emit_stage_span("self_review", _self_review_start, task_id=task.id, run_id=run.id, ship_ready=ship_ready)
+        # STAGE 3.5 (conditional): implement+self_review retry loop.
+        # When self-review blocks shipping, feed its findings back into
+        # /implement as retry_feedback and retry up to _IMPL_SELF_REVIEW_MAX_ROUNDS
+        # total rounds. Closes the gap where work_orchestrator had no meta
+        # red-team loop — previously a single not-ship_ready verdict from
+        # self_review aborted the whole task without the engineer ever
+        # seeing the critique.
+        _IMPL_SELF_REVIEW_MAX_ROUNDS = 2
+        _impl_sr_round = 1
+        while (
+            not ship_ready
+            and _impl_sr_round < _IMPL_SELF_REVIEW_MAX_ROUNDS
+            and self_review_result.success
+            and implement_result.success
+        ):
+            _impl_sr_round += 1
+            prior_feedback = SelfReviewSkill.feedback_for_retry(self_review_result)
+            combined_retry_feedback = "\n\n".join(
+                s for s in (retry_feedback, prior_feedback) if s
+            )
+            # Reload file contents — round 1's apply_changes mutated the
+            # workspace, so the LLM needs the post-round-1 state as ground
+            # truth for its edit anchors.
+            file_contents = _load_file_contents(workspace, files_to_touch)
+            reference_contents = _load_reference_contents(
+                workspace, files_to_touch, file_contents,
+            )
+            self._emit(
+                "implement", "running",
+                f"retry round {_impl_sr_round} after self-review feedback",
+            )
+            implement_result = invoke_skill(
+                implement_skill,
+                SkillInvocation(
+                    skill_name="implement",
+                    inputs={
+                        "title": task.title,
+                        "objective": task.objective,
+                        "approach": scope.get("approach", ""),
+                        "files_to_touch": files_to_touch,
+                        "files_not_to_touch": scope.get("files_not_to_touch") or [],
+                        "risks": scope.get("risks") or [],
+                        "file_contents": file_contents,
+                        "reference_contents": reference_contents,
+                        "retry_feedback": combined_retry_feedback,
+                    },
+                    task=task,
+                    run=run,
+                    run_dir=run_dir / f"skill_implement_retry_{_impl_sr_round}",
+                ),
+                self.llm_router,
+                telemetry=self.telemetry,
+            )
+            artifacts.append(
+                _write_artifact(
+                    run_dir, f"implementation_output_retry_{_impl_sr_round}",
+                    {
+                        "success": implement_result.success,
+                        "errors": implement_result.errors,
+                        "output": implement_result.output,
+                    },
+                    f"Structured implementation output (retry round {_impl_sr_round})",
+                )
+            )
+            if not implement_result.success:
+                break
+            retry_apply_summary = apply_changes(
+                implement_result,
+                workspace_root=workspace,
+                allowed_files=list(scope.get("files_to_touch") or []),
+            )
+            artifacts.append(
+                _write_artifact(
+                    run_dir, f"apply_changes_summary_retry_{_impl_sr_round}",
+                    retry_apply_summary,
+                    f"File-apply audit (retry round {_impl_sr_round})",
+                )
+            )
+            # Merge retry writes into apply_summary so downstream validate +
+            # changed-file tracking sees the cumulative set.
+            for _key in ("written", "rejected"):
+                _combined = list(apply_summary.get(_key) or []) + list(
+                    retry_apply_summary.get(_key) or []
+                )
+                apply_summary[_key] = list(dict.fromkeys(_combined))
+            apply_summary["edits_applied"] = (
+                apply_summary.get("edits_applied") or 0
+            ) + (retry_apply_summary.get("edits_applied") or 0)
+            apply_summary["new_files_created"] = (
+                apply_summary.get("new_files_created") or 0
+            ) + (retry_apply_summary.get("new_files_created") or 0)
+            diff_text = _git_diff(workspace)
+            self_review_result = invoke_skill(
+                self_review_skill,
+                SkillInvocation(
+                    skill_name="self_review",
+                    inputs={
+                        "title": task.title,
+                        "objective": task.objective,
+                        "approach": scope.get("approach", ""),
+                        "risks": scope.get("risks") or [],
+                        "diff": diff_text,
+                        "non_negotiables": non_negotiables,
+                    },
+                    task=task,
+                    run=run,
+                    run_dir=run_dir / f"skill_self_review_retry_{_impl_sr_round}",
+                ),
+                self.llm_router,
+                telemetry=self.telemetry,
+            )
+            if self_review_result.success and non_negotiables:
+                enforced = self_review_skill.enforce_non_negotiables(
+                    self_review_result.output, non_negotiables, diff_text,
+                )
+                self_review_result.output.update(enforced)
+            artifacts.append(
+                _write_artifact(
+                    run_dir, f"self_review_output_retry_{_impl_sr_round}",
+                    {
+                        "success": self_review_result.success,
+                        "errors": self_review_result.errors,
+                        "output": self_review_result.output,
+                    },
+                    f"Staff-engineer self-review (retry round {_impl_sr_round})",
+                )
+            )
+            ship_ready = (
+                bool(self_review_result.output.get("ship_ready"))
+                if self_review_result.success
+                else False
+            )
+            self._emit(
+                "self_review", "done",
+                f"retry {_impl_sr_round}: "
+                + ("ship_ready" if ship_ready else "still NOT ship_ready"),
+            )
         # STAGE 4: /validate (deterministic)
         _validate_start = time.perf_counter()
         self._emit("validate", "running", "compile + tests")
