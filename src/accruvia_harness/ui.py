@@ -78,6 +78,7 @@ from .domain import (
     MermaidArtifact,
     MermaidStatus,
     Objective,
+    ObjectivePhase,
     ObjectiveStatus,
     PromotionMode,
     PromotionStatus,
@@ -1480,6 +1481,7 @@ class HarnessUIDataService:
         return ObjectiveLifecycleRunner(
             config=config.to_json(),
             objective_id=objective_id,
+            store=self.store,
         )
 
     def update_intent_model(
@@ -1585,9 +1587,17 @@ class HarnessUIDataService:
         if next_status == MermaidStatus.PAUSED:
             self.store.update_objective_status(objective.id, ObjectiveStatus.PAUSED)
         elif next_status == MermaidStatus.FINISHED:
+            runner = self.start_objective_lifecycle(objective.id)
+            # Ensure phase is at MERMAID_REVIEW before approving.
+            # For objectives that haven't been through the runner yet,
+            # fast-forward to MERMAID_REVIEW.
+            if runner.phase == ObjectivePhase.CREATED:
+                runner._advance(ObjectivePhase.INTERROGATING)
+                runner._advance(ObjectivePhase.MERMAID_REVIEW)
+            runner.approve_mermaid()
             self.store.update_objective_status(objective.id, ObjectiveStatus.PLANNING)
             self.complete_interrogation_review(objective.id)
-            self.queue_atomic_generation(objective.id, async_mode=async_generation)
+            self.queue_atomic_generation(objective.id, async_mode=async_generation, runner=runner)
         else:
             self.store.update_objective_status(objective.id, ObjectiveStatus.INVESTIGATING)
         self.reconcile_objective_workflow(objective.id)
@@ -1796,7 +1806,7 @@ class HarnessUIDataService:
         self.reconcile_objective_workflow(linked_objective.id)
         return {"task": serialize_dataclass(task)}
 
-    def queue_atomic_generation(self, objective_id: str, *, async_mode: bool = True) -> dict[str, object]:
+    def queue_atomic_generation(self, objective_id: str, *, async_mode: bool = True, runner: "ObjectiveLifecycleRunner | None" = None) -> dict[str, object]:
         objective = self.store.get_objective(objective_id)
         if objective is None:
             raise ValueError(f"Unknown objective: {objective_id}")
@@ -1847,8 +1857,10 @@ class HarnessUIDataService:
             }
         )
 
+        _runner = runner or self.start_objective_lifecycle(objective.id)
+
         def worker() -> None:
-            self._run_atomic_generation(objective.id, generation_id, mermaid.version)
+            self._run_atomic_generation(objective.id, generation_id, mermaid.version, lifecycle_runner=_runner)
 
         if async_mode:
             _ATOMIC_GENERATION.start(objective.id, worker)
@@ -1995,8 +2007,12 @@ class HarnessUIDataService:
             }
         )
 
+        _runner = self.start_objective_lifecycle(objective.id)
+        if _runner.phase == ObjectivePhase.EXECUTING:
+            _runner._advance(ObjectivePhase.REVIEWING)
+
         def worker() -> None:
-            self._run_objective_review(objective.id, review_id)
+            self._run_objective_review(objective.id, review_id, lifecycle_runner=_runner)
 
         if async_mode:
             _OBJECTIVE_REVIEW.start(objective.id, worker)
@@ -2322,7 +2338,7 @@ class HarnessUIDataService:
             }
         )
 
-    def _run_objective_review(self, objective_id: str, review_id: str) -> None:
+    def _run_objective_review(self, objective_id: str, review_id: str, *, lifecycle_runner=None) -> None:
         objective = self.store.get_objective(objective_id)
         if objective is None:
             return
@@ -2467,6 +2483,8 @@ class HarnessUIDataService:
                     review_id=review_id,
                     packets=packets,
                 )
+                if lifecycle_runner is not None and lifecycle_runner.phase == ObjectivePhase.REVIEWING:
+                    lifecycle_runner._advance(ObjectivePhase.PROMOTED)
         except Exception as exc:
             self.store.create_context_record(
                 ContextRecord(
@@ -2951,10 +2969,11 @@ class HarnessUIDataService:
                 return "missing_terminal_event", "The required terminal event evidence was not persisted."
         return "artifact_incomplete", "A response artifact exists, but the reviewer still did not accept it as closing the contract."
 
-    def _run_atomic_generation(self, objective_id: str, generation_id: str, diagram_version: int) -> None:
+    def _run_atomic_generation(self, objective_id: str, generation_id: str, diagram_version: int, *, lifecycle_runner=None) -> None:
         objective = self.store.get_objective(objective_id)
         if objective is None:
             return
+        _lr = lifecycle_runner
         try:
             self._record_atomic_generation_progress(
                 objective,
@@ -2963,6 +2982,8 @@ class HarnessUIDataService:
                 phase="reading accepted flowchart",
                 content=f"Reading accepted Mermaid v{diagram_version} before decomposition.",
             )
+            if _lr is not None and _lr.phase == ObjectivePhase.MERMAID_REVIEW:
+                _lr._advance(ObjectivePhase.TRIO_PLANNING)
             self._record_atomic_generation_progress(
                 objective,
                 generation_id,
@@ -3064,6 +3085,8 @@ class HarnessUIDataService:
                     )
                 )
                 time.sleep(0.12)
+            if _lr is not None and _lr.phase == ObjectivePhase.TRIO_PLANNING:
+                _lr._advance(ObjectivePhase.EXECUTING)
             self.store.create_context_record(
                 ContextRecord(
                     id=new_id("context"),

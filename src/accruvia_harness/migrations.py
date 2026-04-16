@@ -490,6 +490,13 @@ MIGRATIONS: list[Migration] = [
         CREATE INDEX IF NOT EXISTS idx_tasks_objective_node ON tasks(objective_id, mermaid_node_id);
         """,
     ),
+    Migration(
+        version=20,
+        name="objective_phase_column",
+        sql="""
+        ALTER TABLE objectives ADD COLUMN phase TEXT NOT NULL DEFAULT 'created';
+        """,
+    ),
 ]
 
 

@@ -13,8 +13,8 @@ class ContextRecordsStoreMixin:
             connection.execute(
                 """
                 INSERT INTO objectives (
-                    id, project_id, title, summary, priority, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    id, project_id, title, summary, priority, status, phase, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     objective.id,
@@ -23,6 +23,7 @@ class ContextRecordsStoreMixin:
                     objective.summary,
                     objective.priority,
                     objective.status.value,
+                    objective.phase.value,
                     objective.created_at.isoformat(),
                     objective.updated_at.isoformat(),
                 ),
@@ -30,7 +31,7 @@ class ContextRecordsStoreMixin:
 
     def list_objectives(self, project_id: str | None = None) -> list[Objective]:
         query = """
-            SELECT id, project_id, title, summary, priority, status, created_at, updated_at
+            SELECT id, project_id, title, summary, priority, status, phase, created_at, updated_at
             FROM objectives
         """
         params: tuple[str, ...] = ()
@@ -60,6 +61,21 @@ class ContextRecordsStoreMixin:
                 "UPDATE objectives SET status = ?, updated_at = ? WHERE id = ?",
                 (status.value, datetime.now(UTC).isoformat(), objective_id),
             )
+
+    def set_objective_phase(self, objective_id: str, phase: "ObjectivePhase", status: ObjectiveStatus | None = None) -> None:
+        from ..domain import ObjectivePhase as _OP, PHASE_TO_STATUS
+        resolved_status = status or PHASE_TO_STATUS.get(_OP(phase.value if isinstance(phase, _OP) else phase))
+        with self.connect() as connection:
+            if resolved_status is not None:
+                connection.execute(
+                    "UPDATE objectives SET phase = ?, status = ?, updated_at = ? WHERE id = ?",
+                    (phase.value, resolved_status.value, datetime.now(UTC).isoformat(), objective_id),
+                )
+            else:
+                connection.execute(
+                    "UPDATE objectives SET phase = ?, updated_at = ? WHERE id = ?",
+                    (phase.value, datetime.now(UTC).isoformat(), objective_id),
+                )
 
     def create_intent_model(self, intent_model: IntentModel) -> None:
         with self.connect() as connection:

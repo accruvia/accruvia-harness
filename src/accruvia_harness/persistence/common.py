@@ -29,6 +29,7 @@ from ..domain import (
     MermaidArtifact,
     MermaidStatus,
     Objective,
+    ObjectivePhase,
     ObjectiveStatus,
     PromotionRecord,
     PromotionStatus,
@@ -153,6 +154,10 @@ def task_lease_from_row(row: sqlite3.Row) -> TaskLease:
 
 
 def objective_from_row(row: sqlite3.Row) -> Objective:
+    try:
+        phase = ObjectivePhase(row["phase"])
+    except (KeyError, IndexError, ValueError):
+        phase = ObjectivePhase.CREATED
     return Objective(
         id=row["id"],
         project_id=row["project_id"],
@@ -160,6 +165,7 @@ def objective_from_row(row: sqlite3.Row) -> Objective:
         summary=row["summary"],
         priority=int(row["priority"]),
         status=ObjectiveStatus(row["status"]),
+        phase=phase,
         created_at=parse_dt(row["created_at"]),
         updated_at=parse_dt(row["updated_at"]),
     )

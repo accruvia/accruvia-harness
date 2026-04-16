@@ -440,13 +440,20 @@ class ObjectiveLifecycleRunner:
     by the caller (blocking callbacks) instead of Temporal signals.
     """
 
-    def __init__(self, config: str, objective_id: str) -> None:
+    def __init__(self, config: str, objective_id: str, *, store: Any = None) -> None:
         self.config = config
         self.objective_id = objective_id
-        self.phase = ObjectivePhase.CREATED
+        self._store = store
+        if store is not None and hasattr(store, "get_objective"):
+            obj = store.get_objective(objective_id)
+            self.phase = obj.phase if obj is not None else ObjectivePhase.CREATED
+        else:
+            self.phase = ObjectivePhase.CREATED
 
     def _advance(self, target: ObjectivePhase) -> None:
         self.phase = advance_objective_phase(self.phase, target)
+        if self._store is not None and hasattr(self._store, "set_objective_phase"):
+            self._store.set_objective_phase(self.objective_id, self.phase)
 
     def run_through_mermaid(self) -> dict[str, Any]:
         """Run interrogation phase. Caller must then call approve_mermaid()."""
