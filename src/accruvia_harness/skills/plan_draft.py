@@ -220,42 +220,6 @@ _TRIO_SLICE_KEYS = (
 _COMPLEXITY_VALUES = ("trivial", "small", "medium", "large", "too_large")
 
 
-def scope_from_plan_slice(slice_dict: dict[str, Any]) -> dict[str, Any] | None:
-    """Derive a scope dict from TRIO plan.slice data.
-
-    Returns None when the slice lacks TRIO fields (target_impl/target_test),
-    meaning the plan came from the old flat plan_draft path and can't
-    replace the scope LLM call.
-
-    The returned dict has the same shape as ScopeSkill output:
-    files_to_touch, files_not_to_touch, approach, risks, estimated_complexity.
-    """
-    target_impl = slice_dict.get("target_impl") or ""
-    target_test = slice_dict.get("target_test") or ""
-    transformation = slice_dict.get("transformation") or ""
-    if not target_impl and not target_test:
-        return None
-
-    files_to_touch: list[str] = []
-    for target in (target_impl, target_test):
-        if not target:
-            continue
-        path = str(target).split("::", 1)[0].strip()
-        if path and path not in files_to_touch:
-            files_to_touch.append(path)
-
-    return {
-        "files_to_touch": files_to_touch,
-        "files_not_to_touch": [],
-        "approach": str(transformation).strip(),
-        "risks": list(slice_dict.get("risks") or []),
-        "estimated_complexity": str(
-            slice_dict.get("estimated_complexity") or "medium"
-        ),
-        "trio_derived": True,
-    }
-
-
 def materialize_plans_from_skill_output(
     store: Any,
     objective_id: str,

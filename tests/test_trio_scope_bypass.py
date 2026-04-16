@@ -1,4 +1,4 @@
-"""Tests for TRIO → scope bypass: plan.slice populates task.scope, work_orchestrator skips LLM scope."""
+"""Tests for TRIO → scope bypass: task.scope populated at creation, work_orchestrator skips LLM scope."""
 from __future__ import annotations
 
 import tempfile
@@ -11,43 +11,7 @@ from accruvia_harness.domain import Run, RunStatus, Task, new_id
 from accruvia_harness.skills.plan_draft import (
     PlanDraftTrioSkill,
     _COMPLEXITY_VALUES,
-    scope_from_plan_slice,
 )
-
-
-class ScopeFromPlanSliceTests(unittest.TestCase):
-    def test_returns_none_for_flat_plan(self) -> None:
-        self.assertIsNone(scope_from_plan_slice({"label": "flat plan"}))
-
-    def test_derives_files_from_trio_fields(self) -> None:
-        result = scope_from_plan_slice({
-            "target_impl": "src/foo.py::Foo.bar",
-            "target_test": "tests/test_foo.py::test_bar",
-            "transformation": "Add bar method to Foo",
-            "risks": ["breaks callers of old_bar"],
-            "estimated_complexity": "small",
-        })
-        self.assertIsNotNone(result)
-        self.assertEqual(["src/foo.py", "tests/test_foo.py"], result["files_to_touch"])
-        self.assertEqual("Add bar method to Foo", result["approach"])
-        self.assertEqual(["breaks callers of old_bar"], result["risks"])
-        self.assertEqual("small", result["estimated_complexity"])
-        self.assertTrue(result["trio_derived"])
-
-    def test_impl_only_plan(self) -> None:
-        result = scope_from_plan_slice({
-            "target_impl": "src/a.py::func",
-            "transformation": "change func",
-        })
-        self.assertIsNotNone(result)
-        self.assertEqual(["src/a.py"], result["files_to_touch"])
-
-    def test_defaults_complexity_to_medium(self) -> None:
-        result = scope_from_plan_slice({
-            "target_impl": "src/a.py::f",
-            "transformation": "x",
-        })
-        self.assertEqual("medium", result["estimated_complexity"])
 
 
 class TrioSchemaExtensionTests(unittest.TestCase):
@@ -133,7 +97,7 @@ class TrioSchemaExtensionTests(unittest.TestCase):
 
 
 class WorkOrchestratorScopeBypassTests(unittest.TestCase):
-    def test_trio_scope_skips_llm_call(self) -> None:
+    def test_precomputed_scope_skips_llm_call(self) -> None:
         from accruvia_harness.services.work_orchestrator import SkillsWorkOrchestrator
         from accruvia_harness.skills.base import SkillResult
         from accruvia_harness.skills.registry import SkillRegistry
@@ -155,7 +119,6 @@ class WorkOrchestratorScopeBypassTests(unittest.TestCase):
         task = Task(
             id=new_id("task"), project_id="p", title="T", objective="o",
             scope={
-                "trio_derived": True,
                 "files_to_touch": ["src/a.py"],
                 "approach": "do the thing",
                 "risks": ["risk1"],
@@ -170,7 +133,7 @@ class WorkOrchestratorScopeBypassTests(unittest.TestCase):
         def fake_invoke(skill, invocation, router, **kw):
             invoked_skills.append(invocation.skill_name)
             if invocation.skill_name == "scope":
-                raise AssertionError("scope LLM call should NOT happen for TRIO tasks")
+                raise AssertionError("scope LLM call should NOT happen when scope is precomputed")
             if invocation.skill_name == "implement":
                 return SkillResult(
                     skill_name="implement", success=True,
@@ -199,7 +162,7 @@ class WorkOrchestratorScopeBypassTests(unittest.TestCase):
         self.assertNotIn("scope", invoked_skills)
         self.assertIn("implement", invoked_skills)
 
-    def test_non_trio_task_still_calls_scope(self) -> None:
+    def test_empty_scope_still_calls_scope_llm(self) -> None:
         from accruvia_harness.services.work_orchestrator import SkillsWorkOrchestrator
         from accruvia_harness.skills.base import SkillResult
         from accruvia_harness.skills.registry import SkillRegistry

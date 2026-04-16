@@ -642,6 +642,62 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         )
         self.ctx.engine = FakePromotionEngine(self.store)
         self.service = HarnessUIDataService(self.ctx)
+        # Patch TRIO planning to return two fake plans so tests that trigger
+        # atomic generation get deterministic results without a real LLM.
+        from accruvia_harness.services.trio_plan_orchestrator import TrioPlanningResult
+        from accruvia_harness.services.red_team_loop import RedTeamLoopResult
+
+        def _fake_trio(objective):
+            return TrioPlanningResult(
+                success=True,
+                plans=[
+                    {
+                        "local_id": "p1",
+                        "label": "Add Intent model",
+                        "depends_on": [],
+                        "target_impl": "src/intent.py::IntentModel",
+                        "target_test": "tests/test_intent.py::test_intent",
+                        "transformation": "Add IntentModel dataclass",
+                        "input_samples": [{"title": "x"}],
+                        "output_samples": ["IntentModel(title='x')"],
+                        "resources": [],
+                        "supersedes": [],
+                        "orphan_strategy": None,
+                        "orphan_acceptance_reason": "",
+                        "risks": [],
+                        "estimated_complexity": "small",
+                        "creates_new_file": True,
+                    },
+                    {
+                        "local_id": "p2",
+                        "label": "Wire Plan to Intent",
+                        "depends_on": ["p1"],
+                        "target_impl": "src/plan.py::Plan.link",
+                        "target_test": "tests/test_plan.py::test_link",
+                        "transformation": "Link Plan to IntentModel",
+                        "input_samples": [{"plan_id": "1"}],
+                        "output_samples": ["linked"],
+                        "resources": [],
+                        "supersedes": [],
+                        "orphan_strategy": None,
+                        "orphan_acceptance_reason": "",
+                        "risks": [],
+                        "estimated_complexity": "small",
+                        "creates_new_file": True,
+                    },
+                ],
+                rounds_completed=1,
+                reviewer_verdict="pass",
+                stop_reason="predicate_satisfied",
+                loop_result=RedTeamLoopResult(
+                    success=True, rounds_completed=1,
+                    final_output={"plans": []}, stop_reason="predicate_satisfied",
+                ),
+            )
+
+        _trio_patcher = patch.object(self.service, "_generate_trio_plans_for_objective", side_effect=_fake_trio)
+        _trio_patcher.start()
+        self.addCleanup(_trio_patcher.stop)
 
     def test_project_workspace_renders_mermaid_and_hides_nudges_from_comments(self) -> None:
         payload = self.service.project_workspace(self.project.id)

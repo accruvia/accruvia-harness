@@ -2945,35 +2945,44 @@ class HarnessUIDataService:
                 objective,
                 generation_id,
                 diagram_version,
-                phase="deriving candidate units",
-                content="Deriving candidate atomic units from the accepted flowchart.",
+                phase="running TRIO planning",
+                content="Running TRIO plan decomposition with red-team review.",
             )
-            units = self._derive_atomic_units(objective_id, generation_id=generation_id, diagram_version=diagram_version)
-            # Extract mermaid node ids so each generated task carries the
-            # node it fulfills. Without this, tasks auto-synthesize T_<suffix>
-            # ids and the decomposition-coverage join in bench.py sees orphan
-            # tasks + uncovered gaps even when every node has a task. Mapping
-            # is index-based (1:1 with nodes in declaration order) because the
-            # LLM currently generates units in mermaid-node order. If the unit
-            # count exceeds the node count the tail falls back to auto-synth.
-            mermaid_now = self.store.latest_mermaid_artifact(objective_id, "workflow_control")
-            from .bench import extract_mermaid_nodes  # library import
-            mermaid_nodes = extract_mermaid_nodes(mermaid_now.content if mermaid_now else "")
+            trio_result = self._generate_trio_plans_for_objective(objective)
+            if not trio_result.success or not trio_result.plans:
+                raise RuntimeError(
+                    f"TRIO planning failed after {trio_result.rounds_completed} round(s): "
+                    f"{trio_result.stop_reason}"
+                )
+            plans_data = trio_result.plans
+            from .skills.plan_draft import materialize_plans_from_skill_output
+            materialized = materialize_plans_from_skill_output(
+                self.store, objective.id, plans_data, author_tag="plan_draft_trio",
+            )
             self._record_atomic_generation_progress(
                 objective,
                 generation_id,
                 diagram_version,
                 phase="publishing units",
-                content=f"Publishing {len(units)} atomic units to the objective.",
+                content=f"Publishing {len(materialized)} TRIO plans as tasks.",
             )
-            for index, unit in enumerate(units, start=1):
-                node_index = index - 1
-                unit_node_id = mermaid_nodes[node_index] if node_index < len(mermaid_nodes) else None
+            for index, plan in enumerate(materialized, start=1):
+                sl = plan.slice or {}
+                target_impl = str(sl.get("target_impl") or "").split("::", 1)[0].strip()
+                target_test = str(sl.get("target_test") or "").split("::", 1)[0].strip()
+                files_to_touch = [p for p in (target_impl, target_test) if p]
+                scope = {
+                    "files_to_touch": files_to_touch,
+                    "files_not_to_touch": [],
+                    "approach": str(sl.get("transformation") or sl.get("label") or ""),
+                    "risks": list(sl.get("risks") or []),
+                    "estimated_complexity": str(sl.get("estimated_complexity") or "medium"),
+                }
                 task = self.task_service.create_task_with_policy(
                     project_id=objective.project_id,
                     objective_id=objective.id,
-                    title=str(unit["title"]),
-                    objective=str(unit["objective"]),
+                    title=str(sl.get("label") or f"Plan {plan.id}"),
+                    objective=str(sl.get("transformation") or sl.get("label") or ""),
                     priority=objective.priority,
                     parent_task_id=None,
                     source_run_id=None,
@@ -2981,11 +2990,12 @@ class HarnessUIDataService:
                     external_ref_id=None,
                     validation_profile="generic",
                     validation_mode="lightweight_operator",
-                    scope={},
-                    strategy=str(unit.get("strategy") or "atomic_from_mermaid"),
+                    scope=scope,
+                    strategy="trio_plan",
                     max_attempts=3,
                     required_artifacts=["plan", "report"],
-                    mermaid_node_id=unit_node_id,
+                    mermaid_node_id=plan.mermaid_node_id,
+                    plan_id=plan.id,
                 )
                 self.store.create_context_record(
                     ContextRecord(
@@ -2996,15 +3006,17 @@ class HarnessUIDataService:
                         task_id=task.id,
                         visibility="operator_visible",
                         author_type="system",
-                        content=f"Generated atomic unit {index}: {task.title}",
+                        content=f"Generated TRIO plan {index}: {task.title}",
                         metadata={
                             "generation_id": generation_id,
                             "diagram_version": diagram_version,
                             "order": index,
                             "task_id": task.id,
+                            "plan_id": plan.id,
                             "title": task.title,
                             "objective": task.objective,
-                            "rationale": str(unit.get("rationale") or ""),
+                            "target_impl": sl.get("target_impl") or "",
+                            "target_test": sl.get("target_test") or "",
                             "strategy": task.strategy,
                         },
                     )
@@ -3017,7 +3029,7 @@ class HarnessUIDataService:
                         objective_id=objective.id,
                         visibility="operator_visible",
                         author_type="system",
-                        content=f"Action receipt: Published atomic unit {index}: {task.title}",
+                        content=f"Action receipt: Published TRIO plan {index}: {task.title}",
                         metadata={
                             "kind": "atomic_generation",
                             "status": "publishing",
@@ -3025,6 +3037,7 @@ class HarnessUIDataService:
                             "diagram_version": diagram_version,
                             "order": index,
                             "task_id": task.id,
+                            "plan_id": plan.id,
                         },
                     )
                 )
@@ -3037,8 +3050,8 @@ class HarnessUIDataService:
                     objective_id=objective.id,
                     visibility="operator_visible",
                     author_type="system",
-                    content=f"Generated {len(units)} atomic units from Mermaid v{diagram_version}.",
-                    metadata={"generation_id": generation_id, "diagram_version": diagram_version, "unit_count": len(units)},
+                    content=f"Generated {len(materialized)} TRIO plans from Mermaid v{diagram_version}.",
+                    metadata={"generation_id": generation_id, "diagram_version": diagram_version, "unit_count": len(materialized)},
                 )
             )
             self.store.create_context_record(
@@ -3049,8 +3062,8 @@ class HarnessUIDataService:
                     objective_id=objective.id,
                     visibility="operator_visible",
                     author_type="system",
-                    content=f"Action receipt: Atomic generation complete. {len(units)} units are ready for review.",
-                    metadata={"kind": "atomic_generation", "status": "completed", "generation_id": generation_id, "unit_count": len(units)},
+                    content=f"Action receipt: TRIO generation complete. {len(materialized)} plans are ready for review.",
+                    metadata={"kind": "atomic_generation", "status": "completed", "generation_id": generation_id, "unit_count": len(materialized)},
                 )
             )
             self._emit_workflow_progress(
@@ -3061,7 +3074,7 @@ class HarnessUIDataService:
                     "objective_id": objective.id,
                     "objective_title": objective.title,
                     "generation_id": generation_id,
-                    "detail": f"Generated {len(units)} atomic unit(s) from Mermaid v{diagram_version}.",
+                    "detail": f"Generated {len(materialized)} TRIO plan(s) from Mermaid v{diagram_version}.",
                 }
             )
             self.store.update_objective_phase(objective.id)
@@ -3155,6 +3168,61 @@ class HarnessUIDataService:
                 },
             )
         )
+
+    def _generate_trio_plans_for_objective(self, objective):
+        """Run trio_plan_orchestrator.generate_trio_plans for an objective.
+
+        Gathers intent model, interrogation context, and builds the
+        SkillContext from the project's source root so TRIO plans are
+        grounded against the real repo inventory.
+        """
+        from .services.trio_plan_orchestrator import generate_trio_plans
+        from .skills.context import build_default_skill_context
+
+        intent_model = self.store.latest_intent_model(objective.id)
+        source_root = self._resolve_source_root(objective.project_id)
+        skill_context = build_default_skill_context(source_root)
+
+        interrogation_service = getattr(self.ctx, "interrogation_service", None)
+        llm_router = getattr(interrogation_service, "llm_router", None)
+        if llm_router is None or not getattr(llm_router, "executors", {}):
+            raise RuntimeError("No LLM router available for TRIO planning")
+
+        intent_inputs = {
+            "objective_title": objective.title,
+            "objective_summary": objective.summary,
+            "intent_summary": intent_model.intent_summary if intent_model else "",
+            "success_definition": intent_model.success_definition if intent_model else "",
+            "non_negotiables": list(intent_model.non_negotiables) if intent_model else [],
+            "frustration_signals": list(getattr(intent_model, "frustration_signals", []) or []),
+        }
+        return generate_trio_plans(
+            intent_inputs=intent_inputs,
+            project_id=objective.project_id,
+            objective_id=objective.id,
+            skill_context=skill_context,
+            llm_router=llm_router,
+            store=self.store,
+            workspace_root=self.workspace_root,
+            telemetry=getattr(self.ctx, "telemetry", None),
+        )
+
+    def _resolve_source_root(self, project_id: str) -> Path:
+        """Resolve the source repo root for a project."""
+        project = self.store.get_project(project_id)
+        if project and project.adapter_name == "current_repo_git_worktree":
+            configured = os.environ.get("ACCRUVIA_SOURCE_REPO_ROOT")
+            if configured:
+                return Path(configured).resolve()
+            try:
+                result = subprocess.run(
+                    ["git", "rev-parse", "--show-toplevel"],
+                    check=True, capture_output=True, text=True,
+                )
+                return Path(result.stdout.strip())
+            except Exception:
+                pass
+        return Path(__file__).resolve().parents[2]
 
     def _derive_atomic_units(self, objective_id: str, *, generation_id: str = "", diagram_version: int = 0) -> list[dict[str, str]]:
         objective = self.store.get_objective(objective_id)

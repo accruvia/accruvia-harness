@@ -337,18 +337,16 @@ class SkillsWorkOrchestrator:
         _search_queries = [m[0] or m[1] for m in _query_matches if m[0] or m[1]]
         codebase_search_results = _search_codebase(workspace, _search_queries)
 
-        # STAGE 1: /scope — skip LLM call when TRIO plan already provides
-        # files_to_touch + approach via task.scope (trio_derived flag set by
-        # scope_from_plan_slice in task_service._enrich_scope_from_plan).
+        # STAGE 1: /scope — skip LLM call when task.scope already has
+        # files_to_touch + approach (set at task creation from TRIO plans).
         _scope_start = time.perf_counter()
         _task_scope = task.scope or {}
-        _trio_scope = (
-            _task_scope.get("trio_derived")
-            and _task_scope.get("files_to_touch")
+        _has_precomputed_scope = (
+            _task_scope.get("files_to_touch")
             and _task_scope.get("approach")
         )
-        if _trio_scope:
-            self._emit("scope", "running", "using TRIO plan scope (no LLM call)")
+        if _has_precomputed_scope:
+            self._emit("scope", "running", "using plan scope (no LLM call)")
             scope = {
                 "files_to_touch": list(_task_scope["files_to_touch"]),
                 "files_not_to_touch": list(_task_scope.get("files_not_to_touch") or []),
@@ -361,14 +359,14 @@ class SkillsWorkOrchestrator:
             artifacts.append(
                 _write_artifact(
                     run_dir, "scope_output",
-                    {"success": True, "errors": [], "output": scope, "trio_derived": True},
-                    "Scope from TRIO plan (no LLM call)",
+                    {"success": True, "errors": [], "output": scope},
+                    "Scope from plan (no LLM call)",
                 )
             )
             artifacts.append(
                 _write_artifact(
                     run_dir, "plan", scope,
-                    "TRIO-derived plan (approach, files_to_touch, risks)",
+                    "Plan-derived scope (approach, files_to_touch, risks)",
                 )
             )
         else:
