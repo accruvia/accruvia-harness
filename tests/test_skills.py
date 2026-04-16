@@ -916,7 +916,7 @@ class SkillRegistryTests(unittest.TestCase):
         "promotion_apply", "post_merge_check", "follow_on",
         "benchmark", "commit", "summarize_run", "test_health",
         "translate_intent", "quality_gate", "verify_acceptance",
-        "atomic_decomposition", "interrogation", "mermaid_update_proposal",
+        "interrogation", "mermaid_update_proposal",
         "plan_draft", "review_plan_atomicity",
         "ui_responder", "cognition_heartbeat", "sa_watch_triage",
         "review_intent_fidelity", "review_unit_test_coverage",

@@ -3440,19 +3440,7 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         self.service.auto_resume_atomic_generation = True
 
         before_atomic = self.service._atomic_generation_state(objective.id)
-        with patch.object(
-            self.service,
-            "_derive_atomic_units",
-            return_value=[
-                {
-                    "title": "Resume decomposition task",
-                    "objective": "Resume work after the structural fix.",
-                    "strategy": "atomic_from_mermaid",
-                    "rationale": "Structural repair succeeded; continue decomposition.",
-                }
-            ],
-        ):
-            self.service.reconcile_task_workflow(structural_fix)
+        self.service.reconcile_task_workflow(structural_fix)
 
         atomic_state = self.service._atomic_generation_state(objective.id)
         linked_tasks = [task for task in self.store.list_tasks(self.project.id) if task.objective_id == objective.id]
@@ -3461,47 +3449,6 @@ class HarnessUIDataServiceTests(unittest.TestCase):
         self.assertNotEqual("atomic_generation_stale", atomic_state["generation_id"])
         self.assertIn(atomic_state["status"], {"running", "completed", "failed"})
         self.assertGreater(len(linked_tasks), 2)
-
-    def test_derive_atomic_units_ignores_mismatched_stale_intent_model(self) -> None:
-        objective = Objective(
-            id=new_id("objective"),
-            project_id=self.project.id,
-            title="Persist success breadcrumbs for completed runs",
-            summary="Write durable breadcrumb bundles for successful worker runs so the control plane has symmetric evidence on pass and fail paths.",
-            status=ObjectiveStatus.PLANNING,
-        )
-        self.store.create_objective(objective)
-        self.service.update_intent_model(
-            objective.id,
-            intent_summary="Persist success breadcrumbs via API route test.",
-            success_definition="The PUT route must accept JSON bodies and persist intent updates.",
-            non_negotiables=["Route must read request body correctly"],
-            frustration_signals=["Route body parsing regressed"],
-        )
-        self.service.complete_interrogation_review(objective.id)
-        mermaid = MermaidArtifact(
-            id=new_id("diagram"),
-            objective_id=objective.id,
-            diagram_type="workflow_control",
-            version=1,
-            status=MermaidStatus.FINISHED,
-            summary="Accepted control flow",
-            content="flowchart TD\nA[Intent]-->B[Plan]-->C[Review]",
-            required_for_execution=True,
-        )
-        self.store.create_mermaid_artifact(mermaid)
-        captured: dict[str, object] = {}
-        self.ctx.interrogation_service = SimpleNamespace(llm_router=FakeLLMRouter("[]"))
-        self.service = HarnessUIDataService(self.ctx)
-
-        def _fake_iterative(objective_arg, intent_model_arg, mermaid_arg, comments, llm_router, repo_context, **kwargs):
-            captured["intent_model"] = intent_model_arg
-            return []
-
-        with patch.object(self.service, "_iterative_atomic_decomposition", side_effect=_fake_iterative):
-            self.service._derive_atomic_units(objective.id, generation_id="gen_1", diagram_version=1)
-
-        self.assertIsNone(captured["intent_model"])
 
     def test_latest_resolved_proposal_does_not_fall_back_to_older_unresolved_proposal(self) -> None:
         fake_router = FakeLLMRouter(

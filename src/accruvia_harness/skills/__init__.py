@@ -17,7 +17,6 @@ from .base import (
     make_skill_context,
     validate_against_schema,
 )
-from .atomic_decomposition import AtomicDecompositionSkill
 from .benchmark import BenchmarkSkill
 from .cognition_heartbeat import CognitionHeartbeatSkill
 from .commit import CommitSkill
@@ -78,7 +77,7 @@ def build_default_registry(
     registry.register(TranslateIntentSkill())
     registry.register(QualityGateSkill())
     registry.register(VerifyAcceptanceSkill())
-    registry.register(AtomicDecompositionSkill())
+    # AtomicDecompositionSkill removed — replaced by PlanDraftTrioSkill
     registry.register(InterrogationSkill())
     registry.register(MermaidUpdateProposalSkill())
     registry.register(PlanDraftSkill())
@@ -94,7 +93,6 @@ def build_default_registry(
 
 
 __all__ = [
-    "AtomicDecompositionSkill",
     "BenchmarkSkill",
     "PlanDraftSkill",
     "PlanDraftTrioSkill",
