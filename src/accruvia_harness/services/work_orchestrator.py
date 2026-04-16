@@ -337,61 +337,94 @@ class SkillsWorkOrchestrator:
         _search_queries = [m[0] or m[1] for m in _query_matches if m[0] or m[1]]
         codebase_search_results = _search_codebase(workspace, _search_queries)
 
-        # STAGE 1: /scope
+        # STAGE 1: /scope — skip LLM call when TRIO plan already provides
+        # files_to_touch + approach via task.scope (trio_derived flag set by
+        # scope_from_plan_slice in task_service._enrich_scope_from_plan).
         _scope_start = time.perf_counter()
-        self._emit("scope", "running", "analyzing task and selecting files")
-        scope_result = invoke_skill(
-            scope_skill,
-            SkillInvocation(
-                skill_name="scope",
-                inputs={
-                    "title": task.title,
-                    "objective": task.objective,
-                    "strategy": task.strategy,
-                    "allowed_paths": (task.scope or {}).get("allowed_paths") or [],
-                    "forbidden_paths": (task.scope or {}).get("forbidden_paths") or [],
-                    "repo_context": repo_context,
-                    "related_file_contents": related_file_contents,
-                    "codebase_search_results": codebase_search_results,
-                    "prior_scope": prior_scope,
-                    "retry_feedback": retry_feedback,
-                },
-                task=task,
-                run=run,
-                run_dir=run_dir / "skill_scope",
-            ),
-            self.llm_router,
-            telemetry=self.telemetry,
+        _task_scope = task.scope or {}
+        _trio_scope = (
+            _task_scope.get("trio_derived")
+            and _task_scope.get("files_to_touch")
+            and _task_scope.get("approach")
         )
-        artifacts.append(
-            _write_artifact(
-                run_dir, "scope_output",
-                {"success": scope_result.success, "errors": scope_result.errors, "output": scope_result.output},
-                "Structured scope decision",
-            )
-        )
-        if scope_result.success:
+        if _trio_scope:
+            self._emit("scope", "running", "using TRIO plan scope (no LLM call)")
+            scope = {
+                "files_to_touch": list(_task_scope["files_to_touch"]),
+                "files_not_to_touch": list(_task_scope.get("files_not_to_touch") or []),
+                "approach": str(_task_scope["approach"]),
+                "risks": list(_task_scope.get("risks") or []),
+                "estimated_complexity": str(
+                    _task_scope.get("estimated_complexity") or "medium"
+                ),
+            }
             artifacts.append(
                 _write_artifact(
-                    run_dir, "plan",
-                    scope_result.output,
-                    "Scope-derived plan (approach, files_to_touch, risks)",
+                    run_dir, "scope_output",
+                    {"success": True, "errors": [], "output": scope, "trio_derived": True},
+                    "Scope from TRIO plan (no LLM call)",
                 )
             )
-        if not scope_result.success:
-            return WorkResult(
-                summary="Scope skill failed to produce valid output.",
-                artifacts=_to_artifact_tuples(artifacts),
-                outcome="failed",
-                diagnostics={
-                    "stage": "scope",
-                    "worker_outcome": "failed",
-                    "failure_category": "scope_skill_failure",
-                    "failure_message": "; ".join(scope_result.errors),
-                    "validation_profile": task.validation_profile,
-                },
+            artifacts.append(
+                _write_artifact(
+                    run_dir, "plan", scope,
+                    "TRIO-derived plan (approach, files_to_touch, risks)",
+                )
             )
-        scope = scope_result.output
+        else:
+            self._emit("scope", "running", "analyzing task and selecting files")
+            scope_result = invoke_skill(
+                scope_skill,
+                SkillInvocation(
+                    skill_name="scope",
+                    inputs={
+                        "title": task.title,
+                        "objective": task.objective,
+                        "strategy": task.strategy,
+                        "allowed_paths": _task_scope.get("allowed_paths") or [],
+                        "forbidden_paths": _task_scope.get("forbidden_paths") or [],
+                        "repo_context": repo_context,
+                        "related_file_contents": related_file_contents,
+                        "codebase_search_results": codebase_search_results,
+                        "prior_scope": prior_scope,
+                        "retry_feedback": retry_feedback,
+                    },
+                    task=task,
+                    run=run,
+                    run_dir=run_dir / "skill_scope",
+                ),
+                self.llm_router,
+                telemetry=self.telemetry,
+            )
+            artifacts.append(
+                _write_artifact(
+                    run_dir, "scope_output",
+                    {"success": scope_result.success, "errors": scope_result.errors, "output": scope_result.output},
+                    "Structured scope decision",
+                )
+            )
+            if scope_result.success:
+                artifacts.append(
+                    _write_artifact(
+                        run_dir, "plan",
+                        scope_result.output,
+                        "Scope-derived plan (approach, files_to_touch, risks)",
+                    )
+                )
+            if not scope_result.success:
+                return WorkResult(
+                    summary="Scope skill failed to produce valid output.",
+                    artifacts=_to_artifact_tuples(artifacts),
+                    outcome="failed",
+                    diagnostics={
+                        "stage": "scope",
+                        "worker_outcome": "failed",
+                        "failure_category": "scope_skill_failure",
+                        "failure_message": "; ".join(scope_result.errors),
+                        "validation_profile": task.validation_profile,
+                    },
+                )
+            scope = scope_result.output
         if scope.get("estimated_complexity") == "too_large":
             return WorkResult(
                 summary="Scope flagged task as too large; split before implementing.",

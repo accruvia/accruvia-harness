@@ -139,6 +139,10 @@ class TaskService:
         if not task.objective_id:
             return task
         if task.plan_id and task.mermaid_node_id:
+            # Path 1: plan already linked. Enrich task.scope with TRIO
+            # fields from plan.slice so work_orchestrator can skip the
+            # scope LLM call when the plan already specifies files/approach.
+            task = self._enrich_scope_from_plan(task)
             return task
 
         plan_id = task.plan_id
@@ -174,6 +178,30 @@ class TaskService:
             )
         return replace(task, plan_id=plan_id, mermaid_node_id=node_id)
 
+    def _enrich_scope_from_plan(self, task: Task) -> Task:
+        """Merge TRIO plan.slice data into task.scope when present.
+
+        Called in _ensure_plan_linkage path 1 (task already has plan_id).
+        If the plan has TRIO fields (target_impl, target_test, etc.), derive
+        a scope dict and merge it under task.scope so work_orchestrator can
+        skip the scope LLM call.
+        """
+        if not task.plan_id or not hasattr(self.store, "get_plan"):
+            return task
+        plan = self.store.get_plan(task.plan_id)
+        if plan is None or not plan.slice:
+            return task
+        from ..skills.plan_draft import scope_from_plan_slice
+
+        trio_scope = scope_from_plan_slice(plan.slice)
+        if trio_scope is None:
+            return task
+        merged = dict(task.scope or {})
+        for key, value in trio_scope.items():
+            if key not in merged or not merged[key]:
+                merged[key] = value
+        return replace(task, scope=merged)
+
     def create_task_with_policy(
         self,
         project_id: str,
@@ -194,6 +222,7 @@ class TaskService:
         max_branches: int = 1,
         required_artifacts: list[str] | None = None,
         mermaid_node_id: str | None = None,
+        plan_id: str | None = None,
     ) -> Task:
         if objective_id is not None:
             linked_objective = self.store.get_objective(objective_id)
@@ -228,6 +257,7 @@ class TaskService:
                 id=new_id("task"),
                 project_id=project_id,
                 objective_id=objective_id,
+                plan_id=plan_id,
                 mermaid_node_id=mermaid_node_id,
                 title=title,
                 objective=amended_objective,

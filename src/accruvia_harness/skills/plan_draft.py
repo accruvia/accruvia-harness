@@ -213,7 +213,47 @@ _TRIO_SLICE_KEYS = (
     "supersedes",
     "orphan_strategy",
     "orphan_acceptance_reason",
+    "risks",
+    "estimated_complexity",
 )
+
+_COMPLEXITY_VALUES = ("trivial", "small", "medium", "large", "too_large")
+
+
+def scope_from_plan_slice(slice_dict: dict[str, Any]) -> dict[str, Any] | None:
+    """Derive a scope dict from TRIO plan.slice data.
+
+    Returns None when the slice lacks TRIO fields (target_impl/target_test),
+    meaning the plan came from the old flat plan_draft path and can't
+    replace the scope LLM call.
+
+    The returned dict has the same shape as ScopeSkill output:
+    files_to_touch, files_not_to_touch, approach, risks, estimated_complexity.
+    """
+    target_impl = slice_dict.get("target_impl") or ""
+    target_test = slice_dict.get("target_test") or ""
+    transformation = slice_dict.get("transformation") or ""
+    if not target_impl and not target_test:
+        return None
+
+    files_to_touch: list[str] = []
+    for target in (target_impl, target_test):
+        if not target:
+            continue
+        path = str(target).split("::", 1)[0].strip()
+        if path and path not in files_to_touch:
+            files_to_touch.append(path)
+
+    return {
+        "files_to_touch": files_to_touch,
+        "files_not_to_touch": [],
+        "approach": str(transformation).strip(),
+        "risks": list(slice_dict.get("risks") or []),
+        "estimated_complexity": str(
+            slice_dict.get("estimated_complexity") or "medium"
+        ),
+        "trio_derived": True,
+    }
 
 
 def materialize_plans_from_skill_output(
@@ -397,7 +437,13 @@ class PlanDraftTrioSkill(PlanDraftSkill):
             "        dispatch target). The orphan is NOT a bug. Requires\n"
             "        orphan_acceptance_reason below.\n"
             "  - orphan_acceptance_reason: one-sentence justification. Required\n"
-            "    iff orphan_strategy == 'accept'.\n\n"
+            "    iff orphan_strategy == 'accept'.\n"
+            "  - risks: list of strings naming concrete risks for THIS plan.\n"
+            "    Focus on integration hazards, backward-compat breaks, or\n"
+            "    performance concerns. Empty list [] if no risks.\n"
+            "  - estimated_complexity: one of 'trivial' | 'small' | 'medium' |\n"
+            "    'large' | 'too_large'. Refers to the implementation effort\n"
+            "    for this plan alone. If 'too_large', the plan should be split.\n\n"
             "HARD INVARIANTS (violations cause rejection):\n"
             "  - Plans must have target_impl + target_test, or only target_impl,\n"
             "    or only target_test — at least one is required.\n"
@@ -431,7 +477,9 @@ class PlanDraftTrioSkill(PlanDraftSkill):
             '  "resources": [],\n'
             '  "supersedes": ["src/accruvia_harness/domain.py::Plan.__repr__"],\n'
             '  "orphan_strategy": "absorb",\n'
-            '  "orphan_acceptance_reason": null\n'
+            '  "orphan_acceptance_reason": null,\n'
+            '  "risks": ["callers of __repr__ may depend on its format"],\n'
+            '  "estimated_complexity": "small"\n'
             "}\n\n"
             f"{inventory_block}\n"
         )
@@ -489,6 +537,18 @@ class PlanDraftTrioSkill(PlanDraftSkill):
             plan["orphan_acceptance_reason"] = (
                 str(reason).strip() if isinstance(reason, str) else ""
             )
+            # risks: list of strings
+            risks = src.get("risks")
+            if isinstance(risks, list):
+                plan["risks"] = [str(r).strip() for r in risks if str(r).strip()]
+            else:
+                plan["risks"] = []
+            # estimated_complexity: one of the allowed values
+            complexity = src.get("estimated_complexity")
+            if isinstance(complexity, str) and complexity.strip().lower() in _COMPLEXITY_VALUES:
+                plan["estimated_complexity"] = complexity.strip().lower()
+            else:
+                plan["estimated_complexity"] = "medium"
             # creates_new_file starts as whatever the LLM declared.
             declared = bool(src.get("creates_new_file") or False)
             plan["creates_new_file"] = declared
@@ -657,6 +717,18 @@ class PlanDraftTrioSkill(PlanDraftSkill):
                         f"orphan_strategy={strategy!r} — set supersedes to a "
                         f"non-empty list or set orphan_strategy to null"
                     )
+
+            complexity = plan.get("estimated_complexity")
+            if complexity and complexity not in _COMPLEXITY_VALUES:
+                trio_errors.append(
+                    f"plan {local_id!r} estimated_complexity {complexity!r} "
+                    f"not in {_COMPLEXITY_VALUES}"
+                )
+            if complexity == "too_large":
+                trio_errors.append(
+                    f"plan {local_id!r} estimated_complexity is 'too_large' — "
+                    f"split this plan into smaller units"
+                )
 
             transformation = plan.get("transformation")
             if not transformation or not str(transformation).strip():
