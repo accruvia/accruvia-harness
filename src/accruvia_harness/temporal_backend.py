@@ -228,7 +228,8 @@ if activity is not None and workflow is not None:
 
 def build_temporal_workflows() -> list[type]:
     _import_temporal_modules()
-    return [TaskToStableWorkflow, ProcessNextTaskWorkflow]
+    from .workflows.objective_lifecycle import ObjectiveLifecycleWorkflow
+    return [TaskToStableWorkflow, ProcessNextTaskWorkflow, ObjectiveLifecycleWorkflow]
 
 
 async def run_temporal_worker(
@@ -241,7 +242,23 @@ async def run_temporal_worker(
     if Worker is None:
         raise ModuleNotFoundError("temporalio is not installed")
 
-    activities = [task_to_stable_activity_defn, create_run_activity_defn, process_next_task_activity_defn]
+    from .workflows.objective_lifecycle import (
+        interrogation_activity,
+        trio_planning_activity,
+        execute_tasks_activity,
+        objective_review_activity,
+        promotion_activity,
+    )
+    activities = [
+        task_to_stable_activity_defn,
+        create_run_activity_defn,
+        process_next_task_activity_defn,
+        interrogation_activity,
+        trio_planning_activity,
+        execute_tasks_activity,
+        objective_review_activity,
+        promotion_activity,
+    ]
 
     client = await connect_temporal_client(client_cls, target, namespace)
     worker = Worker(client, task_queue=task_queue, workflows=workflows, activities=activities)

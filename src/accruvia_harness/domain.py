@@ -129,6 +129,77 @@ def validate_objective_transition(current: ObjectiveStatus, target: ObjectiveSta
         raise ValueError(f"Invalid objective transition: {current} -> {target}")
 
 
+class ObjectivePhase(StrEnum):
+    """Durable lifecycle phase for an objective.
+
+    This is the workflow contract. Each phase has exactly one valid
+    successor (except FAILED which is terminal). The Temporal workflow
+    advances phases — no LLM, no UI handler, no background thread can
+    skip a phase because the workflow code is the single caller of
+    advance_objective_phase.
+
+    The existing ObjectiveStatus enum is kept for backward compat with
+    the UI and store. ObjectivePhase is the authoritative source of
+    truth for where an objective is in its lifecycle.
+    """
+    CREATED = "created"
+    INTERROGATING = "interrogating"
+    MERMAID_REVIEW = "mermaid_review"
+    TRIO_PLANNING = "trio_planning"
+    EXECUTING = "executing"
+    REVIEWING = "reviewing"
+    PROMOTED = "promoted"
+    FAILED = "failed"
+
+
+_PHASE_SEQUENCE: list[ObjectivePhase] = [
+    ObjectivePhase.CREATED,
+    ObjectivePhase.INTERROGATING,
+    ObjectivePhase.MERMAID_REVIEW,
+    ObjectivePhase.TRIO_PLANNING,
+    ObjectivePhase.EXECUTING,
+    ObjectivePhase.REVIEWING,
+    ObjectivePhase.PROMOTED,
+]
+
+VALID_PHASE_TRANSITIONS: dict[ObjectivePhase, frozenset[ObjectivePhase]] = {
+    phase: frozenset({_PHASE_SEQUENCE[i + 1], ObjectivePhase.FAILED})
+    for i, phase in enumerate(_PHASE_SEQUENCE[:-1])
+}
+VALID_PHASE_TRANSITIONS[ObjectivePhase.PROMOTED] = frozenset()
+VALID_PHASE_TRANSITIONS[ObjectivePhase.FAILED] = frozenset()
+
+PHASE_TO_STATUS: dict[ObjectivePhase, ObjectiveStatus] = {
+    ObjectivePhase.CREATED: ObjectiveStatus.OPEN,
+    ObjectivePhase.INTERROGATING: ObjectiveStatus.INVESTIGATING,
+    ObjectivePhase.MERMAID_REVIEW: ObjectiveStatus.PLANNING,
+    ObjectivePhase.TRIO_PLANNING: ObjectiveStatus.PLANNING,
+    ObjectivePhase.EXECUTING: ObjectiveStatus.EXECUTING,
+    ObjectivePhase.REVIEWING: ObjectiveStatus.RESOLVED,
+    ObjectivePhase.PROMOTED: ObjectiveStatus.RESOLVED,
+    ObjectivePhase.FAILED: ObjectiveStatus.PAUSED,
+}
+
+
+def advance_objective_phase(
+    current: ObjectivePhase, target: ObjectivePhase,
+) -> ObjectivePhase:
+    """Validate and return the target phase.
+
+    Raises ValueError if the transition is illegal. This is the single
+    enforcement point — the workflow calls this before persisting.
+    """
+    if current == target:
+        return target
+    allowed = VALID_PHASE_TRANSITIONS.get(current, frozenset())
+    if target not in allowed:
+        raise ValueError(
+            f"Illegal phase transition: {current.value} -> {target.value}. "
+            f"Allowed: {sorted(p.value for p in allowed)}"
+        )
+    return target
+
+
 class MermaidStatus(StrEnum):
     DRAFT = "draft"
     IN_REVIEW = "in_review"
@@ -204,6 +275,7 @@ class Objective:
     summary: str
     priority: int = 100
     status: ObjectiveStatus = ObjectiveStatus.OPEN
+    phase: ObjectivePhase = ObjectivePhase.CREATED
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)
 

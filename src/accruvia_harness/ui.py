@@ -1460,6 +1460,28 @@ class HarnessUIDataService:
         self.reconcile_objective_workflow(objective.id)
         return {"objective": serialize_dataclass(objective)}
 
+    def start_objective_lifecycle(self, objective_id: str) -> "ObjectiveLifecycleRunner":
+        """Create an ObjectiveLifecycleRunner for the given objective.
+
+        This is the contract-enforced path. The runner drives the
+        objective through interrogation → mermaid_review → TRIO →
+        executing → reviewing → promoted in strict order. Phase
+        transitions are validated by advance_objective_phase — no
+        phase can be skipped.
+
+        For Temporal-backed deployments, use ObjectiveLifecycleWorkflow
+        directly (started via the Temporal client). This method is for
+        local/inline execution.
+        """
+        from .workflows.objective_lifecycle import ObjectiveLifecycleRunner
+        config = getattr(self.ctx, "config", None)
+        if config is None:
+            raise ValueError("No config available on context")
+        return ObjectiveLifecycleRunner(
+            config=config.to_json(),
+            objective_id=objective_id,
+        )
+
     def update_intent_model(
         self,
         objective_id: str,
