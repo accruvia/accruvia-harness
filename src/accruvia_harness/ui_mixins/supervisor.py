@@ -4,10 +4,9 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from ..domain import Objective, ObjectiveStatus, Task, TaskStatus
-from ._shared import _BACKGROUND_SUPERVISOR
-
-from ._shared import _to_jsonable
+from ..context_control import objective_execution_gate
+from ..domain import Objective, ObjectiveStatus, Task, TaskStatus, serialize_dataclass
+from ._shared import _BACKGROUND_SUPERVISOR, _to_jsonable
 
 class SupervisorMixin:
 
@@ -275,4 +274,106 @@ class SupervisorMixin:
             },
             "current_stage": current_stage,
         }
+
+
+    def harness_atomicity_overview(self) -> dict[str, object]:
+        rows: list[dict[str, object]] = []
+        for project in self.store.list_projects():
+            objectives = self.store.list_objectives(project.id)
+            tasks = self.store.list_tasks(project.id)
+            tasks_by_objective = {
+                objective.id: [task for task in tasks if task.objective_id == objective.id]
+                for objective in objectives
+            }
+            for objective in objectives:
+                linked_tasks = tasks_by_objective.get(objective.id, [])
+                workflow = self._harness_workflow_status_for_objective(objective, linked_tasks)
+                gate = objective_execution_gate(self.store, objective.id)
+                generation = self._atomic_generation_state(objective.id)
+                review = self._promotion_review_for_objective(objective.id, linked_tasks)
+                task_counts = {"completed": 0, "active": 0, "failed": 0, "pending": 0}
+                latest_activity = objective.updated_at.isoformat() if objective.updated_at else ""
+                for task in linked_tasks:
+                    status = task.status.value if hasattr(task.status, "value") else str(task.status)
+                    if status in task_counts:
+                        task_counts[status] += 1
+                    if task.updated_at and task.updated_at.isoformat() > latest_activity:
+                        latest_activity = task.updated_at.isoformat()
+                rows.append(
+                    {
+                        "id": objective.id,
+                        "project_id": project.id,
+                        "project_name": project.name,
+                        "title": objective.title,
+                        "status": objective.status.value,
+                        "workflow": workflow,
+                        "execution_gate": {
+                            "ready": gate.ready,
+                            "checks": _to_jsonable(gate.gate_checks),
+                        },
+                        "atomic_generation": generation,
+                        "task_counts": task_counts,
+                        "unresolved_failed_count": int(review.get("unresolved_failed_count") or 0),
+                        "waived_failed_count": int(review.get("waived_failed_count") or 0),
+                        "failed_tasks": list(review.get("failed_tasks") or []),
+                        "task_total": sum(task_counts.values()),
+                        "latest_activity_at": latest_activity,
+                    }
+                )
+        rows.sort(
+            key=lambda item: (
+                int((item.get("task_counts") or {}).get("active", 0)),
+                int((item.get("task_counts") or {}).get("pending", 0)),
+                str(item.get("latest_activity_at") or ""),
+                str(item.get("title") or ""),
+            ),
+            reverse=True,
+        )
+        return {"objectives": rows}
+
+
+    def harness_promotion_overview(self) -> dict[str, object]:
+        rows: list[dict[str, object]] = []
+        for project in self.store.list_projects():
+            objectives = self.store.list_objectives(project.id)
+            tasks = self.store.list_tasks(project.id)
+            tasks_by_objective = {
+                objective.id: [task for task in tasks if task.objective_id == objective.id]
+                for objective in objectives
+            }
+            for objective in objectives:
+                linked_tasks = tasks_by_objective.get(objective.id, [])
+                review = self._promotion_review_for_objective(objective.id, linked_tasks)
+                latest_round = (review.get("review_rounds") or [None])[0]
+                rows.append(
+                    {
+                        "id": objective.id,
+                        "project_id": project.id,
+                        "project_name": project.name,
+                        "title": objective.title,
+                        "status": objective.status.value,
+                        "review_clear": bool(review.get("review_clear")),
+                        "next_action": str(review.get("next_action") or ""),
+                        "phase": str(review.get("phase") or ""),
+                        "review_round_count": len(review.get("review_rounds") or []),
+                        "review_packet_count": int(
+                            review.get("review_packet_count")
+                            or review.get("objective_review_packet_count")
+                            or 0
+                        ),
+                        "unresolved_failed_count": int(review.get("unresolved_failed_count") or 0),
+                        "waived_failed_count": int(review.get("waived_failed_count") or 0),
+                        "latest_round": latest_round,
+                    }
+                )
+        rows.sort(
+            key=lambda item: (
+                bool(item.get("review_clear")),
+                -int(item.get("unresolved_failed_count") or 0),
+                -int(item.get("review_round_count") or 0),
+                str(((item.get("latest_round") or {}) if isinstance(item.get("latest_round"), dict) else {}).get("last_activity_at") or ""),
+                str(item.get("title") or ""),
+            )
+        )
+        return {"objectives": rows}
 

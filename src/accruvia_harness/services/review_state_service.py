@@ -206,3 +206,59 @@ class ReviewStateService:
                 usage.setdefault("missing_reason", "backend_did_not_report_token_usage")
         return usage, reported, source
 
+
+    def _objective_review_state(self, objective_id: str) -> dict[str, object]:
+        starts = self.store.list_context_records(objective_id=objective_id, record_type="objective_review_started")
+        if not starts:
+            return {"status": "idle", "review_id": "", "started_at": "", "completed_at": "", "failed_at": "", "last_activity_at": ""}
+        start = starts[-1]
+        review_id = str(start.metadata.get("review_id") or start.id)
+        completed = next(
+            (
+                record
+                for record in reversed(self.store.list_context_records(objective_id=objective_id, record_type="objective_review_completed"))
+                if str(record.metadata.get("review_id") or "") == review_id
+            ),
+            None,
+        )
+        failed = next(
+            (
+                record
+                for record in reversed(self.store.list_context_records(objective_id=objective_id, record_type="objective_review_failed"))
+                if str(record.metadata.get("review_id") or "") == review_id
+            ),
+            None,
+        )
+        packets = [
+            record
+            for record in self.store.list_context_records(objective_id=objective_id, record_type="objective_review_packet")
+            if str(record.metadata.get("review_id") or "") == review_id
+        ]
+        status = "running"
+        if failed is not None:
+            status = "failed"
+        elif completed is not None:
+            status = "completed"
+        related = [start.created_at]
+        related.extend(record.created_at for record in packets)
+        if completed is not None:
+            related.append(completed.created_at)
+        if failed is not None:
+            related.append(failed.created_at)
+        return {
+            "status": status,
+            "review_id": review_id,
+            "started_at": start.created_at.isoformat(),
+            "completed_at": completed.created_at.isoformat() if completed is not None else "",
+            "failed_at": failed.created_at.isoformat() if failed is not None else "",
+            "last_activity_at": max(related).isoformat() if related else "",
+            "duration_ms": self.workflow_timing.duration_ms(
+                start.created_at,
+                completed_at=completed.created_at if completed is not None else None,
+                failed_at=failed.created_at if failed is not None else None,
+                last_activity_at=max(related) if related else None,
+            ),
+            "packet_count": len(packets),
+            "error": failed.content if failed is not None else "",
+        }
+
