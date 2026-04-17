@@ -5,8 +5,9 @@ import json
 import re
 from typing import Any
 
+from ..context_control import objective_execution_gate
 from ..domain import (
-    ContextRecord, Run, RunStatus, Task, TaskStatus, new_id, serialize_dataclass,
+    ContextRecord, MermaidStatus, Run, RunStatus, Task, TaskStatus, new_id, serialize_dataclass,
 )
 
 from ._shared import _AttrDict, ConversationTurn, ResponderResult, ResponderContextPacket
@@ -351,3 +352,77 @@ class ResponderMixin:
         turns.sort(key=lambda item: item["created_at"])
         return turns[-10:]
 
+    def _next_action_for_context(self, objective_id: str | None) -> dict[str, str]:
+        if objective_id is None:
+            return {
+                "title": "Create or select an objective",
+                "body": "Choose one objective to continue.",
+            }
+        objective = self.store.get_objective(objective_id)
+        if objective is None:
+            return {
+                "title": "Objective missing",
+                "body": "The selected objective no longer exists.",
+            }
+        if not self.store.latest_intent_model(objective.id):
+            return {
+                "title": "Answer the desired outcome",
+                "body": "Describe the result you want from this objective.",
+            }
+        review = self._interrogation_review(objective.id)
+        if not review.get("completed"):
+            return {
+                "title": "Answer the next red-team question",
+                "body": "The harness is interrogating and red-teaming the plan in the transcript before Mermaid review.",
+            }
+        latest_mermaid = self.store.latest_mermaid_artifact(objective.id, "workflow_control")
+        if latest_mermaid is None or latest_mermaid.status != MermaidStatus.FINISHED:
+            return {
+                "title": "Finish or pause Mermaid review",
+                "body": "Execution stays blocked until the current Mermaid is finished.",
+            }
+        gate = objective_execution_gate(self.store, objective.id)
+        if not gate.ready:
+            blocked = [check for check in gate.gate_checks if not check["ok"]]
+            if blocked:
+                return {
+                    "title": str(blocked[0]["label"]),
+                    "body": str(blocked[0].get("detail") or "That gate is still blocking execution."),
+                }
+        task, run = self._latest_linked_task_and_run(project_id=objective.project_id, objective_id=objective.id)
+        if task is None:
+            return {
+                "title": "Create the first bounded slice",
+                "body": "The harness should create the first bounded implementation step from the approved intent and Mermaid.",
+            }
+        if run is None:
+            return {
+                "title": "Ready to run the first implementation step",
+                "body": "Start the current implementation step when you are ready.",
+            }
+        return {
+            "title": "Review the latest attempt",
+            "body": "Review the latest run evidence before deciding whether to continue, revise, or investigate.",
+        }
+
+    def _focus_mode_for_objective(self, objective_id: str) -> str:
+        intent_model = self.store.latest_intent_model(objective_id)
+        if intent_model is None or not (intent_model.intent_summary or "").strip():
+            return "desired_outcome"
+        if not (intent_model.success_definition or "").strip():
+            return "success_definition"
+        if not list(intent_model.non_negotiables):
+            return "non_negotiables"
+        review = self._interrogation_review(objective_id)
+        if not review.get("completed"):
+            return "interrogation_review"
+        mermaid = self.store.latest_mermaid_artifact(objective_id, "workflow_control")
+        if mermaid is None or mermaid.status != MermaidStatus.FINISHED:
+            return "mermaid_review"
+        objective = self.store.get_objective(objective_id)
+        if objective is None:
+            return "empty"
+        task, run = self._latest_linked_task_and_run(project_id=objective.project_id, objective_id=objective.id)
+        if task is None or run is None:
+            return "run_start"
+        return "run_review"
