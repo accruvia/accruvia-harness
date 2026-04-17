@@ -5,7 +5,7 @@ import json
 import re
 from typing import Any
 
-from ..domain import ContextRecord, Objective, new_id
+from ..domain import ContextRecord, InterrogationReview, Objective, new_id
 from ._shared import _INTERROGATION_RED_TEAM_MAX_ROUNDS
 
 class InterrogationMixin:
@@ -93,18 +93,18 @@ class InterrogationMixin:
             return deterministic
         parsed = loop_result.final_output
         last_round = loop_result.history[-1] if loop_result.history else None
-        return {
-            "completed": False,
-            "summary": str(parsed.get("summary") or ""),
-            "plan_elements": list(parsed.get("plan_elements") or []),
-            "questions": list(parsed.get("questions") or []),
-            "generated_by": "llm",
-            "backend": last_round.generator_result.llm_backend if last_round else "",
-            "prompt_path": last_round.generator_result.prompt_path if last_round else "",
-            "response_path": last_round.generator_result.response_path if last_round else "",
-            "red_team_rounds": loop_result.rounds_completed,
-            "red_team_stop_reason": loop_result.stop_reason,
-        }
+        return InterrogationReview(
+            completed=False,
+            summary=str(parsed.get("summary") or ""),
+            plan_elements=list(parsed.get("plan_elements") or []),
+            questions=list(parsed.get("questions") or []),
+            generated_by="llm",
+            backend=last_round.generator_result.llm_backend if last_round else "",
+            prompt_path=last_round.generator_result.prompt_path if last_round else "",
+            response_path=last_round.generator_result.response_path if last_round else "",
+            red_team_rounds=loop_result.rounds_completed,
+            red_team_stop_reason=loop_result.stop_reason,
+        ).to_dict()
 
 
     def _deterministic_interrogation_review(self, objective_id: str) -> dict[str, object]:
@@ -135,25 +135,24 @@ class InterrogationMixin:
             questions.append("How should the harness measure success for this objective?")
         questions.append("What is the most likely way the current plan could still miss your intent?")
         questions.append("What ambiguity should be resolved before Mermaid review?")
-        return {
-            "completed": False,
-            "summary": "The harness should interrogate the objective and self-red-team the plan before Mermaid review.",
-            "plan_elements": plan_elements,
-            "questions": questions,
-            "generated_by": "deterministic",
-            "backend": None,
-        }
+        return InterrogationReview(
+            completed=False,
+            summary="The harness should interrogate the objective and self-red-team the plan before Mermaid review.",
+            plan_elements=plan_elements,
+            questions=questions,
+            generated_by="deterministic",
+        ).to_dict()
 
 
     def _recorded_interrogation_review(self, record: ContextRecord, *, completed: bool) -> dict[str, object]:
-        return {
-            "completed": completed,
-            "summary": record.content,
-            "plan_elements": list(record.metadata.get("plan_elements") or []),
-            "questions": list(record.metadata.get("questions") or []),
-            "generated_by": record.metadata.get("generated_by", "deterministic"),
-            "backend": record.metadata.get("backend"),
-        }
+        return InterrogationReview(
+            completed=completed,
+            summary=record.content,
+            plan_elements=list(record.metadata.get("plan_elements") or []),
+            questions=list(record.metadata.get("questions") or []),
+            generated_by=record.metadata.get("generated_by", "deterministic"),
+            backend=record.metadata.get("backend"),
+        ).to_dict()
 
 
     def _persist_interrogation_record(self, record_type: str, objective: Objective, review: dict[str, object]) -> None:
