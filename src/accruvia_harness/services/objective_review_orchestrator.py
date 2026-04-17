@@ -14,7 +14,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ..domain import Run, RunStatus, Task, TaskStatus, new_id
+from ..domain import (
+    ReviewPacket, ReviewVerdict, Run, RunStatus, Task, TaskStatus, new_id,
+)
 from ..llm import LLMRouter
 from ..skills import REVIEWER_SKILLS, SkillInvocation, SkillRegistry, invoke_skill
 from ..skills.reviewers.base import BaseReviewerSkill
@@ -47,28 +49,27 @@ def _stub_packet(dimension: str, error_message: str, *, reviewer: str) -> dict[s
         "description": f"Diagnostic report explaining the {dimension} reviewer failure and a re-review.",
         "required_fields": ["artifact_path", "summary"],
     }
-    return {
-        "reviewer": reviewer,
-        "dimension": dimension,
-        "verdict": "remediation_required",
-        "progress_status": "new_concern",
-        "severity": "medium",
-        "owner_scope": "objective review orchestration",
-        "summary": f"Reviewer skill failed for dimension {dimension}: {error_message}",
-        "findings": [f"Reviewer skill failure: {error_message}"],
-        "evidence": [],
-        "required_artifact_type": "report",
-        "artifact_schema": artifact_schema,
-        "evidence_contract": {
+    return ReviewPacket(
+        reviewer=reviewer,
+        dimension=dimension,
+        verdict=ReviewVerdict.REMEDIATION_REQUIRED,
+        progress_status="new_concern",
+        severity="medium",
+        owner_scope="objective review orchestration",
+        summary=f"Reviewer skill failed for dimension {dimension}: {error_message}",
+        findings=[f"Reviewer skill failure: {error_message}"],
+        evidence=[],
+        required_artifact_type="report",
+        artifact_schema=artifact_schema,
+        evidence_contract={
             "required_artifact_type": "report",
             "artifact_schema": artifact_schema,
             "closure_criteria": closure,
             "evidence_required": "report artifact summarising the reviewer failure and re-review outcome",
         },
-        "closure_criteria": closure,
-        "evidence_required": "report artifact summarising the reviewer failure and re-review outcome",
-        "repeat_reason": "",
-    }
+        closure_criteria=closure,
+        evidence_required="report artifact summarising the reviewer failure and re-review outcome",
+    ).to_dict()
 
 
 def _packet_from_skill_output(
@@ -95,23 +96,15 @@ def _packet_from_skill_output(
             "required_fields": ["artifact_path", "summary"],
         }
     if verdict == "pass":
-        return {
-            "reviewer": skill.reviewer_label,
-            "dimension": skill.dimension,
-            "verdict": "pass",
-            "progress_status": "not_applicable",
-            "severity": "",
-            "owner_scope": "",
-            "summary": summary or f"{skill.dimension} review passed.",
-            "findings": findings,
-            "evidence": evidence,
-            "required_artifact_type": "",
-            "artifact_schema": {},
-            "evidence_contract": {},
-            "closure_criteria": "",
-            "evidence_required": "",
-            "repeat_reason": "",
-        }
+        return ReviewPacket(
+            reviewer=skill.reviewer_label,
+            dimension=skill.dimension,
+            verdict=ReviewVerdict.PASS,
+            progress_status="not_applicable",
+            summary=summary or f"{skill.dimension} review passed.",
+            findings=findings,
+            evidence=evidence,
+        ).to_dict()
     if severity not in {"low", "medium", "high"}:
         severity = "medium"
     if not owner_scope:
@@ -130,23 +123,25 @@ def _packet_from_skill_output(
         "closure_criteria": closure_criteria,
         "evidence_required": evidence_required,
     }
-    return {
-        "reviewer": skill.reviewer_label,
-        "dimension": skill.dimension,
-        "verdict": verdict if verdict in {"concern", "remediation_required"} else "concern",
-        "progress_status": "new_concern",
-        "severity": severity,
-        "owner_scope": owner_scope,
-        "summary": summary or f"{skill.dimension} reviewer raised a finding.",
-        "findings": findings,
-        "evidence": evidence,
-        "required_artifact_type": required_artifact_type,
-        "artifact_schema": artifact_schema,
-        "evidence_contract": evidence_contract,
-        "closure_criteria": closure_criteria,
-        "evidence_required": evidence_required,
-        "repeat_reason": "",
-    }
+    parsed_verdict = ReviewVerdict.CONCERN
+    if verdict == "remediation_required":
+        parsed_verdict = ReviewVerdict.REMEDIATION_REQUIRED
+    return ReviewPacket(
+        reviewer=skill.reviewer_label,
+        dimension=skill.dimension,
+        verdict=parsed_verdict,
+        progress_status="new_concern",
+        severity=severity,
+        owner_scope=owner_scope,
+        summary=summary or f"{skill.dimension} reviewer raised a finding.",
+        findings=findings,
+        evidence=evidence,
+        required_artifact_type=required_artifact_type,
+        artifact_schema=artifact_schema,
+        evidence_contract=evidence_contract,
+        closure_criteria=closure_criteria,
+        evidence_required=evidence_required,
+    ).to_dict()
 
 
 class ObjectiveReviewOrchestrator:

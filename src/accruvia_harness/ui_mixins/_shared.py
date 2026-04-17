@@ -6,6 +6,12 @@ from dataclasses import dataclass, is_dataclass, asdict
 from enum import Enum
 from typing import Any
 
+from ..domain import (
+    ReviewDimension,
+    ReviewProgressStatus,
+    ReviewSeverity,
+    ReviewVerdict,
+)
 from ..ui_coordinators import (
     AtomicGenerationCoordinator,
     BackgroundSupervisorCoordinator,
@@ -20,22 +26,10 @@ _MERMAID_RED_TEAM_MAX_ROUNDS = 20
 _INTERROGATION_RED_TEAM_MAX_ROUNDS = 4
 _ATOMIC_DECOMP_RED_TEAM_MAX_ROUNDS = 4
 
-_OBJECTIVE_REVIEW_DIMENSIONS = frozenset(
-    {
-        "intent_fidelity",
-        "unit_test_coverage",
-        "integration_e2e_coverage",
-        "security",
-        "devops",
-        "atomic_fidelity",
-        "code_structure",
-    }
-)
-_OBJECTIVE_REVIEW_VERDICTS = frozenset({"pass", "concern", "remediation_required"})
-_OBJECTIVE_REVIEW_PROGRESS = frozenset(
-    {"new_concern", "still_blocking", "improving", "resolved", "not_applicable"}
-)
-_OBJECTIVE_REVIEW_SEVERITIES = frozenset({"low", "medium", "high"})
+_OBJECTIVE_REVIEW_DIMENSIONS = frozenset(d.value for d in ReviewDimension)
+_OBJECTIVE_REVIEW_VERDICTS = frozenset(v.value for v in ReviewVerdict)
+_OBJECTIVE_REVIEW_PROGRESS = frozenset(p.value for p in ReviewProgressStatus)
+_OBJECTIVE_REVIEW_SEVERITIES = frozenset(s.value for s in ReviewSeverity if s.value)
 _OBJECTIVE_REVIEW_REBUTTAL_OUTCOMES = frozenset(
     {"accepted", "wrong_artifact_type", "artifact_incomplete", "missing_terminal_event", "evidence_not_found"}
 )

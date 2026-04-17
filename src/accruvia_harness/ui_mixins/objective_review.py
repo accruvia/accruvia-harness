@@ -623,9 +623,12 @@ class ObjectiveReviewMixin:
                     packet.setdefault("backend", "skills_orchestrator")
                     packet.setdefault("prompt_path", "")
                     packet.setdefault("response_path", "")
-                    packet.setdefault("llm_usage", llm_usage)
-                    packet.setdefault("llm_usage_reported", usage_reported)
-                    packet.setdefault("llm_usage_source", usage_source)
+                    if not packet.get("llm_usage"):
+                        packet["llm_usage"] = llm_usage
+                    if not packet.get("llm_usage_reported"):
+                        packet["llm_usage_reported"] = usage_reported
+                    if not packet.get("llm_usage_source"):
+                        packet["llm_usage_source"] = usage_source
                     packet.setdefault("review_task_id", "")
                     packet.setdefault("review_run_id", "")
                 return packets
