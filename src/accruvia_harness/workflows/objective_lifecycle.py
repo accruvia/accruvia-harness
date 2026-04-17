@@ -39,6 +39,7 @@ from ..domain import (
     ObjectivePhase,
     PHASE_TO_STATUS,
     advance_objective_phase,
+    plan_slice_typed,
 )
 
 try:
@@ -152,22 +153,22 @@ def sync_execute_tasks(config: str, objective_id: str, plans_data: list[dict[str
 
     task_ids: list[str] = []
     for plan in plans:
-        sl = plan.slice or {}
-        target_impl = str(sl.get("target_impl") or "").split("::", 1)[0].strip()
-        target_test = str(sl.get("target_test") or "").split("::", 1)[0].strip()
-        files_to_touch = [p for p in (target_impl, target_test) if p]
+        sl = plan_slice_typed(plan)
+        impl_path = sl.target_impl.split("::", 1)[0].strip() if sl.target_impl else ""
+        test_path = sl.target_test.split("::", 1)[0].strip() if sl.target_test else ""
+        files_to_touch = [p for p in (impl_path, test_path) if p]
         scope = {
             "files_to_touch": files_to_touch,
             "files_not_to_touch": [],
-            "approach": str(sl.get("transformation") or sl.get("label") or ""),
-            "risks": list(sl.get("risks") or []),
-            "estimated_complexity": str(sl.get("estimated_complexity") or "medium"),
+            "approach": sl.transformation or sl.label,
+            "risks": list(sl.risks),
+            "estimated_complexity": sl.estimated_complexity.value,
         }
         task = task_service.create_task_with_policy(
             project_id=objective.project_id,
             objective_id=objective.id,
-            title=str(sl.get("label") or f"Plan {plan.id}"),
-            objective=str(sl.get("transformation") or sl.get("label") or ""),
+            title=sl.label or f"Plan {plan.id}",
+            objective=sl.transformation or sl.label,
             priority=objective.priority,
             parent_task_id=None,
             source_run_id=None,

@@ -267,6 +267,11 @@ class Plan:
     updated_at: datetime = field(default_factory=utc_now)
 
 
+def plan_slice_typed(plan: "Plan") -> "PlanSlice":
+    """Return a typed PlanSlice from a Plan's raw slice dict."""
+    return PlanSlice.from_dict(plan.slice)
+
+
 @dataclass(slots=True)
 class Objective:
     id: str

@@ -70,8 +70,12 @@ def _plan_label(plan: Plan) -> str:
     > fallback to the plan id. Falls back in a documented order so renders
     stay stable as the slice schema evolves.
     """
+    from ..domain import plan_slice_typed
+    sl = plan_slice_typed(plan)
+    if sl.label:
+        return sl.label
     slice_dict = plan.slice or {}
-    for key in ("label", "title", "task_title"):
+    for key in ("title", "task_title"):
         candidate = slice_dict.get(key)
         if isinstance(candidate, str) and candidate.strip():
             return candidate.strip()
@@ -86,11 +90,9 @@ def _plan_dependencies(plan: Plan) -> list[str]:
     raising — the renderer is forgiving because dependency data is user
     content, not a system invariant.
     """
-    slice_dict = plan.slice or {}
-    deps = slice_dict.get("dependencies")
-    if not isinstance(deps, list):
-        return []
-    return [str(d).strip() for d in deps if isinstance(d, str) and d.strip()]
+    from ..domain import plan_slice_typed
+    sl = plan_slice_typed(plan)
+    return [str(d).strip() for d in sl.dependencies if isinstance(d, str) and d.strip()]
 
 
 def render_mermaid_from_plans(

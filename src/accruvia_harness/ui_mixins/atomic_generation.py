@@ -9,6 +9,7 @@ from typing import Any
 from ..domain import (
     ContextRecord, MermaidStatus, Objective, ObjectivePhase,
     ObjectiveStatus, Run, Task, TaskStatus, new_id,
+    plan_slice_typed,
 )
 from ._shared import _ATOMIC_GENERATION, _BACKGROUND_SUPERVISOR
 
@@ -208,22 +209,22 @@ class AtomicGenerationMixin:
                 content=f"Publishing {len(materialized)} TRIO plans as tasks.",
             )
             for index, plan in enumerate(materialized, start=1):
-                sl = plan.slice or {}
-                target_impl = str(sl.get("target_impl") or "").split("::", 1)[0].strip()
-                target_test = str(sl.get("target_test") or "").split("::", 1)[0].strip()
-                files_to_touch = [p for p in (target_impl, target_test) if p]
+                sl = plan_slice_typed(plan)
+                impl_path = sl.target_impl.split("::", 1)[0].strip() if sl.target_impl else ""
+                test_path = sl.target_test.split("::", 1)[0].strip() if sl.target_test else ""
+                files_to_touch = [p for p in (impl_path, test_path) if p]
                 scope = {
                     "files_to_touch": files_to_touch,
                     "files_not_to_touch": [],
-                    "approach": str(sl.get("transformation") or sl.get("label") or ""),
-                    "risks": list(sl.get("risks") or []),
-                    "estimated_complexity": str(sl.get("estimated_complexity") or "medium"),
+                    "approach": sl.transformation or sl.label,
+                    "risks": list(sl.risks),
+                    "estimated_complexity": sl.estimated_complexity.value,
                 }
                 task = self.task_service.create_task_with_policy(
                     project_id=objective.project_id,
                     objective_id=objective.id,
-                    title=str(sl.get("label") or f"Plan {plan.id}"),
-                    objective=str(sl.get("transformation") or sl.get("label") or ""),
+                    title=sl.label or f"Plan {plan.id}",
+                    objective=sl.transformation or sl.label,
                     priority=objective.priority,
                     parent_task_id=None,
                     source_run_id=None,
@@ -256,8 +257,8 @@ class AtomicGenerationMixin:
                             "plan_id": plan.id,
                             "title": task.title,
                             "objective": task.objective,
-                            "target_impl": sl.get("target_impl") or "",
-                            "target_test": sl.get("target_test") or "",
+                            "target_impl": sl.target_impl,
+                            "target_test": sl.target_test,
                             "strategy": task.strategy,
                         },
                     )
