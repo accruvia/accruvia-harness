@@ -1354,110 +1354,97 @@ class ObjectiveReviewMixin:
 
 
     def _deterministic_objective_review_packets(self, objective_payload: dict[str, object]) -> list[dict[str, object]]:
+        from ..domain import ReviewPacket, ReviewVerdict
         counts = objective_payload.get("task_counts", {}) if isinstance(objective_payload, dict) else {}
         failed = int(counts.get("failed", 0) or 0)
         waived = int(objective_payload.get("waived_failed_count", 0) or 0)
         unresolved = int(objective_payload.get("unresolved_failed_count", 0) or 0)
+        _det_usage = {"shared_invocation": True, "reported": False, "missing_reason": "deterministic_review_packet"}
+        _disp_schema = {
+            "type": "failed_task_disposition_record",
+            "description": "Each unresolved failed task must carry an explicit persisted disposition before promotion.",
+            "required_fields": ["task_id", "disposition", "rationale"],
+        }
+        _qa_schema = {
+            "type": "objective_review_packet",
+            "description": "QA closure requires a persisted review packet that cites the exact completed-task test artifacts.",
+            "required_fields": ["review_id", "reviewer", "dimension", "verdict", "artifacts"],
+        }
+        _waive_schema = {
+            "type": "failed_task_disposition_record",
+            "description": "Waived failed tasks must retain persisted superseding or waiver rationale.",
+            "required_fields": ["task_id", "disposition", "rationale"],
+        }
         packets = [
-            {
-                "reviewer": "Intent agent",
-                "dimension": "intent_fidelity",
-                "verdict": "pass" if unresolved == 0 else "concern",
-                "progress_status": "not_applicable",
-                "severity": "" if unresolved == 0 else "medium",
-                "owner_scope": "" if unresolved == 0 else "failed task governance",
-                "summary": "Execution completed and the objective reached a resolved state. Review the linked task outcomes against the original intent before promotion.",
-                "findings": [] if unresolved == 0 else ["There are unresolved failed tasks that still need explicit disposition."],
-                "evidence": [f"Completed tasks: {int(counts.get('completed', 0) or 0)}", f"Unresolved failed tasks: {unresolved}"],
-                "required_artifact_type": "" if unresolved == 0 else "failed_task_disposition_record",
-                "artifact_schema": {} if unresolved == 0 else {
-                    "type": "failed_task_disposition_record",
-                    "description": "Each unresolved failed task must carry an explicit persisted disposition before promotion.",
-                    "required_fields": ["task_id", "disposition", "rationale"],
-                },
-                "evidence_contract": {} if unresolved == 0 else {
+            ReviewPacket(
+                reviewer="Intent agent",
+                dimension="intent_fidelity",
+                verdict=ReviewVerdict.PASS if unresolved == 0 else ReviewVerdict.CONCERN,
+                progress_status="not_applicable",
+                severity="" if unresolved == 0 else "medium",
+                owner_scope="" if unresolved == 0 else "failed task governance",
+                summary="Execution completed and the objective reached a resolved state. Review the linked task outcomes against the original intent before promotion.",
+                findings=[] if unresolved == 0 else ["There are unresolved failed tasks that still need explicit disposition."],
+                evidence=[f"Completed tasks: {int(counts.get('completed', 0) or 0)}", f"Unresolved failed tasks: {unresolved}"],
+                required_artifact_type="" if unresolved == 0 else "failed_task_disposition_record",
+                artifact_schema={} if unresolved == 0 else _disp_schema,
+                evidence_contract={} if unresolved == 0 else {
                     "required_artifact_type": "failed_task_disposition_record",
-                    "artifact_schema": {
-                        "type": "failed_task_disposition_record",
-                        "description": "Each unresolved failed task must carry an explicit persisted disposition before promotion.",
-                        "required_fields": ["task_id", "disposition", "rationale"],
-                    },
+                    "artifact_schema": _disp_schema,
                     "closure_criteria": "All failed tasks for the objective must be explicitly waived, superseded, or resolved so unresolved failed task count is zero.",
                     "evidence_required": "Objective summary shows zero unresolved failed tasks and records explicit failed-task dispositions.",
                 },
-                "closure_criteria": "" if unresolved == 0 else "All failed tasks for the objective must be explicitly waived, superseded, or resolved so unresolved failed task count is zero.",
-                "evidence_required": "" if unresolved == 0 else "Objective summary shows zero unresolved failed tasks and records explicit failed-task dispositions.",
-                "repeat_reason": "",
-                "llm_usage": {"shared_invocation": True, "reported": False, "missing_reason": "deterministic_review_packet"},
-                "llm_usage_reported": False,
-                "llm_usage_source": "deterministic",
-            },
-            {
-                "reviewer": "QA agent",
-                "dimension": "unit_test_coverage",
-                "verdict": "concern",
-                "progress_status": "new_concern",
-                "severity": "medium",
-                "owner_scope": "objective review evidence",
-                "summary": "Unit and integration evidence should be reviewed from the completed task reports before promotion.",
-                "findings": ["Objective-level QA packets are not yet derived from report artifacts."],
-                "evidence": [f"Historical failed tasks: {failed}", f"Waived failed tasks: {waived}"],
-                "required_artifact_type": "objective_review_packet",
-                "artifact_schema": {
-                    "type": "objective_review_packet",
-                    "description": "QA closure requires a persisted review packet that cites the exact completed-task test artifacts.",
-                    "required_fields": ["review_id", "reviewer", "dimension", "verdict", "artifacts"],
-                },
-                "evidence_contract": {
+                closure_criteria="" if unresolved == 0 else "All failed tasks for the objective must be explicitly waived, superseded, or resolved so unresolved failed task count is zero.",
+                evidence_required="" if unresolved == 0 else "Objective summary shows zero unresolved failed tasks and records explicit failed-task dispositions.",
+                llm_usage=_det_usage,
+                llm_usage_source="deterministic",
+            ).to_dict(),
+            ReviewPacket(
+                reviewer="QA agent",
+                dimension="unit_test_coverage",
+                verdict=ReviewVerdict.CONCERN,
+                progress_status="new_concern",
+                severity="medium",
+                owner_scope="objective review evidence",
+                summary="Unit and integration evidence should be reviewed from the completed task reports before promotion.",
+                findings=["Objective-level QA packets are not yet derived from report artifacts."],
+                evidence=[f"Historical failed tasks: {failed}", f"Waived failed tasks: {waived}"],
+                required_artifact_type="objective_review_packet",
+                artifact_schema=_qa_schema,
+                evidence_contract={
                     "required_artifact_type": "objective_review_packet",
-                    "artifact_schema": {
-                        "type": "objective_review_packet",
-                        "description": "QA closure requires a persisted review packet that cites the exact completed-task test artifacts.",
-                        "required_fields": ["review_id", "reviewer", "dimension", "verdict", "artifacts"],
-                    },
+                    "artifact_schema": _qa_schema,
                     "closure_criteria": "Objective review packets must cite concrete unit-test or integration-test evidence from completed task artifacts for the QA dimensions.",
                     "evidence_required": "A recorded review packet that references completed-task test artifacts and concludes QA pass or resolved concern status.",
                 },
-                "closure_criteria": "Objective review packets must cite concrete unit-test or integration-test evidence from completed task artifacts for the QA dimensions.",
-                "evidence_required": "A recorded review packet that references completed-task test artifacts and concludes QA pass or resolved concern status.",
-                "repeat_reason": "",
-                "llm_usage": {"shared_invocation": True, "reported": False, "missing_reason": "deterministic_review_packet"},
-                "llm_usage_reported": False,
-                "llm_usage_source": "deterministic",
-            },
-            {
-                "reviewer": "Structure agent",
-                "dimension": "code_structure",
-                "verdict": "concern" if waived else "pass",
-                "progress_status": "new_concern" if waived else "not_applicable",
-                "severity": "medium" if waived else "",
-                "owner_scope": "code structure" if waived else "",
-                "summary": "Historical control-plane failures were waived, so code structure should be reviewed carefully before promotion.",
-                "findings": ["Waived control-plane failures deserve a human review pass."] if waived else [],
-                "evidence": [f"Waived failed tasks: {waived}"],
-                "required_artifact_type": "" if not waived else "failed_task_disposition_record",
-                "artifact_schema": {} if not waived else {
-                    "type": "failed_task_disposition_record",
-                    "description": "Waived failed tasks must retain persisted superseding or waiver rationale.",
-                    "required_fields": ["task_id", "disposition", "rationale"],
-                },
-                "evidence_contract": {} if not waived else {
+                closure_criteria="Objective review packets must cite concrete unit-test or integration-test evidence from completed task artifacts for the QA dimensions.",
+                evidence_required="A recorded review packet that references completed-task test artifacts and concludes QA pass or resolved concern status.",
+                llm_usage=_det_usage,
+                llm_usage_source="deterministic",
+            ).to_dict(),
+            ReviewPacket(
+                reviewer="Structure agent",
+                dimension="code_structure",
+                verdict=ReviewVerdict.CONCERN if waived else ReviewVerdict.PASS,
+                progress_status="new_concern" if waived else "not_applicable",
+                severity="medium" if waived else "",
+                owner_scope="code structure" if waived else "",
+                summary="Historical control-plane failures were waived, so code structure should be reviewed carefully before promotion.",
+                findings=["Waived control-plane failures deserve a human review pass."] if waived else [],
+                evidence=[f"Waived failed tasks: {waived}"],
+                required_artifact_type="" if not waived else "failed_task_disposition_record",
+                artifact_schema={} if not waived else _waive_schema,
+                evidence_contract={} if not waived else {
                     "required_artifact_type": "failed_task_disposition_record",
-                    "artifact_schema": {
-                        "type": "failed_task_disposition_record",
-                        "description": "Waived failed tasks must retain persisted superseding or waiver rationale.",
-                        "required_fields": ["task_id", "disposition", "rationale"],
-                    },
+                    "artifact_schema": _waive_schema,
                     "closure_criteria": "Historical failed tasks must be superseded or waived with rationale so fragmented partial work is not left unresolved.",
                     "evidence_required": "Failed-task records show explicit superseding or waiver rationale for every historical failure.",
                 },
-                "closure_criteria": "Historical failed tasks must be superseded or waived with rationale so fragmented partial work is not left unresolved." if waived else "",
-                "evidence_required": "Failed-task records show explicit superseding or waiver rationale for every historical failure." if waived else "",
-                "repeat_reason": "",
-                "llm_usage": {"shared_invocation": True, "reported": False, "missing_reason": "deterministic_review_packet"},
-                "llm_usage_reported": False,
-                "llm_usage_source": "deterministic",
-            },
+                closure_criteria="Historical failed tasks must be superseded or waived with rationale so fragmented partial work is not left unresolved." if waived else "",
+                evidence_required="Failed-task records show explicit superseding or waiver rationale for every historical failure." if waived else "",
+                llm_usage=_det_usage,
+                llm_usage_source="deterministic",
+            ).to_dict(),
         ]
         return packets
 
