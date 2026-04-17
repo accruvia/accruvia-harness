@@ -547,3 +547,330 @@ def serialize_dataclass(value: Any) -> dict[str, Any]:
         elif isinstance(item, StrEnum):
             payload[key] = item.value
     return payload
+
+
+# ---------------------------------------------------------------------------
+# Typed domain classes — replace god dicts with structured data
+# ---------------------------------------------------------------------------
+
+
+class ReviewVerdict(StrEnum):
+    PASS = "pass"
+    CONCERN = "concern"
+    REMEDIATION_REQUIRED = "remediation_required"
+
+
+class ReviewSeverity(StrEnum):
+    NONE = ""
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+class ReviewProgressStatus(StrEnum):
+    NEW_CONCERN = "new_concern"
+    STILL_BLOCKING = "still_blocking"
+    IMPROVING = "improving"
+    RESOLVED = "resolved"
+    NOT_APPLICABLE = "not_applicable"
+
+
+class ReviewDimension(StrEnum):
+    INTENT_FIDELITY = "intent_fidelity"
+    UNIT_TEST_COVERAGE = "unit_test_coverage"
+    INTEGRATION_E2E_COVERAGE = "integration_e2e_coverage"
+    SECURITY = "security"
+    DEVOPS = "devops"
+    ATOMIC_FIDELITY = "atomic_fidelity"
+    CODE_STRUCTURE = "code_structure"
+
+
+class PlanComplexity(StrEnum):
+    TRIVIAL = "trivial"
+    SMALL = "small"
+    MEDIUM = "medium"
+    LARGE = "large"
+    TOO_LARGE = "too_large"
+
+
+class OrphanStrategy(StrEnum):
+    ABSORB = "absorb"
+    FOLLOW_UP = "follow_up"
+    ACCEPT = "accept"
+
+
+def _safe_enum(enum_cls, value, default=None):
+    """Parse a StrEnum value leniently — invalid/missing values return the default."""
+    if value is None or value == "":
+        return default
+    try:
+        return enum_cls(str(value).strip().lower())
+    except (ValueError, KeyError):
+        return default
+
+
+@dataclass(slots=True)
+class ArtifactSchema:
+    type: str = ""
+    description: str = ""
+    required_fields: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any] | None) -> "ArtifactSchema":
+        if not d or not isinstance(d, dict):
+            return cls()
+        return cls(
+            type=str(d.get("type") or ""),
+            description=str(d.get("description") or ""),
+            required_fields=list(d.get("required_fields") or []),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "type": self.type,
+            "description": self.description,
+            "required_fields": list(self.required_fields),
+        }
+
+
+@dataclass(slots=True)
+class EvidenceContract:
+    required_artifact_type: str = ""
+    artifact_schema: ArtifactSchema | None = None
+    closure_criteria: str = ""
+    evidence_required: str = ""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any] | None) -> "EvidenceContract":
+        if not d or not isinstance(d, dict):
+            return cls()
+        schema_raw = d.get("artifact_schema")
+        return cls(
+            required_artifact_type=str(d.get("required_artifact_type") or ""),
+            artifact_schema=ArtifactSchema.from_dict(schema_raw) if schema_raw else None,
+            closure_criteria=str(d.get("closure_criteria") or ""),
+            evidence_required=str(d.get("evidence_required") or ""),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "required_artifact_type": self.required_artifact_type,
+            "artifact_schema": self.artifact_schema.to_dict() if self.artifact_schema else None,
+            "closure_criteria": self.closure_criteria,
+            "evidence_required": self.evidence_required,
+        }
+
+
+@dataclass(slots=True)
+class ReviewPacket:
+    reviewer: str = ""
+    dimension: str = ""
+    verdict: ReviewVerdict = ReviewVerdict.CONCERN
+    progress_status: str = ""
+    severity: str = ""
+    owner_scope: str = ""
+    summary: str = ""
+    findings: list[str] = field(default_factory=list)
+    evidence: list[str] = field(default_factory=list)
+    required_artifact_type: str = ""
+    artifact_schema: dict[str, Any] = field(default_factory=dict)
+    evidence_contract: dict[str, Any] = field(default_factory=dict)
+    closure_criteria: str = ""
+    evidence_required: str = ""
+    repeat_reason: str = ""
+    llm_usage: dict[str, Any] = field(default_factory=dict)
+    llm_usage_reported: bool = False
+    llm_usage_source: str = ""
+    backend: str = ""
+    prompt_path: str = ""
+    response_path: str = ""
+    review_task_id: str = ""
+    review_run_id: str = ""
+    packet_record_id: str = ""
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any] | None) -> "ReviewPacket":
+        if not d or not isinstance(d, dict):
+            return cls()
+        verdict = _safe_enum(ReviewVerdict, d.get("verdict"), ReviewVerdict.CONCERN)
+        return cls(
+            reviewer=str(d.get("reviewer") or ""),
+            dimension=str(d.get("dimension") or ""),
+            verdict=verdict,
+            progress_status=str(d.get("progress_status") or ""),
+            severity=str(d.get("severity") or ""),
+            owner_scope=str(d.get("owner_scope") or ""),
+            summary=str(d.get("summary") or ""),
+            findings=list(d.get("findings") or []),
+            evidence=list(d.get("evidence") or []),
+            required_artifact_type=str(d.get("required_artifact_type") or ""),
+            artifact_schema=dict(d.get("artifact_schema") or {}),
+            evidence_contract=dict(d.get("evidence_contract") or {}),
+            closure_criteria=str(d.get("closure_criteria") or ""),
+            evidence_required=str(d.get("evidence_required") or ""),
+            repeat_reason=str(d.get("repeat_reason") or ""),
+            llm_usage=dict(d.get("llm_usage") or {}),
+            llm_usage_reported=bool(d.get("llm_usage_reported") or False),
+            llm_usage_source=str(d.get("llm_usage_source") or ""),
+            backend=str(d.get("backend") or ""),
+            prompt_path=str(d.get("prompt_path") or ""),
+            response_path=str(d.get("response_path") or ""),
+            review_task_id=str(d.get("review_task_id") or ""),
+            review_run_id=str(d.get("review_run_id") or ""),
+            packet_record_id=str(d.get("packet_record_id") or ""),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "reviewer": self.reviewer,
+            "dimension": self.dimension,
+            "verdict": self.verdict.value if isinstance(self.verdict, ReviewVerdict) else str(self.verdict),
+            "progress_status": self.progress_status,
+            "severity": self.severity,
+            "owner_scope": self.owner_scope,
+            "summary": self.summary,
+            "findings": list(self.findings),
+            "evidence": list(self.evidence),
+            "required_artifact_type": self.required_artifact_type,
+            "artifact_schema": dict(self.artifact_schema),
+            "evidence_contract": dict(self.evidence_contract),
+            "closure_criteria": self.closure_criteria,
+            "evidence_required": self.evidence_required,
+            "repeat_reason": self.repeat_reason,
+            "llm_usage": dict(self.llm_usage),
+            "llm_usage_reported": self.llm_usage_reported,
+            "llm_usage_source": self.llm_usage_source,
+            "backend": self.backend,
+            "prompt_path": self.prompt_path,
+            "response_path": self.response_path,
+            "review_task_id": self.review_task_id,
+            "review_run_id": self.review_run_id,
+            "packet_record_id": self.packet_record_id,
+        }
+
+
+@dataclass(slots=True)
+class PlanSlice:
+    label: str = ""
+    dependencies: list[str] = field(default_factory=list)
+    derived_from: str = ""
+    local_id: str = ""
+    target_impl: str = ""
+    target_test: str = ""
+    transformation: str = ""
+    input_samples: list[Any] = field(default_factory=list)
+    output_samples: list[Any] = field(default_factory=list)
+    resources: list[str] = field(default_factory=list)
+    supersedes: list[str] = field(default_factory=list)
+    orphan_strategy: OrphanStrategy | None = None
+    orphan_acceptance_reason: str = ""
+    risks: list[str] = field(default_factory=list)
+    estimated_complexity: PlanComplexity = PlanComplexity.MEDIUM
+    creates_new_file: bool = False
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any] | None) -> "PlanSlice":
+        if not d or not isinstance(d, dict):
+            return cls()
+        return cls(
+            label=str(d.get("label") or ""),
+            dependencies=list(d.get("dependencies") or []),
+            derived_from=str(d.get("derived_from") or ""),
+            local_id=str(d.get("local_id") or ""),
+            target_impl=str(d.get("target_impl") or ""),
+            target_test=str(d.get("target_test") or ""),
+            transformation=str(d.get("transformation") or ""),
+            input_samples=list(d.get("input_samples") or []),
+            output_samples=list(d.get("output_samples") or []),
+            resources=list(d.get("resources") or []),
+            supersedes=list(d.get("supersedes") or []),
+            orphan_strategy=_safe_enum(OrphanStrategy, d.get("orphan_strategy")),
+            orphan_acceptance_reason=str(d.get("orphan_acceptance_reason") or ""),
+            risks=list(d.get("risks") or []),
+            estimated_complexity=_safe_enum(PlanComplexity, d.get("estimated_complexity"), PlanComplexity.MEDIUM),
+            creates_new_file=bool(d.get("creates_new_file") or False),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "label": self.label,
+            "dependencies": list(self.dependencies),
+            "derived_from": self.derived_from,
+            "local_id": self.local_id,
+        }
+        if self.target_impl:
+            d["target_impl"] = self.target_impl
+        if self.target_test:
+            d["target_test"] = self.target_test
+        if self.transformation:
+            d["transformation"] = self.transformation
+        if self.input_samples:
+            d["input_samples"] = list(self.input_samples)
+        if self.output_samples:
+            d["output_samples"] = list(self.output_samples)
+        if self.resources:
+            d["resources"] = list(self.resources)
+        if self.supersedes:
+            d["supersedes"] = list(self.supersedes)
+        if self.orphan_strategy is not None:
+            d["orphan_strategy"] = self.orphan_strategy.value
+        if self.orphan_acceptance_reason:
+            d["orphan_acceptance_reason"] = self.orphan_acceptance_reason
+        if self.risks:
+            d["risks"] = list(self.risks)
+        if self.estimated_complexity != PlanComplexity.MEDIUM:
+            d["estimated_complexity"] = self.estimated_complexity.value
+        if self.creates_new_file:
+            d["creates_new_file"] = True
+        return d
+
+
+@dataclass(slots=True)
+class InterrogationReview:
+    completed: bool = False
+    summary: str = ""
+    plan_elements: list[str] = field(default_factory=list)
+    questions: list[str] = field(default_factory=list)
+    generated_by: str = "deterministic"
+    backend: str | None = None
+    prompt_path: str | None = None
+    response_path: str | None = None
+    red_team_rounds: int | None = None
+    red_team_stop_reason: str | None = None
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any] | None) -> "InterrogationReview":
+        if not d or not isinstance(d, dict):
+            return cls()
+        return cls(
+            completed=bool(d.get("completed") or False),
+            summary=str(d.get("summary") or ""),
+            plan_elements=list(d.get("plan_elements") or []),
+            questions=list(d.get("questions") or []),
+            generated_by=str(d.get("generated_by") or "deterministic"),
+            backend=d.get("backend"),
+            prompt_path=d.get("prompt_path"),
+            response_path=d.get("response_path"),
+            red_team_rounds=d.get("red_team_rounds"),
+            red_team_stop_reason=d.get("red_team_stop_reason"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "completed": self.completed,
+            "summary": self.summary,
+            "plan_elements": list(self.plan_elements),
+            "questions": list(self.questions),
+            "generated_by": self.generated_by,
+        }
+        if self.backend is not None:
+            d["backend"] = self.backend
+        if self.prompt_path is not None:
+            d["prompt_path"] = self.prompt_path
+        if self.response_path is not None:
+            d["response_path"] = self.response_path
+        if self.red_team_rounds is not None:
+            d["red_team_rounds"] = self.red_team_rounds
+        if self.red_team_stop_reason is not None:
+            d["red_team_stop_reason"] = self.red_team_stop_reason
+        return d
