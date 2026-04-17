@@ -879,3 +879,39 @@ class InterrogationReview:
         if self.red_team_stop_reason is not None:
             d["red_team_stop_reason"] = self.red_team_stop_reason
         return d
+
+
+@dataclass(slots=True)
+class ReviewRound:
+    """One round of objective review — a set of packets from a single review run."""
+
+    review_id: str
+    objective_id: str
+    packets: list[ReviewPacket] = field(default_factory=list)
+    completed_at: str = ""
+
+    @property
+    def review_clear(self) -> bool:
+        if not self.packets:
+            return False
+        return all(p.verdict == ReviewVerdict.PASS for p in self.packets)
+
+    @property
+    def needs_remediation(self) -> bool:
+        return any(
+            p.verdict in (ReviewVerdict.CONCERN, ReviewVerdict.REMEDIATION_REQUIRED)
+            for p in self.packets
+        )
+
+    def unresolved_packets(self) -> list[ReviewPacket]:
+        return [
+            p for p in self.packets
+            if p.verdict in (ReviewVerdict.CONCERN, ReviewVerdict.REMEDIATION_REQUIRED)
+        ]
+
+    def verdict_counts(self) -> dict[str, int]:
+        counts = {v.value: 0 for v in ReviewVerdict}
+        for p in self.packets:
+            key = p.verdict.value if isinstance(p.verdict, ReviewVerdict) else str(p.verdict)
+            counts[key] = counts.get(key, 0) + 1
+        return counts

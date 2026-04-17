@@ -717,82 +717,14 @@ class ObjectiveReviewMixin:
         review_id: str,
         packets: list[dict[str, object]],
     ) -> list[str]:
-        linked_tasks = [task for task in self.store.list_tasks(objective.project_id) if task.objective_id == objective.id]
-        existing_dimensions = set()
-        for task in linked_tasks:
-            metadata = task.external_ref_metadata if isinstance(task.external_ref_metadata, dict) else {}
-            remediation = metadata.get("objective_review_remediation") if isinstance(metadata.get("objective_review_remediation"), dict) else None
-            if remediation and str(remediation.get("review_id") or "") == review_id:
-                existing_dimensions.add(str(remediation.get("dimension") or ""))
-        created: list[str] = []
-        for packet in packets:
-            verdict = str(packet.get("verdict") or "").strip()
-            dimension = str(packet.get("dimension") or "").strip()
-            if verdict not in {"concern", "remediation_required"} or not dimension or dimension in existing_dimensions:
-                continue
-            findings = [str(item).strip() for item in list(packet.get("findings") or []) if str(item).strip()]
-            summary = str(packet.get("summary") or "").strip()
-            evidence_contract = self._objective_review_evidence_contract(packet)
-            artifact_type = str(evidence_contract.get("required_artifact_type") or "review_artifact")
-            title = f"Produce {artifact_type.replace('_', ' ')} for {dimension.replace('_', ' ')} review finding"
-            objective_text = self._build_objective_review_remediation_objective(
-                summary=summary,
-                findings=findings,
-                evidence_contract=evidence_contract,
-            )
-            task = self.task_service.create_task_with_policy(
-                project_id=objective.project_id,
-                objective_id=objective.id,
-                title=title,
-                objective=objective_text,
-                priority=objective.priority,
-                parent_task_id=None,
-                source_run_id=None,
-                external_ref_type="objective_review",
-                external_ref_id=f"{objective.id}:{review_id}:{dimension}",
-                external_ref_metadata={
-                    "objective_review_remediation": {
-                        "review_id": review_id,
-                        "dimension": dimension,
-                        "reviewer": str(packet.get("reviewer") or ""),
-                        "verdict": verdict,
-                        "finding_record_id": str(packet.get("packet_record_id") or ""),
-                        "evidence_contract": evidence_contract,
-                    }
-                },
-                validation_profile="generic",
-                validation_mode="default_focused",
-                scope={},
-                strategy="objective_review_remediation",
-                max_attempts=3,
-                required_artifacts=list(dict.fromkeys(["plan", "report", artifact_type])),
-            )
-            created.append(task.id)
-            existing_dimensions.add(dimension)
-        if created:
-            self.store.update_objective_phase(objective.id)
-        return created
-
+        from ..services.remediation_service import RemediationService
+        svc = RemediationService(self.store, self.task_service)
+        return svc.create_remediation_tasks(objective, review_id, packets)
 
     def _objective_review_evidence_contract(self, packet: dict[str, object]) -> dict[str, object]:
-        contract = packet.get("evidence_contract") if isinstance(packet.get("evidence_contract"), dict) else {}
-        required_artifact_type = str(
-            contract.get("required_artifact_type") or packet.get("required_artifact_type") or ""
-        ).strip()
-        artifact_schema = self._normalize_objective_review_artifact_schema(
-            contract.get("artifact_schema") if contract else packet.get("artifact_schema"),
-            required_artifact_type=required_artifact_type,
-            dimension=str(packet.get("dimension") or ""),
-        ) or {}
-        closure_criteria = str(contract.get("closure_criteria") or packet.get("closure_criteria") or "").strip()
-        evidence_required = str(contract.get("evidence_required") or packet.get("evidence_required") or "").strip()
-        return {
-            "required_artifact_type": required_artifact_type,
-            "artifact_schema": artifact_schema,
-            "closure_criteria": closure_criteria,
-            "evidence_required": evidence_required,
-        }
-
+        from ..services.remediation_service import RemediationService
+        svc = RemediationService(self.store, self.task_service)
+        return svc.extract_evidence_contract(packet)
 
     def _build_objective_review_remediation_objective(
         self,
@@ -801,29 +733,11 @@ class ObjectiveReviewMixin:
         findings: list[str],
         evidence_contract: dict[str, object],
     ) -> str:
-        artifact_type = str(evidence_contract.get("required_artifact_type") or "review_artifact")
-        artifact_schema = evidence_contract.get("artifact_schema") if isinstance(evidence_contract.get("artifact_schema"), dict) else {}
-        required_fields = [str(item).strip() for item in list(artifact_schema.get("required_fields") or []) if str(item).strip()]
-        lines = [
-            f"A promotion reviewer raised findings that must be addressed before this objective can be promoted.",
-            f"Read the findings below carefully. They describe concrete problems the reviewer found in the actual codebase.",
-            f"Your job is to FIX the problems described in the findings — write code, refactor, add tests — whatever the findings require.",
-            f"After making the fixes, produce a `{artifact_type}` artifact documenting what you changed and proving the closure criteria are met.",
-            f"Do NOT fabricate evidence. If the reviewer says a function doesn't exist, you must CREATE it, not write a report claiming it exists.",
-        ]
-        if summary:
-            lines.append(f"Reviewer summary: {summary}")
-        if findings:
-            lines.append("Findings:")
-            lines.extend(f"- {item}" for item in findings)
-        if evidence_contract.get("closure_criteria"):
-            lines.append(f"Closure criteria: {evidence_contract['closure_criteria']}")
-        if evidence_contract.get("evidence_required"):
-            lines.append(f"Evidence required: {evidence_contract['evidence_required']}")
-        if required_fields:
-            lines.append("Artifact schema fields: " + ", ".join(required_fields))
-        lines.append("Address the findings FIRST by making real code changes, THEN produce the evidence artifact showing what you did.")
-        return "\n".join(lines)
+        from ..services.remediation_service import RemediationService
+        svc = RemediationService(self.store, self.task_service)
+        return svc.build_remediation_objective(
+            summary=summary, findings=findings, evidence_contract=evidence_contract,
+        )
 
 
     def _record_objective_review_cycle_artifact(
@@ -1318,39 +1232,18 @@ class ObjectiveReviewMixin:
         required_artifact_type: str,
         dimension: str,
     ) -> dict[str, object] | None:
-        artifact_type = required_artifact_type.strip()
-        if not artifact_type:
-            return None
-        schema: dict[str, object] = {}
-        if isinstance(raw_schema, dict):
-            schema = dict(raw_schema)
-        elif isinstance(raw_schema, str) and raw_schema.strip():
-            schema = {"description": raw_schema.strip()}
-        required_fields = [str(item).strip() for item in list(schema.get("required_fields") or []) if str(item).strip()]
-        if not required_fields:
-            required_fields = self._default_review_artifact_required_fields(artifact_type)
-        description = str(schema.get("description") or "").strip()
-        if not description:
-            description = f"Persist one {artifact_type} artifact for the {dimension or 'objective review'} dimension."
-        normalized = {
-            "type": str(schema.get("type") or artifact_type).strip() or artifact_type,
-            "description": description,
-            "required_fields": required_fields,
-        }
-        if schema.get("record_locator"):
-            normalized["record_locator"] = schema.get("record_locator")
-        return normalized
+        from ..services.remediation_service import RemediationService
+        svc = RemediationService(self.store, self.task_service)
+        return svc.normalize_artifact_schema(
+            raw_schema,
+            required_artifact_type=required_artifact_type,
+            dimension=dimension,
+        )
 
 
     def _default_review_artifact_required_fields(self, artifact_type: str) -> list[str]:
-        lowered = artifact_type.lower()
-        if "review_cycle" in lowered or "telemetry" in lowered:
-            return ["review_id", "start_event", "packet_persistence_events", "terminal_event", "linked_outcome"]
-        if "review_packet" in lowered:
-            return ["review_id", "reviewer", "dimension", "verdict", "artifacts"]
-        if "test" in lowered:
-            return ["artifact_path", "test_targets", "result"]
-        return ["artifact_path", "summary"]
+        from ..services.remediation_service import RemediationService
+        return RemediationService.default_required_fields(artifact_type)
 
 
     def _deterministic_objective_review_packets(self, objective_payload: dict[str, object]) -> list[dict[str, object]]:
